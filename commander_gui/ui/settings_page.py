@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QRadioButton,
     QScrollArea,
     QSlider,
+    QSystemTrayIcon,
     QVBoxLayout,
     QWidget,
 )
@@ -680,6 +681,16 @@ class SettingsPage(QWidget):
         behaviour, box = _card(tr("Behaviour"))
         self._autostart_check = QCheckBox(tr("Start COMMANDER when I log in"))
         self._autostart_check.toggled.connect(self._on_autostart_toggled)
+        self._tray_check = QCheckBox(tr("System tray icon"))
+        self._tray_check.toggled.connect(self._on_tray_toggled)
+        self._tray_close_check = QCheckBox(tr("Hide to the tray when I close the window"))
+        self._tray_close_check.toggled.connect(
+            lambda on: gui_settings.save_gui_settings(tray_close_to_tray=on)
+        )
+        self._tray_game_check = QCheckBox(tr("Hide COMMANDER while the game runs"))
+        self._tray_game_check.toggled.connect(
+            lambda on: gui_settings.save_gui_settings(tray_hide_while_playing=on)
+        )
         self._welcome_check = QCheckBox(tr("Show the Welcome screen on startup"))
         self._welcome_check.toggled.connect(
             lambda on: gui_settings.save_gui_settings(welcome_hidden=not on)
@@ -693,6 +704,18 @@ class SettingsPage(QWidget):
             _check_row(
                 self._autostart_check,
                 tr("Start COMMANDER automatically when you log in."),
+            ),
+            _check_row(
+                self._tray_check,
+                tr("An icon near the clock to open COMMANDER, launch the game and more."),
+            ),
+            _check_row(
+                self._tray_close_check,
+                tr("Quit from the tray menu instead."),
+            ),
+            _check_row(
+                self._tray_game_check,
+                tr("It comes back when the game closes."),
             ),
             _check_row(
                 self._welcome_check,
@@ -1510,6 +1533,12 @@ class SettingsPage(QWidget):
         if key:
             gui_settings.save_gui_settings(start_page=key)
 
+    def _on_tray_toggled(self, checked: bool) -> None:
+        gui_settings.save_gui_settings(tray_icon=checked)
+        self.window.set_tray_enabled(checked)
+        self._tray_game_check.setEnabled(checked)
+        self._tray_close_check.setEnabled(checked)
+
     def _on_autostart_toggled(self, checked: bool) -> None:
         from ..autostart import disable_autostart, enable_autostart, last_error
 
@@ -1890,6 +1919,21 @@ class SettingsPage(QWidget):
             check.blockSignals(True)
             check.setChecked(key not in hidden)
             check.blockSignals(False)
+        # Stock GNOME and Game Mode have no tray to hide into.
+        has_tray = QSystemTrayIcon.isSystemTrayAvailable()
+        self._tray_check.blockSignals(True)
+        self._tray_check.setChecked(bool(state.get("tray_icon")) and has_tray)
+        self._tray_check.blockSignals(False)
+        self._tray_check.setEnabled(has_tray)
+        self._tray_check.setToolTip("" if has_tray else tr("Your desktop doesn't show tray icons."))
+        self._tray_game_check.blockSignals(True)
+        self._tray_game_check.setChecked(bool(state.get("tray_hide_while_playing")))
+        self._tray_game_check.blockSignals(False)
+        self._tray_game_check.setEnabled(self._tray_check.isChecked())
+        self._tray_close_check.blockSignals(True)
+        self._tray_close_check.setChecked(bool(state.get("tray_close_to_tray")))
+        self._tray_close_check.blockSignals(False)
+        self._tray_close_check.setEnabled(self._tray_check.isChecked())
         self._update_notify_check.blockSignals(True)
         self._update_notify_check.setChecked(bool(state.get("update_notifications", True)))
         self._update_notify_check.blockSignals(False)

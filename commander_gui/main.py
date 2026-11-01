@@ -18,11 +18,13 @@ os.environ.setdefault("QT_LOGGING_RULES", "qt.multimedia.ffmpeg*=false")
 
 from PySide6.QtCore import (
     QLockFile,
+    Qt,
     QTimer,
     QtMsgType,
     qInstallMessageHandler,
 )
 from PySide6.QtGui import QIcon
+from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import QApplication, QCheckBox
 
 from . import gui_settings
@@ -33,6 +35,7 @@ from .applog import (
     log_shutdown,
     log_startup,
 )
+from .autostart import AUTOSTART_FLAG
 from .config import (
     cli_binary_path,
     mark_secondary_instance,
@@ -135,6 +138,38 @@ def _acquire_instance_lock() -> QLockFile | None:
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     lock = QLockFile(str(lock_path))
     return lock if lock.tryLock(0) else None
+
+
+def _wake_socket() -> str:
+    return str(settings_dir() / "commander.sock")
+
+
+def _wake_running_instance() -> bool:
+    """Ask the COMMANDER already running to bring its window back.
+
+    Its window may be hidden in a tray the desktop doesn't show (stock
+    GNOME), so a second launch is the way back to it.
+    """
+    socket = QLocalSocket()
+    socket.connectToServer(_wake_socket())
+    if not socket.waitForConnected(1000):
+        return False
+    socket.disconnectFromServer()
+    return True
+
+
+def _listen_for_wake(window: MainWindow) -> None:
+    """Show ``window`` whenever a second launch knocks (see above)."""
+    QLocalServer.removeServer(_wake_socket())  # left over by a crash
+    server = QLocalServer(window)
+
+    def _wake() -> None:
+        while (connection := server.nextPendingConnection()) is not None:
+            connection.close()
+        window.show_from_tray()
+
+    server.newConnection.connect(_wake)
+    server.listen(_wake_socket())
 
 
 def release_instance_lock() -> None:
@@ -364,6 +399,8 @@ def main(argv: list[str] | None = None) -> int:
     _ensure_local_bin_on_path()
     argv = list(sys.argv if argv is None else argv)
     deck = deck_requested(argv)
+    from_autostart = AUTOSTART_FLAG in argv
+    argv = [arg for arg in argv if arg != AUTOSTART_FLAG]
     _PREVIOUS_QT_HANDLER = qInstallMessageHandler(_quiet_qt_message_handler)
     app = QApplication(strip_deck_flag(argv))
     app.setApplicationName("STALKER COMMANDER")
@@ -396,6 +433,8 @@ def main(argv: list[str] | None = None) -> int:
         # identifies this process as an extra instance rather than the first
         # one - which is what the title bar goes on to say.
         if not multiple_instances_allowed():
+            if _wake_running_instance():
+                return 0
             QMessageBox.information(
                 None, tr("COMMANDER is already open"), tr("Switch to the COMMANDER window that's already running.")
             )
@@ -438,11 +477,13 @@ def main(argv: list[str] | None = None) -> int:
 
     # If autostart was enabled but the .desktop file no longer exists (e.g.
     # the user removed it externally), sync the setting to False.
-    from .autostart import is_autostart_enabled
+    from .autostart import add_autostart_flag, is_autostart_enabled
 
     saved = _gui
     if saved.get("autostart") and not is_autostart_enabled():
         gui_settings.save_gui_settings(autostart=False)
+    elif saved.get("autostart"):
+        add_autostart_flag()
 
     if not deck:
         _cleanup_interrupted_move(saved)
@@ -477,9 +518,12 @@ def main(argv: list[str] | None = None) -> int:
         window.show_for_environment()
     else:
         window = MainWindow()
+        if _INSTANCE_LOCK is not None:
+            _listen_for_wake(window)
         if _gui.get("window_maximized") is True:
-            window.showMaximized()
-        else:
+            window.setWindowState(Qt.WindowState.WindowMaximized)
+        # At login, straight into the tray when there is one to come back from.
+        if not (from_autostart and window.start_in_tray()):
             window.show()
     # A session where the user deliberately toggles modes a few times must not
     # look like a relaunch loop to deck_launch's depth guard.

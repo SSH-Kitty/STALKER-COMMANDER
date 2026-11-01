@@ -20,6 +20,7 @@ from PySide6.QtCore import (
     Signal,
 )
 from PySide6.QtGui import (
+    QActionGroup,
     QColor,
     QFont,
     QGuiApplication,
@@ -42,6 +43,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QStackedWidget,
     QStatusBar,
+    QSystemTrayIcon,
     QTabBar,
     QVBoxLayout,
     QWidget,
@@ -71,7 +73,7 @@ from ..updates import (
     check_updates,
     effective_update_channel,
 )
-from . import reflow
+from . import graphics_window, reflow
 from .about_page import _DISCORD, AboutPage
 from .common import (
     OK_GREEN,
@@ -79,6 +81,8 @@ from .common import (
     WARN,
     BackgroundTask,
     NoWheelComboBox,
+    ProgressArea,
+    activate_profile,
     count_active_mods,
     game_running,
     human_size,
@@ -395,6 +399,7 @@ class MainWindow(QMainWindow):
         self._build_status_bar()
         self._build_ui()
         self._build_shortcuts()
+        self._build_tray()
         self.apply_title_bar(bool(gui_state.get("custom_title_bar", True)))
         # Mouse-wheel scrolling glides instead of jumping, in every page,
         # list and text box of this window.
@@ -1552,6 +1557,11 @@ class MainWindow(QMainWindow):
         page = self._create_page(key)
         self._pages[key] = page
         self.stack.addWidget(page)
+        if key == "play":
+            page.game_running_changed.connect(self._on_game_running_changed)
+            # MO2 closing with the game can end the session before the game
+            # is seen gone.
+            page.launch_state_changed.connect(lambda launching: launching or self._on_game_running_changed(False))
         reflow.watch(page)  # rows stack when the window gets narrow
         # A page built after an install/task already started must reflect
         # that immediately - set_install_busy() only notifies pages that
@@ -1925,7 +1935,9 @@ class MainWindow(QMainWindow):
         Shown only when COMMANDER draws its own title bar (frameless window);
         otherwise the desktop's title bar provides these.
         """
-        self._title_strip = build_window_buttons(self, self._drag_filter)
+        self._title_strip = build_window_buttons(
+            self, self._drag_filter, on_close=lambda: self._close_to_tray() or self.close()
+        )
         return self._title_strip
 
     def apply_title_bar(self, custom: bool) -> None:
@@ -1979,8 +1991,188 @@ class MainWindow(QMainWindow):
         if page is not None and hasattr(page, "_flush_note"):
             page._flush_note()
 
+    def _build_tray(self) -> None:
+        """The tray icon - shown while Settings > System tray icon is on.
+        Built once, like the shortcuts: the menu is refilled each time it
+        opens, so it follows the language, profiles and game."""
+        self._tray = QSystemTrayIcon(QApplication.windowIcon(), self)
+        menu = QMenu(self)
+        menu.aboutToShow.connect(self._fill_tray_menu)
+        self._tray.setContextMenu(menu)
+        self._tray.activated.connect(self._on_tray_activated)
+        self._hidden_for_game = False
+        self._tray_profile_task = None
+        self._fill_tray_menu()
+        # Hover text only, no pop-ups: refreshed while the icon is up.
+        self._tray_tooltip_timer = QTimer(self)
+        self._tray_tooltip_timer.setInterval(2000)
+        self._tray_tooltip_timer.timeout.connect(self._refresh_tray_tooltip)
+        self.set_tray_enabled(bool(gui_settings.load_gui_settings().get("tray_icon")))
+
+    def set_tray_enabled(self, enabled: bool) -> None:
+        self._tray.setVisible(enabled)
+        if enabled:
+            self._refresh_tray_tooltip()
+            self._tray_tooltip_timer.start()
+        else:
+            self._tray_tooltip_timer.stop()
+            if self.isHidden():
+                self.show_from_tray()
+
+    def _tray_usable(self) -> bool:
+        # Stock GNOME and Game Mode show no tray: a window hidden there
+        # would have nothing left to click.
+        return self._tray.isVisible() and QSystemTrayIcon.isSystemTrayAvailable()
+
+    def _fill_tray_menu(self) -> None:
+        menu = self._tray.contextMenu()
+        menu.clear()
+        # Clicking the icon shows and hides it; this is for desktops where a
+        # click opens the menu instead (GNOME's AppIndicator extension).
+        if self.isHidden() or self.isMinimized():
+            menu.addAction(tr("Show COMMANDER"), self.show_from_tray)
+        play = self._pages.get("play")
+        if play is not None and play.is_launching:
+            menu.addAction(tr("Quit game"), play._confirm_quit_game)
+            # The in-game panel: it toggles, and closes with the game (stop_key).
+            menu.addAction(tr("Graphics"), graphics_window.toggle)
+        else:
+            menu.addAction(tr("Launch Game"), self._launch_from_tray).setEnabled(not self.install_busy)
+        profiles = menu.addMenu(tr("Profile"))
+        # Same guards as the Dashboard's switcher, minus its "game still
+        # running" question: no switching mid-game from here at all.
+        profiles.setEnabled(
+            self._tray_profile_task is None
+            and not self.install_busy
+            and not (play is not None and play.is_launching)
+            and not game_running()
+        )
+        # Read fresh: Deck Mode or the CLI may have added one meanwhile.
+        settings = load_settings()
+        active = settings.active_profile
+        group = QActionGroup(profiles)  # one tick, even when the active one is clicked
+        for profile in settings.profiles:
+            action = group.addAction(profile.profile_name)
+            action.setCheckable(True)
+            action.setChecked(active is not None and profile.profile_name == active.profile_name)
+            action.triggered.connect(lambda _checked=False, name=profile.profile_name: self._switch_profile_from_tray(name))
+            profiles.addAction(action)
+        menu.addAction(tr("Settings"), self._settings_from_tray)
+        menu.addSeparator()
+        menu.addAction(tr("Quit COMMANDER"), self._quit_from_tray)
+
+    def _refresh_tray_tooltip(self) -> None:
+        lines = ["STALKER COMMANDER"]
+        play = self._pages.get("play")
+        if self.install_busy:
+            # ponytail: first running ProgressArea found; tasks without one show no percent
+            bars = [area.bar for area in self.findChildren(ProgressArea) if area._runner is not None]
+            if bars and bars[0].maximum() > 1:
+                lines.append(tr("Task running, {percent}% done", percent=bars[0].value() * 100 // bars[0].maximum()))
+            else:
+                lines.append(tr("Task running"))
+        elif play is not None and play.is_launching:
+            lines.append(tr("Game is running"))
+        if self._commander_update_tag:
+            lines.append(tr("COMMANDER update available"))
+        text = "\n".join(lines)
+        if self._tray.toolTip() != text:
+            self._tray.setToolTip(text)
+
+    def _on_tray_activated(self, reason) -> None:
+        if reason != QSystemTrayIcon.ActivationReason.Trigger:
+            return
+        if self.isVisible() and not self.isMinimized() and self.isActiveWindow():
+            self._hide_to_tray()
+        else:
+            self.show_from_tray()
+
+    def _hide_to_tray(self, *, hint: bool = True) -> bool:
+        """Hide into the tray icon; False (and nothing hidden) without one."""
+        if not self._tray_usable():
+            return False
+        self._flush_pending_edits()
+        # Hidden at logout, COMMANDER is killed rather than closed.
+        self._save_geometry()
+        # Closing another window (a dialog) while this one is hidden must
+        # not count as closing the last one and quit COMMANDER.
+        QApplication.setQuitOnLastWindowClosed(False)
+        self.hide()
+        if hint and not gui_settings.load_gui_settings().get("tray_hint_shown"):
+            gui_settings.save_gui_settings(tray_hint_shown=True)
+            notify_desktop(tr("COMMANDER is still running"), tr("Click its tray icon to open it again."))
+        return True
+
+    def _close_to_tray(self) -> bool:
+        """The close button hides instead of quitting - only when chosen."""
+        return bool(gui_settings.load_gui_settings().get("tray_close_to_tray")) and self._hide_to_tray()
+
+    def start_in_tray(self) -> bool:
+        """At login: stay in the tray, never shown; False without a tray."""
+        if not self._tray_usable():
+            return False
+        QApplication.setQuitOnLastWindowClosed(False)
+        return True
+
+    def show_from_tray(self) -> None:
+        """Bring the window back - from the tray, or from a second launch."""
+        self._hidden_for_game = False
+        QApplication.setQuitOnLastWindowClosed(True)
+        self.setWindowState(self.windowState() & ~Qt.WindowState.WindowMinimized)
+        self.show()
+        self.raise_()
+        self.activateWindow()
+
+    def _on_game_running_changed(self, running: bool) -> None:
+        """Out of the way while playing, back once the game closes."""
+        if running:
+            if (
+                self.isVisible()
+                and gui_settings.load_gui_settings().get("tray_hide_while_playing")
+                and self._hide_to_tray(hint=False)  # no pop-up over the game; it comes back
+            ):
+                self._hidden_for_game = True
+        elif self._hidden_for_game:
+            self.show_from_tray()
+
+    def _launch_from_tray(self) -> None:
+        # Through the Dashboard, so its Play button follows the launch too.
+        self._ensure_page("dashboard")._play_gamma()
+
+    def _switch_profile_from_tray(self, name: str) -> None:
+        self.refresh_settings()
+        active = self.settings.active_profile
+        if self._tray_profile_task is not None or (active is not None and active.profile_name == name):
+            return
+
+        def _done(success: bool) -> None:
+            self._tray_profile_task = None
+            if not success:
+                return
+            # The Play page too, visible or not: Launch Game in this menu
+            # uses its target list, which belongs to the old profile.
+            for page in {self.stack.currentWidget(), self._pages.get("play")}:
+                if page is not None and hasattr(page, "refresh"):
+                    page.refresh()
+
+        self._tray_profile_task = activate_profile(self, self, name, on_done=_done)
+
+    def _settings_from_tray(self) -> None:
+        self.show_from_tray()
+        self.open_settings()
+
+    def _quit_from_tray(self) -> None:
+        # Shown first: closeEvent may ask about a running install.
+        self.show_from_tray()
+        self.close()
+
     def closeEvent(self, event) -> None:
         self._flush_pending_edits()
+        # Only the window manager's close button: a close() from code (a
+        # restart, Deck Mode switch, Quit) still quits.
+        if event.spontaneous() and self._close_to_tray():
+            event.ignore()
+            return
         if self.install_busy:
             answer = QMessageBox.question(
                 self,
@@ -1993,12 +2185,15 @@ class MainWindow(QMainWindow):
             if answer != QMessageBox.StandardButton.Yes:
                 event.ignore()
                 return
+        self._save_geometry()
+        event.accept()
+
+    def _save_geometry(self) -> None:
         gui_settings.save_gui_settings(
             window_width=self.normalGeometry().width(),
             window_height=self.normalGeometry().height(),
             window_maximized=self.isMaximized(),
         )
-        event.accept()
 
     def update_mod_counter(self) -> None:
         """Refresh the topbar's always-visible active/total mod count.

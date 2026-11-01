@@ -21,6 +21,8 @@ import sys
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
+from .autostart import AUTOSTART_FLAG
+
 #: The command-line flag that selects Deck Mode. Forwarded by run.sh,
 #: packaging/stalker-gamma-commander.sh and the AppImage's AppRun, all of
 #: which end in ``-m commander_gui "$@"``.
@@ -87,7 +89,8 @@ def relaunch_argv(
     if not base:
         # Embedded interpreters may expose no orig_argv at all.
         base = [sys.executable, "-m", "commander_gui"]
-    argv = [executable or sys.executable, *(a for a in base[1:] if a != DECK_FLAG)]
+    # A relaunch is no login: the window shows, not just the tray icon.
+    argv = [executable or sys.executable, *(a for a in base[1:] if a not in (DECK_FLAG, AUTOSTART_FLAG))]
     if deck:
         argv.append(DECK_FLAG)
     return argv

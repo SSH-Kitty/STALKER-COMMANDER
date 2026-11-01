@@ -389,6 +389,8 @@ class PlayPage(QWidget):
     _no_mo2_session = False
     #: The live launch status line or the playtime changed (Multiplayer mirrors both).
     launch_status_changed = Signal()
+    #: The game's own process appeared (True) or exited (False); MO2 may stay.
+    game_running_changed = Signal(bool)
 
     def __init__(self, window) -> None:
         super().__init__()
@@ -2145,6 +2147,7 @@ class PlayPage(QWidget):
                             "play: game process detected exe=%s pids=%s",
                             self._game_exe_name, new_game_pids,
                         )
+                        self.game_running_changed.emit(True)
                     elif not new_game_pids and self._game_seen:
                         applog.get_logger().info(
                             "play: game process gone exe=%s after %.0fs, recording playtime",
@@ -2153,6 +2156,7 @@ class PlayPage(QWidget):
                         )
                         self._record_playtime()
                         self._game_exe_name = None
+                        self.game_running_changed.emit(False)
                         # MO2 usually stays open after the game exits, so
                         # look for a crash dump now, not only once MO2 goes.
                         self._check_for_crash()

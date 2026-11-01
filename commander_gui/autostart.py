@@ -16,6 +16,8 @@ from pathlib import Path
 from .atomic import write_text
 
 _DESKTOP_NAME = "stalker-gamma-commander.desktop"
+#: On the autostart entry's command line: COMMANDER may start in the tray.
+AUTOSTART_FLAG = "--autostart"
 
 
 def _autostart_dir() -> Path:
@@ -116,7 +118,7 @@ def enable_autostart() -> bool:
         return False
     path = autostart_desktop_path()
     try:
-        exec_line = _desktop_exec(cmd)
+        exec_line = _desktop_exec([*cmd, AUTOSTART_FLAG])
     except ValueError as exc:
         _LAST_ERROR = str(exc)
         return False
@@ -144,6 +146,28 @@ def enable_autostart() -> bool:
     except OSError as exc:
         _LAST_ERROR = f"Could not write {path}: {exc}"
         return False
+
+
+def add_autostart_flag() -> None:
+    """Give an entry written before AUTOSTART_FLAG existed the flag.
+
+    Edited in place rather than rewritten: this COMMANDER may run from
+    somewhere else (a source checkout) than the one the entry starts.
+    """
+    path = autostart_desktop_path()
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        if line.startswith("Exec=") and AUTOSTART_FLAG not in line:
+            lines[i] = f"{line} {AUTOSTART_FLAG}"
+            try:
+                write_text(path, "\n".join(lines) + "\n")
+            except OSError:
+                pass
+            return
 
 
 def disable_autostart() -> bool:

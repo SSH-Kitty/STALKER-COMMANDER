@@ -48,6 +48,10 @@ _DEFAULTS = {
     "font_family": "Exo 2",  # UI font family; applied via QSS font-family
     "always_gamemoderun": False,  # wrap every launch command in gamemoderun
     "autostart": False,  # add to XDG autostart so the app starts at login
+    "tray_icon": True,  # tray icon (desktop only)
+    "tray_close_to_tray": True,  # the window's close button hides COMMANDER to the tray instead of quitting
+    "tray_hide_while_playing": True,  # hide to the tray while the game runs, back when it closes
+    "tray_hint_shown": False,  # the one-time "still running in the tray" notification was sent
     "custom_launch_options": "",  # extra tokens prepended to the launch command
     "lossless_dll": "",  # Lossless Scaling DLL picked by hand for frame generation
     "mo2_display_dpi": 120,  # Wine display DPI for Mod Organizer 2 (125%)
@@ -248,6 +252,9 @@ def load_gui_settings() -> dict:
         data["discord_client_id"] = ""
     if not isinstance(data.get("update_notifications"), bool):
         data["update_notifications"] = True
+    for key in ("tray_icon", "tray_close_to_tray", "tray_hide_while_playing"):
+        if not isinstance(data.get(key), bool):
+            data[key] = True
     if not isinstance(data.get("developer_mode"), bool):
         data["developer_mode"] = False
     if not isinstance(data.get("developer_features"), dict):
@@ -274,6 +281,7 @@ def load_gui_settings() -> dict:
     for key in (
         "always_gamemoderun",
         "autostart",
+        "tray_hint_shown",
         "discord_rpc_enabled",
         "discord_show_mods",
         "discord_show_playtime",
