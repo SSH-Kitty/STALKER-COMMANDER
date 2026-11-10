@@ -8,6 +8,7 @@ category) are done directly on the file with automatic backups.
 from __future__ import annotations
 
 import shutil
+import time
 import uuid
 import zipfile
 from datetime import datetime, timezone
@@ -22,7 +23,7 @@ from PySide6.QtCore import (
     QVariantAnimation,
     Signal,
 )
-from PySide6.QtGui import QColor, QDesktopServices
+from PySide6.QtGui import QColor, QCursor, QDesktopServices
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -48,18 +49,10 @@ from PySide6.QtWidgets import (
 
 from .. import gui_settings, modded_exes
 from ..cli_runner import run_sync
-from ..config import logs_dir
 from ..coop import looks_like_xrrazom
 from ..fomod import apply_options, find_installer
 from ..integrity import _md5_file, invalidate_baseline
-from ..launcher import (
-    LaunchError,
-    build_command,
-    ensure_runner_prefix,
-    launch_detached,
-    qt_ini_text,
-    select_mo2_profile,
-)
+from ..launcher import qt_ini_text, select_mo2_profile
 from ..mod_install import (
     ModInstallError,
     _list_archive_paths,
@@ -189,6 +182,10 @@ class DragTree(QTreeWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        #: Set by the page while edits are locked (MO2 open, an install
+        #: running): nothing can be dragged, but the list still scrolls and
+        #: takes right-clicks - disabling the widget stopped those too.
+        self.read_only = False
         self._drag_source_name: str | None = None
         #: Set instead of _drag_source_name when dragging a whole
         #: category header (with all its member mods) rather than a
@@ -236,21 +233,21 @@ class DragTree(QTreeWidget):
         return None
 
     def _auto_scroll(self) -> None:
-        """Scroll the parent QScrollArea while a drag is in progress."""
-        if self._scroll_direction == 0:
-            self._scroll_timer.stop()
-            return
+        """Scroll during a drag: the list itself, then the page once the
+        list is at its end."""
+        direction = self._scroll_direction
         area = self._find_scroll_area()
-        if area is None:
-            self._scroll_timer.stop()
-            return
-        sb = area.verticalScrollBar()
-        new_val = sb.value() + self._scroll_direction * self._SCROLL_STEP
-        sb.setValue(new_val)
-        if (self._scroll_direction < 0 and new_val <= sb.minimum()) or (
-            self._scroll_direction > 0 and new_val >= sb.maximum()
-        ):
-            self._scroll_timer.stop()
+        bars = [self.verticalScrollBar()]
+        if area is not None:
+            bars.append(area.verticalScrollBar())
+        for sb in bars:
+            room = sb.value() - sb.minimum() if direction < 0 else sb.maximum() - sb.value()
+            if direction and room > 0:
+                sb.setValue(sb.value() + direction * self._SCROLL_STEP)
+                # The rows moved under a still cursor: re-aim the drop line.
+                self._update_drop_indicator(self.viewport().mapFromGlobal(QCursor.pos()))
+                return
+        self._scroll_timer.stop()
 
     def startDrag(self, _actions) -> None:
         """No-op: drag is handled manually via mouse events."""
@@ -360,7 +357,7 @@ class DragTree(QTreeWidget):
         super().mousePressEvent(event)
         self._drag_source_name = None
         self._drag_source_category = None
-        if event.button() == Qt.MouseButton.LeftButton:
+        if event.button() == Qt.MouseButton.LeftButton and not self.read_only:
             item = self.itemAt(event.position().toPoint())
             if item is not None:
                 if item.parent() is not None:
@@ -1133,8 +1130,14 @@ class ModManagerPage(QWidget):
             self._mo2_watch.stop()
             return
         if mo2_running():
+            if self.guard_label.isHidden():
+                self._update_guard()  # opened from here a moment ago: lock now
             return
+        if time.monotonic() < getattr(self, "_mo2_due", 0.0):
+            return  # launched from here, not up yet
         self._mo2_watch.stop()
+        if self.guard_label.isHidden():
+            return  # it never came up: nothing was locked
         # MO2 rewrites modlist.txt as it exits: reload, which also unlocks
         # the page through _update_guard().
         self._load_mods()
@@ -1151,21 +1154,21 @@ class ModManagerPage(QWidget):
 
     def _update_guard(self) -> None:
         running = self._mo2_running()
-        blocked = (
-            running
-            or self._install_active
-            or self.window.install_busy
-            or self._load_failed
-        )
+        locked = running or self._install_active or self.window.install_busy
+        blocked = locked or self._load_failed
         self.guard_label.setVisible(running)
         watch = getattr(self, "_mo2_watch", None)
         if watch is not None:
-            if running and self.isVisible():
+            # Also kept going just after Open MO2, until MO2 shows up.
+            starting = time.monotonic() < getattr(self, "_mo2_due", 0.0)
+            if (running or starting) and self.isVisible():
                 watch.start()
             elif not running:
                 watch.stop()
+        # Read-only, not disabled: a disabled list can't be scrolled or
+        # right-clicked, and browsing it while the game runs is harmless.
+        self.tree.read_only = blocked
         for widget in (
-            self.tree,
             self.profile_combo,
             self.restore_button,
             self.restore_original_button,
@@ -1175,6 +1178,10 @@ class ModManagerPage(QWidget):
             self.set_selected_button,
         ):
             widget.setEnabled(not blocked)
+        # A list that failed to load locks editing, but not the two ways out
+        # of it: picking another profile, and restoring a backup.
+        self.profile_combo.setEnabled(not locked)
+        self.restore_button.setEnabled(not locked)
         if self._install_active:
             self.install_button.setEnabled(False)
             self.profile_combo.setEnabled(False)
@@ -1361,6 +1368,7 @@ class ModManagerPage(QWidget):
                 and shown == getattr(self, "_shown", None)
                 and self.tree.topLevelItemCount()
             ):
+                self._select_pending_mod()
                 self._update_count()
                 self._update_guard()
                 return
@@ -1688,15 +1696,18 @@ class ModManagerPage(QWidget):
     def _on_item_changed(self, item: QTreeWidgetItem, _column: int) -> None:
         if self._populating or item.parent() is None:
             return
-        if self.window.install_busy:
-            self._update_guard()
-            return
         line_index = item.data(0, Qt.ItemDataRole.UserRole)
         if line_index is None or line_index >= len(self._lines):
             return
         enabled = item.checkState(0) == Qt.CheckState.Checked
+        locked = self.tree.read_only or self.window.install_busy
+        if locked:
+            self.window.statusBar().showMessage(
+                tr("An install is running, or Mod Organizer is open. Wait until it's done, then try again."),
+                5000,
+            )
         new_lines = set_status_at(self._lines, line_index, enabled)
-        if self._write_lines(new_lines, snapshot=False):
+        if not locked and self._write_lines(new_lines, snapshot=False):
             self._populating = True
             item.setForeground(
                 0,
@@ -2696,11 +2707,13 @@ class ModManagerPage(QWidget):
         indexes = self._selected_mod_indexes()
         if not indexes:
             return
+        names = self._selected_mod_names()
         new_lines = list(self._lines)
         for idx in indexes:
             new_lines = set_status_at(new_lines, idx, enabled)
         if self._write_lines(new_lines, snapshot=False):
             self._load_mods()
+            self._select_mod_names(names)
 
     def _delete_selected_mods(self) -> None:
         if self.window.install_busy:
@@ -2734,6 +2747,11 @@ class ModManagerPage(QWidget):
         deleting_files = delete_files.isChecked()
         if not deleting_files:
             self._commit_mod_deletion(indexes)
+            return
+        # Asked again: MO2 may have been opened while the question was up,
+        # and the folders would go while the mod list can't be saved.
+        if self.window.install_busy or self._mo2_running():
+            self._update_guard()
             return
         try:
             profile = self._active_profile()
@@ -2877,7 +2895,7 @@ class ModManagerPage(QWidget):
                 continue
             action = category_menu.addAction(cat)
             category_actions[action] = cat
-        if not category_actions:
+        if not category_actions or blocked:
             category_menu.setEnabled(False)
 
         folder_action = menu.addAction(tr("Open Mod Folder"))
@@ -3012,18 +3030,18 @@ class ModManagerPage(QWidget):
         if chosen == rename_action:
             self._rename_category(category)
         elif chosen == move_up_action:
-            self._move_category(category, -1)
-        elif chosen == move_down_action:
             self._move_category(category, 1)
+        elif chosen == move_down_action:
+            self._move_category(category, -1)
         elif delete_action is not None and chosen == delete_action:
             self._delete_category(category)
 
     def _move_category(self, category: str, delta: int) -> None:
         """Move a category, with all its members, past its neighbor -
 
-        delta -1 is "Move Up" (earlier on screen = later in file = lower
-        MO2 priority, matching the file's own top-to-bottom = highest-to-
-        lowest priority convention), +1 is "Move Down".
+        delta counts in file order, and the list shows the file bottom-up
+        (see _populate_tree()): +1 is "Move Up" on screen, -1 "Move Down" -
+        the same way round as _move_selected().
         """
         if self.window.install_busy or self._mo2_running():
             self._update_guard()
@@ -3112,6 +3130,7 @@ class ModManagerPage(QWidget):
             return
         if new_lines == self._lines:
             return
+        old_lines = self._lines  # _write_lines() replaces self._lines
         if self._write_lines(new_lines):
             # rename_category() may itself further clean new_name (e.g.
             # stripping a redundant "_separator" suffix the user typed) -
@@ -3120,7 +3139,7 @@ class ModManagerPage(QWidget):
             final_name = next(
                 (
                     separator_name(_info[1])
-                    for old_line, new_line in zip(self._lines, new_lines, strict=True)
+                    for old_line, new_line in zip(old_lines, new_lines, strict=True)
                     if old_line != new_line
                     and (_info := _line_info(new_line)) is not None
                     and separator_name(_info[1]) is not None
@@ -3226,6 +3245,24 @@ class ModManagerPage(QWidget):
         if key is None:
             return
         self._save_tracked_categories(tracked, key, [n for n in names if n != name])
+
+    def _retrack_mo2_profile(self, old_name: str, new_name: str | None) -> None:
+        """Carry a renamed MO2 profile's tracked categories over to its new
+        name; drop a deleted one's (``new_name`` None), or a later profile
+        of the same name would get them added to its mod list."""
+        profile = self.window.settings.active_profile
+        if profile is None:
+            return
+        tracked = dict(gui_settings.load_gui_settings().get("user_created_categories", {}))
+        names = tracked.pop(f"{profile.profile_name}/{old_name}", None)
+        if new_name is None and old_name == profile.mo2_profile:
+            # The older, profile-only key (see _tracked_categories_key()).
+            names = tracked.pop(profile.profile_name, None) or names
+        if names is None:
+            return
+        if new_name is not None:
+            tracked[f"{profile.profile_name}/{new_name}"] = names
+        gui_settings.save_gui_settings(user_created_categories=tracked)
 
     def _move_selected_to_category(self, category: str) -> None:
         if self.window.install_busy or self._mo2_running():
@@ -3405,10 +3442,10 @@ class ModManagerPage(QWidget):
             )
             return
 
-        gamma = self._active_profile().gamma
-        new_modlist = Path(gamma) / "profiles" / name / "modlist.txt"
         source_choice = source_combo.currentText()
         try:
+            gamma = self._active_profile().gamma
+            new_modlist = Path(gamma) / "profiles" / name / "modlist.txt"
             copied = (
                 source_choice != empty_label
                 and seed_new_mo2_profile(gamma, name, source_profile=source_choice)
@@ -3421,7 +3458,7 @@ class ModManagerPage(QWidget):
                 # the new profile still shows up and Mod Manager has
                 # something to render.
                 save_lines(new_modlist, [])
-        except OSError as exc:
+        except (OSError, RuntimeError) as exc:
             QMessageBox.warning(self, tr("Couldn't create the MO2 profile"), str(exc))
             return
 
@@ -3463,13 +3500,14 @@ class ModManagerPage(QWidget):
             )
             return
 
-        gamma = self._active_profile().gamma
-        profiles_root = Path(gamma) / "profiles"
         try:
+            gamma = self._active_profile().gamma
+            profiles_root = Path(gamma) / "profiles"
             (profiles_root / old_name).rename(profiles_root / new_name)
-        except OSError as exc:
+        except (OSError, RuntimeError) as exc:
             QMessageBox.warning(self, tr("Couldn't rename the MO2 profile"), str(exc))
             return
+        self._retrack_mo2_profile(old_name, new_name)
 
         def finish_rename() -> None:
             # Any app-level CliProfile pointing at this MO2 profile (by
@@ -3553,6 +3591,7 @@ class ModManagerPage(QWidget):
                 self, tr("Couldn't delete the MO2 profile"), out.strip() or tr("The profile couldn't be deleted. Try again, or delete it in Mod Organizer.")
             )
             return
+        self._retrack_mo2_profile(name, None)
         self._load_profiles(self._profiles_generation)
 
     def _on_delete_profile_error(self, msg: str) -> None:
@@ -3751,23 +3790,28 @@ class ModManagerPage(QWidget):
         )
 
     def _open_mo2(self) -> None:
-        from .play_page import ptrace_blocks_mo2  # deferred: play_page is heavy
-
-        if ptrace_blocks_mo2(self):
-            return
-        mo2_profile = self.profile_combo.currentText()
-        try:
-            profile = self._active_profile()
-            # The prefix saved for the current runner - not the legacy
-            # wine_prefix key, which goes stale when the runner changes.
-            runner = gui_settings.configured_runner()
-            command, env, cwd = build_command(
-                profile.gamma, runner, profile=mo2_profile or None
+        # Play's launch: launch options (umu variables), runner choice and
+        # session tracking. The old separate launch skipped all three.
+        play = self.window._ensure_page("play")
+        # Play ignores the click while its own session runs; say why here,
+        # or the button looks dead (a windowless MO2 left after the game).
+        if play._launching:
+            QMessageBox.information(
+                self,
+                tr("Mod Organizer 2 is running"),
+                tr("Mod Organizer 2 or the game is still open. Close both, then try again."),
             )
-            ensure_runner_prefix(runner)
-            launch_detached(command, env, cwd, log_path=logs_dir() / "launcher.log")
-        except (LaunchError, RuntimeError) as exc:
-            QMessageBox.warning(self, tr("Mod Organizer couldn't start"), str(exc))
+            return
+        if play._install_busy:
+            QMessageBox.information(self, tr("Please wait"), tr("An install is already running."))
+            return
+        play._open_mo2(self.profile_combo.currentText() or None)
+        # Wine takes a while to bring MO2 up: look for it for a minute and a
+        # half, so the page locks by itself (see _check_mo2_closed()).
+        self._mo2_due = time.monotonic() + 90
+        watch = getattr(self, "_mo2_watch", None)  # some tests build a bare page
+        if watch is not None:
+            watch.start()
 
     def _restore_backup(self) -> None:
         if self.window.install_busy or self._mo2_running():
@@ -3802,10 +3846,11 @@ class ModManagerPage(QWidget):
                 raise ValueError("The selected backup cannot be a symlink.")
             if bak.resolve() == path.resolve():
                 raise ValueError("The selected file is the current modlist.")
+            entries(read_lines(bak))  # raises on a file that isn't a mod list
         except (OSError, ValueError) as exc:
             QMessageBox.warning(self, tr("This backup can't be used"), str(exc))
             return
-        self._restore_backup_file(path, bak, "Restore Backup")
+        self._restore_backup_file(path, bak, tr("Restore Backup"))
 
     def _restore_original_order(self) -> None:
         """Place the GAMMA mods back into their original default load order.

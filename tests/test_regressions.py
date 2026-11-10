@@ -3595,6 +3595,25 @@ class RegressionTests(unittest.TestCase):
         page._launch_direct()
 
         page._run.assert_not_called()
+
+    def test_mod_manager_open_mo2_goes_through_play_launch(self):
+        # Its own launch skipped the launch options (UMU_RUNTIME_UPDATE=0
+        # etc.) and the Play page never saw the MO2 it started.
+        from commander_gui.ui.mod_manager_page import ModManagerPage
+
+        page = ModManagerPage.__new__(ModManagerPage)
+        play = Mock()
+        page.window = Mock()
+        play._launching = False
+        play._install_busy = False
+        page.window._ensure_page.return_value = play
+        page.profile_combo = Mock()
+        page.profile_combo.currentText.return_value = "My Profile"
+
+        page._open_mo2()
+
+        page.window._ensure_page.assert_called_once_with("play")
+        play._open_mo2.assert_called_once_with("My Profile")
     def _make_play_page_stub(self):
         from commander_gui.ui.play_page import PlayPage
 

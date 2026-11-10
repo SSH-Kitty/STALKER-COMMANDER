@@ -1699,7 +1699,6 @@ TRANSLATIONS: dict[str, str] = {
     'Mod Organizer 2 or the game is still open. Close both, then try again.': 'Mod Organizer 2 ou le jeu est encore ouvert. Fermez les deux, puis réessayez.',
     "Mod Organizer can't start": 'Mod Organizer ne peut pas démarrer',
     "Mod Organizer couldn't be set up for this launch:\n{exc}": "Mod Organizer n'a pas pu être préparé pour ce lancement :\n{exc}",
-    "Mod Organizer couldn't start": "Mod Organizer n'a pas pu démarrer",
     "Mod Organizer didn't accept the change. Try again, or pick the profile in Mod Organizer itself.": "Mod Organizer n'a pas accepté le changement. Réessayez, ou choisissez le profil directement dans Mod Organizer.",
     'Mod Organizer is open and would undo this change when it closes. Close it, then try again.': 'Mod Organizer est ouvert et annulerait ce changement en se fermant. Fermez-le, puis réessayez.',
     'Mod Organizer is open. Close it, then create the backup.': 'Mod Organizer est ouvert. Fermez-le, puis créez la sauvegarde.',

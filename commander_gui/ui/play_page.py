@@ -835,7 +835,10 @@ class PlayPage(QWidget):
         except LaunchError:
             return self.runner_combo.currentText()
 
-    def _resolve_command(self, *, open_mo2: bool, direct: bool, runner=None, coop_launch: bool | None = None):
+    def _resolve_command(
+        self, *, open_mo2: bool, direct: bool, runner=None, coop_launch: bool | None = None,
+        mo2_profile: str | None = None,
+    ):
         profile = self.window.settings.active_profile
         if profile is None:
             raise LaunchError("No active profile. Configure a profile first.")
@@ -855,7 +858,7 @@ class PlayPage(QWidget):
                 profile.gamma,
                 runner,
                 target=target,
-                profile=self._active_profile_name(),
+                profile=mo2_profile or self._active_profile_name(),
                 arguments=None if open_mo2 else self._splash_arguments(coop_launch),
             )
         options = self.custom_options_edit.text()
@@ -1502,11 +1505,13 @@ class PlayPage(QWidget):
         except (LaunchError, OSError) as exc:
             QMessageBox.warning(self, tr("The Anomaly Launcher couldn't start"), str(exc))
 
-    def _open_mo2(self) -> None:
+    def _open_mo2(self, mo2_profile: str | None = None) -> None:
+        """Also the Mod Manager's Open MO2 (with its picked profile), so that
+        launch gets the launch options and shows on this page as well."""
         if self._launching or self._install_busy or ptrace_blocks_mo2(self):
             return
         self._set_launch_button_state(True)
-        self._run(open_mo2=True, direct=False)
+        self._run(open_mo2=True, direct=False, mo2_profile=mo2_profile)
 
     def _launch_direct(self, *, coop_launch: bool | None = None) -> None:
         if self._launching or self._install_busy:
@@ -1563,7 +1568,10 @@ class PlayPage(QWidget):
         self._coop_switch_task = task
         task.start()
 
-    def _run(self, *, open_mo2: bool, direct: bool, runner=None, coop_launch: bool | None = None) -> None:
+    def _run(
+        self, *, open_mo2: bool, direct: bool, runner=None, coop_launch: bool | None = None,
+        mo2_profile: str | None = None,
+    ) -> None:
         """Launch the game through Mod Organizer 2 or directly."""
         # Every launch (Play, Dashboard, Multiplayer) lands here: co-op on
         # means co-op only, off means single-player only.
@@ -1598,7 +1606,8 @@ class PlayPage(QWidget):
             if runner is None:
                 runner = self._runner()
             command, env, cwd = self._resolve_command(
-                open_mo2=open_mo2, direct=direct, runner=runner, coop_launch=coop_launch
+                open_mo2=open_mo2, direct=direct, runner=runner, coop_launch=coop_launch,
+                mo2_profile=mo2_profile,
             )
             ensure_runner_prefix(runner)
             self._prepare_overlay(runner)

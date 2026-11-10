@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -351,6 +351,135 @@ class UpdateNotificationTest(unittest.TestCase):
             window._commander_checked_at -= window._COMMANDER_CHECK_INTERVAL_S
             window._periodic_update_check()
             commander.assert_called_once()
+
+
+class PageSweepTest(_Page):
+    """Bugs found reading the whole page through."""
+
+    def _loaded(self, text="+ModA\n-Foo_separator\n+ModB\n-Bar_separator\n"):
+        page = self._page()
+        profile = Path(self.tmp.name) / "profiles" / "P"
+        profile.mkdir(parents=True)
+        (profile / "modlist.txt").write_text(text, encoding="utf-8")
+        page.profile_combo.blockSignals(True)
+        page.profile_combo.addItem("P")
+        page.profile_combo.blockSignals(False)
+        page._load_mods()
+        return page, profile / "modlist.txt"
+
+    def _shown_categories(self, page):
+        from PySide6.QtCore import Qt
+
+        return [
+            page.tree.topLevelItem(i).data(0, Qt.ItemDataRole.UserRole)
+            for i in range(page.tree.topLevelItemCount())
+        ]
+
+    def test_move_category_up_moves_it_up_on_screen(self):
+        from PySide6.QtCore import QPoint
+
+        page, _modlist = self._loaded()
+        self.assertEqual(self._shown_categories(page), ["Bar", "Foo"])
+        with patch("commander_gui.ui.mod_manager_page.QMenu") as menu_cls:
+            menu = menu_cls.return_value
+            actions = {}
+            menu.addAction.side_effect = lambda text: actions.setdefault(text, MagicMock())
+            menu.exec.side_effect = lambda *_a: actions["Move Category Up"]
+            page._show_category_context_menu(page.tree.topLevelItem(1), QPoint(0, 0))
+        self.assertEqual(self._shown_categories(page), ["Foo", "Bar"])
+
+    def test_reveal_mod_works_on_an_unchanged_list(self):
+        page, _modlist = self._loaded()
+        page.reveal_mod("ModA")
+        page._load_mods(reuse=True)
+        self.assertEqual(page._selected_mod_names(), ["ModA"])
+
+    def test_unreadable_list_keeps_the_profile_picker_and_restore(self):
+        page, modlist = self._loaded()
+        modlist.write_text("+bad/name\n", encoding="utf-8")
+        page._load_mods()
+        self.assertFalse(page.install_button.isEnabled())
+        self.assertTrue(page.profile_combo.isEnabled())
+        self.assertTrue(page.restore_button.isEnabled())
+
+    def test_restore_refuses_a_file_that_is_not_a_mod_list(self):
+        page, _modlist = self._loaded()
+        bad = Path(self.tmp.name) / "bad.bak"
+        bad.write_text("+bad/name\n", encoding="utf-8")
+        with (
+            patch("commander_gui.ui.mod_manager_page.QFileDialog.getOpenFileName", return_value=(str(bad), "")),
+            patch.object(QMessageBox, "warning") as warning,
+            patch.object(page, "_restore_backup_file") as restore,
+        ):
+            page._restore_backup()
+        warning.assert_called_once()
+        restore.assert_not_called()
+
+    def test_renamed_category_is_tracked_under_its_cleaned_name(self):
+        page, _modlist = self._loaded()
+        page._add_tracked_user_category("Foo")
+        with patch(
+            "commander_gui.ui.mod_manager_page.QInputDialog.getText",
+            return_value=("Baz_separator", True),
+        ):
+            page._rename_category("Foo")
+        self.assertEqual(page._tracked_user_categories(), ["Baz"])
+
+    def test_tracked_categories_follow_a_rename_and_go_with_a_delete(self):
+        page, _modlist = self._loaded()
+        page._add_tracked_user_category("Foo")
+        page._retrack_mo2_profile("P", "Q")
+        self.assertEqual(page._tracked_user_categories(), [])
+        page.profile_combo.setItemText(0, "Q")
+        self.assertEqual(page._tracked_user_categories(), ["Foo"])
+        page._retrack_mo2_profile("Q", None)
+        self.assertEqual(page._tracked_user_categories(), [])
+
+    def test_drag_auto_scroll_scrolls_the_list_itself(self):
+        page, _modlist = self._loaded(
+            "".join(f"+Mod {i}\n" for i in range(300)) + "-Cat_separator\n"
+        )
+        page.resize(900, 700)
+        page.show()
+        self.app.processEvents()
+        bar = page.tree.verticalScrollBar()
+        self.assertGreater(bar.maximum(), 0)
+        page.tree._scroll_direction = 1
+        page.tree._auto_scroll()
+        self.assertEqual(bar.value(), page.tree._SCROLL_STEP)
+
+    def test_locked_list_still_scrolls_but_takes_no_edits(self):
+        from PySide6.QtCore import Qt
+
+        page, modlist = self._loaded()
+        before = modlist.read_text(encoding="utf-8")
+        page.window.install_busy = True
+        page._update_guard()
+        self.assertTrue(page.tree.isEnabled())
+        self.assertTrue(page.tree.read_only)
+        item = page.tree.topLevelItem(0).child(0)
+        item.setCheckState(0, Qt.CheckState.Unchecked)
+        self.assertEqual(item.checkState(0), Qt.CheckState.Checked)
+        self.assertEqual(modlist.read_text(encoding="utf-8"), before)
+        page.window.install_busy = False
+        page._update_guard()
+        self.assertFalse(page.tree.read_only)
+
+    def test_open_mo2_locks_the_page_once_mo2_is_up(self):
+        page, _modlist = self._loaded()
+        page.show()
+        play = MagicMock(_launching=False, _install_busy=False)
+        page.window._ensure_page = lambda _name: play
+        page._open_mo2()
+        self.assertTrue(page._mo2_watch.isActive())
+        page._check_mo2_closed()  # not up yet: keep looking
+        self.assertTrue(page._mo2_watch.isActive())
+        self.assertTrue(page.guard_label.isHidden())
+        with patch("commander_gui.ui.mod_manager_page.mo2_running", return_value=True):
+            page._check_mo2_closed()
+        self.assertFalse(page.guard_label.isHidden())
+        self.assertTrue(page.tree.read_only)
+        page.hide()
 
 
 if __name__ == "__main__":
