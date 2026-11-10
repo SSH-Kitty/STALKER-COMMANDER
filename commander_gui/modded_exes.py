@@ -140,7 +140,7 @@ def download(release: dict, dest_dir: Path, progress=None, cancel_event: Event |
     digest = hashlib.sha256()
     done = 0
     req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT})
-    with network.urlopen_with_retry(req, timeout=600) as resp, open(target, "wb") as out:
+    with network.urlopen_with_retry(req, timeout=60) as resp, open(target, "wb") as out:
         while chunk := resp.read(1 << 20):
             if cancel_event is not None and cancel_event.is_set():
                 raise ExesError("Download cancelled")

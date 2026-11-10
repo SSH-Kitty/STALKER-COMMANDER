@@ -37,6 +37,7 @@ from PySide6.QtWidgets import (
 )
 
 from .. import gui_settings, modded_exes
+from ..atomic import write_bytes
 from ..cli_runner import cli_command, cli_resume_args
 from ..game_backup import backup_settings_before
 from ..integrity import invalidate_baseline
@@ -630,7 +631,8 @@ class UpdatePage(QWidget):
         if answer != QMessageBox.StandardButton.Yes:
             return
         try:
-            shutil.copy2(snapshot, modlist_path)
+            # Atomic: a full disk must not leave modlist.txt cut short.
+            write_bytes(modlist_path, snapshot.read_bytes())
         except OSError as exc:
             QMessageBox.warning(
                 self, tr("Couldn't undo the update"), tr("The old mod list couldn't be put back.\n\n{exc}", exc=exc)

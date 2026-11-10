@@ -2084,6 +2084,8 @@ def notify_desktop(
             callback()
 
     process.finished.connect(finished)
+    # Still waiting for a click at quit: stopped, not destroyed mid-run.
+    QApplication.instance().aboutToQuit.connect(process.kill)
     process.start(command[0], [*command[1:], title, message])
 
 

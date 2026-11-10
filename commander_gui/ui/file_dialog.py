@@ -479,6 +479,14 @@ class _Picker(QDialog):
         return self.filters[self.filter_combo.currentIndex() if self.filter_combo else 0][0]
 
 
+def _run(picker: _Picker) -> bool:
+    """Show *picker*; True if a path was chosen. Freed afterwards: as a
+    child of the page it otherwise stayed in memory after every pick."""
+    accepted = picker.exec() == QDialog.DialogCode.Accepted
+    picker.deleteLater()
+    return accepted
+
+
 class FileDialog:
     """``QFileDialog``'s static helpers with COMMANDER's look.
     Modules import it as ``QFileDialog``."""
@@ -486,18 +494,18 @@ class FileDialog:
     @staticmethod
     def getExistingDirectory(parent=None, caption="", dir="", *_args, **_kwargs) -> str:
         picker = _Picker(parent, caption, dir, "dir")
-        return picker.result_path if picker.exec() == QDialog.DialogCode.Accepted else ""
+        return picker.result_path if _run(picker) else ""
 
     @staticmethod
     def getOpenFileName(parent=None, caption="", dir="", filter="", selectedFilter="", *_args, **_kwargs):
         picker = _Picker(parent, caption, dir, "open", filter, selectedFilter)
-        if picker.exec() != QDialog.DialogCode.Accepted:
+        if not _run(picker):
             return "", ""
         return picker.result_path, picker.selected_filter()
 
     @staticmethod
     def getSaveFileName(parent=None, caption="", dir="", filter="", selectedFilter="", *_args, **_kwargs):
         picker = _Picker(parent, caption, dir, "save", filter, selectedFilter)
-        if picker.exec() != QDialog.DialogCode.Accepted:
+        if not _run(picker):
             return "", ""
         return picker.result_path, picker.selected_filter()

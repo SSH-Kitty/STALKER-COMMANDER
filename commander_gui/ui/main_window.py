@@ -2049,6 +2049,9 @@ class MainWindow(QMainWindow):
     def _fill_tray_menu(self) -> None:
         menu = self._tray.contextMenu()
         menu.clear()
+        # clear() leaves submenus alive: one more Profile menu on every open.
+        for stale in menu.findChildren(QMenu):
+            stale.deleteLater()
         # Clicking the icon shows and hides it; this is for desktops where a
         # click opens the menu instead (GNOME's AppIndicator extension).
         if self.isHidden() or self.isMinimized():

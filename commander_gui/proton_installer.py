@@ -243,7 +243,7 @@ def install_proton(
 
         # --- download tarball ---
         req = urllib.request.Request(tar_url, headers={"User-Agent": _USER_AGENT})
-        with network.urlopen_with_retry(req, timeout=600) as resp:
+        with network.urlopen_with_retry(req, timeout=60) as resp:
             try:
                 header_value = resp.headers.get("Content-Length")
                 total = int(header_value) if header_value is not None else None

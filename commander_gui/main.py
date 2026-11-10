@@ -154,8 +154,11 @@ def _wake_running_instance() -> bool:
     socket.connectToServer(_wake_socket())
     if not socket.waitForConnected(1000):
         return False
+    # Its answer, not just the connection: a frozen COMMANDER still accepts
+    # one, and this launch would then end without a word.
+    answered = socket.waitForReadyRead(2000)
     socket.disconnectFromServer()
-    return True
+    return answered
 
 
 def _listen_for_wake(window: MainWindow) -> None:
@@ -165,7 +168,10 @@ def _listen_for_wake(window: MainWindow) -> None:
 
     def _wake() -> None:
         while (connection := server.nextPendingConnection()) is not None:
-            connection.close()
+            connection.write(b"1")
+            connection.flush()
+            connection.disconnected.connect(connection.deleteLater)
+            connection.disconnectFromServer()
         window.show_from_tray()
 
     server.newConnection.connect(_wake)

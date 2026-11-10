@@ -97,3 +97,41 @@ class InstallRootTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReleaseAuditTests(unittest.TestCase):
+    """Fixes from the audit before the public 1.4.0 release."""
+
+    def test_copy_install_refuses_a_target_inside_the_install(self):
+        import tempfile
+        from pathlib import Path
+
+        from commander_gui.game_installs import copy_install
+
+        with tempfile.TemporaryDirectory() as tmp:
+            anomaly, gamma = Path(tmp, "Anomaly"), Path(tmp, "GAMMA")
+            (gamma / "sub").mkdir(parents=True)
+            anomaly.mkdir()
+            with self.assertRaises(OSError):
+                copy_install((anomaly, gamma, gamma / "cache"), gamma / "sub", 0, lambda *_: None, lambda: False)
+            self.assertEqual(list((gamma / "sub").iterdir()), [])
+
+    def test_second_launch_needs_an_answer_from_the_running_one(self):
+        import tempfile
+        from unittest import mock
+
+        from PySide6.QtNetwork import QLocalServer
+        from PySide6.QtWidgets import QApplication
+
+        from commander_gui import main
+
+        QApplication.instance() or QApplication([])
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+            main, "_wake_socket", return_value=f"{tmp}/commander.sock"
+        ):
+            # Accepts the connection but never answers: a frozen COMMANDER.
+            silent = QLocalServer()
+            silent.listen(main._wake_socket())
+            with mock.patch("PySide6.QtNetwork.QLocalSocket.waitForReadyRead", return_value=False):
+                self.assertFalse(main._wake_running_instance())
+            silent.close()

@@ -250,6 +250,10 @@ def copy_install(install, target: str | Path, total: int, report, cancelled) -> 
     anomaly, gamma, cache = (Path(p) for p in install)
     target = Path(target).expanduser().resolve()
     new_anomaly, new_gamma = target / anomaly.name, target / gamma.name
+    for source in (anomaly.resolve(), gamma.resolve()):
+        # The walk would find its own copy and copy it again, without end.
+        if target == source or source in target.parents:
+            raise OSError(f"{target} is inside {source}")
     for folder in (new_anomaly, new_gamma):
         if folder.exists():
             raise FileExistsError(folder)

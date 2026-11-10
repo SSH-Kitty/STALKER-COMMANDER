@@ -192,7 +192,7 @@ def _find_release() -> tuple[str, str]:
 def _download(url: str, target: Path, cancel_event, progress_cb) -> None:
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     try:
-        with network.urlopen_with_retry(req, timeout=600) as resp, open(target, "wb") as out:
+        with network.urlopen_with_retry(req, timeout=60) as resp, open(target, "wb") as out:
             try:
                 total = int(resp.headers.get("Content-Length") or 0)
             except ValueError:

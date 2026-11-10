@@ -11,7 +11,6 @@ interface.
 from __future__ import annotations
 
 import re
-import shutil
 from datetime import datetime, timezone
 
 from PySide6.QtCore import Qt
@@ -20,6 +19,7 @@ from PySide6.QtWidgets import QApplication, QVBoxLayout, QWidget
 from commander_gui import modded_exes
 from commander_gui.cli_runner import cli_command, cli_resume_args
 from commander_gui.game_backup import backup_settings_before
+from commander_gui.atomic import write_bytes
 from commander_gui.i18n import tr
 from commander_gui.integrity import invalidate_baseline
 from commander_gui.keep_state import capture, discard, restore
@@ -262,7 +262,8 @@ class UpdateScreen(DeckScreen):
                 self.window.notify(tr("Mod Organizer or the game is still open. Close it, then undo the update."), 6000)
                 return
             try:
-                shutil.copy2(snapshot, modlist_path)
+                # Atomic: a full disk must not leave modlist.txt cut short.
+                write_bytes(modlist_path, snapshot.read_bytes())
             except OSError as exc:
                 self.window.notify(tr("The old mod list couldn't be put back.\n\n{exc}", exc=exc), 8000)
                 return
