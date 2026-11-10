@@ -140,6 +140,7 @@ from .common import (
     make_header_row,
     normalize_path,
     notify_desktop,
+    open_in_file_manager,
     paused_dependency_status,
     save_profile_dirs,
     section_label,
@@ -2227,6 +2228,14 @@ class InstallPage(QWidget):
             self._update_button_states()
             self._place_progress()
 
+    def _open_folder_action(self, which: str) -> list:
+        """The "Open folder" button for an install-finished notification."""
+        profile = self.window.settings.active_profile
+        folder = getattr(profile, which, "") if profile is not None else ""
+        if not folder:
+            return []
+        return [(tr("Open folder"), lambda: open_in_file_manager(Path(folder).expanduser()))]
+
     def _kept_matches(self, profile, kept=None) -> bool:
         """*kept* (default: the held one) was captured from *profile*'s
         install, or nothing is held."""
@@ -3775,6 +3784,7 @@ class InstallPage(QWidget):
                 notify_desktop(
                     tr("GAMMA install finished"),
                     tr("The GAMMA installation completed successfully."),
+                    self._open_folder_action("gamma"),
                 )
             else:
                 notify_desktop(
@@ -4270,6 +4280,7 @@ class InstallPage(QWidget):
                 notify_desktop(
                     tr("Anomaly install finished"),
                     tr("The Anomaly installation completed successfully."),
+                    self._open_folder_action("anomaly"),
                 )
             else:
                 notify_desktop(

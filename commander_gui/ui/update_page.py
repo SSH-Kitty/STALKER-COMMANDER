@@ -46,6 +46,7 @@ from ..parsers import UpdateDiff
 from ..settings import cli_ok
 from ..updates import (
     UpdateStatus,
+    adopt_modpack_list,
     check_updates,
     format_version,
     new_releases,
@@ -1002,6 +1003,10 @@ class UpdatePage(QWidget):
         if getattr(self, "_kept", None) is None:
             self._kept = capture(profile, keep_exes=self.keep_exes_cb.isChecked(), resume=bool(resume))
 
+        # The CLI only reads the active profile's own list; Updates may have
+        # found it in another profile of the same install.
+        if profile is not None and profile.gamma:
+            adopt_modpack_list(profile.gamma, profile.mo2_profile or "G.A.M.M.A")
         args = ["update", "apply", *resume]
         if self.minimal_cb.isChecked():
             args.append("--minimal")

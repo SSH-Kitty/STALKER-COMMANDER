@@ -23,7 +23,7 @@ import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .atomic import write_text
+from .atomic import write_bytes, write_text
 from .i18n import tr
 from .integrity import GAMMA_MARKERS
 from .network import read_response_bytes
@@ -585,6 +585,12 @@ def local_modpack_records(
     install for another profile. *mo2_profile* only wins a tie (a copy made
     by ``seed_new_mo2_profile()`` keeps the original's timestamp).
     """
+    profile_dir = _newest_modpack_list_dir(gamma_dir, mo2_profile)
+    return None if profile_dir is None else _read_modpack_list(profile_dir)
+
+
+def _newest_modpack_list_dir(gamma_dir: str, mo2_profile: str) -> Path | None:
+    """The profile folder holding the newest modpack list (see above)."""
     found = []
     try:
         for candidate in Path(gamma_dir, "profiles").iterdir():
@@ -599,8 +605,32 @@ def local_modpack_records(
         return None
     if not found:
         return None
-    profile_dir = max(found, key=lambda item: item[:2])[2]
-    return _read_modpack_list(profile_dir)
+    return max(found, key=lambda item: item[:2])[2]
+
+
+def adopt_modpack_list(gamma_dir: str, mo2_profile: str) -> bool:
+    """Copy the newest modpack list into *mo2_profile* if it has none.
+
+    Updates reads the list from whichever profile holds it, but the CLI's
+    ``update apply`` only reads the active profile's own JSON and stops with
+    "modpack_maker_list.json file not found". Never overwrites. Returns
+    whether files were copied.
+    """
+    dest = Path(gamma_dir, "profiles", mo2_profile)
+    if not dest.is_dir() or (dest / "modpack_maker_list.json").exists():
+        return False
+    source = _newest_modpack_list_dir(gamma_dir, mo2_profile)
+    if source is None or source == dest:
+        return False
+    copied = False
+    for name in _MODPACK_LIST_FILES:
+        if (source / name).is_file() and not (dest / name).exists():
+            try:
+                write_bytes(dest / name, (source / name).read_bytes())
+                copied = True
+            except OSError:
+                pass
+    return copied
 
 
 #: What the CLI's full install leaves in an MO2 profile folder.

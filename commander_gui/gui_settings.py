@@ -61,6 +61,7 @@ _DEFAULTS = {
     "move_sources": [],  # absolute source folders of an in-progress move
     "custom_title_bar": True,  # draw COMMANDER's own title bar instead of the desktop's
     "animations_enabled": True,  # hover grow, page fades, smooth scroll, splash effects
+    "click_sounds": True,  # short click on buttons, tabs and the tray menu (desktop)
     "live_animation": True,  # Winter's snow, the Red Forest's trees, campfire and leaves
     "christmas_lights": True,  # Winter's fairy lights under the top bar
     "live_time": "",  # Live themes locked to dawn/day/dusk/night; "" follows the clock
@@ -118,14 +119,23 @@ def animations_enabled() -> bool:
     Asked on every wheel tick and hover, so it reads the cache directly
     instead of taking load_gui_settings()'s deep copy.
     """
+    return _cached_flag("animations_enabled")
+
+
+def click_sounds_enabled() -> bool:
+    """The Settings > Appearance "Click sounds" switch, asked on every click."""
+    return _cached_flag("click_sounds")
+
+
+def _cached_flag(key: str) -> bool:
     path = gui_settings_path()
     try:
         mtime = path.stat().st_mtime
     except OSError:
         mtime = 0.0
     if _cache is not None and str(path) == _cache_path_str and mtime == _cache_file_mtime:
-        return bool(_cache.get("animations_enabled", True))
-    return bool(load_gui_settings().get("animations_enabled", True))
+        return bool(_cache.get(key, True))
+    return bool(load_gui_settings().get(key, True))
 
 
 def load_gui_settings() -> dict:
@@ -261,6 +271,8 @@ def load_gui_settings() -> dict:
         data["developer_features"] = {}
     if not isinstance(data.get("animations_enabled"), bool):
         data["animations_enabled"] = True
+    if not isinstance(data.get("click_sounds"), bool):
+        data["click_sounds"] = True
     if not isinstance(data.get("live_animation"), bool):
         data["live_animation"] = True
     if not isinstance(data.get("christmas_lights"), bool):

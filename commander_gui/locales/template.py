@@ -3876,4 +3876,8 @@ TRANSLATIONS: dict[str, str] = {
     'An icon near the clock to open COMMANDER, launch the game and more.': '',
     'Hide to the tray when I close the window': '',
     'Quit from the tray menu instead.': '',
+    'Click sounds': '',
+    'A short click when you press a button, a tab or a tray menu item.': '',
+    'Open COMMANDER': '',
+    'Open Updates': '',
 }

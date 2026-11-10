@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import os
 import re
 import shutil
@@ -10,6 +11,7 @@ import sys
 import threading
 import time
 from collections import OrderedDict
+from collections.abc import Callable, Sequence
 from datetime import datetime
 from pathlib import Path
 
@@ -18,21 +20,26 @@ from PySide6.QtCore import (
     QEvent,
     QObject,
     QPoint,
+    QProcess,
+    QProcessEnvironment,
     QRect,
     QSize,
     Qt,
     QThread,
+    QTimer,
     QVariantAnimation,
     Signal,
 )
 from PySide6.QtGui import QColor, QFont, QPainter
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QComboBox,
     QFrame,
     QHBoxLayout,
     QLabel,
     QLayout,
+    QMainWindow,
     QProgressBar,
     QPushButton,
     QSpinBox,
@@ -44,6 +51,7 @@ from PySide6.QtWidgets import (
 
 from .. import gui_settings
 from ..config import child_environment, is_secondary_instance, spawn_reaped
+from ..desktop_integration import DESKTOP_ID
 from ..i18n import tr
 from ..integrity import format_size
 from ..modlist import count_mods, read_lines
@@ -455,6 +463,8 @@ def exe_pids(exe_name: str) -> set[int]:
 
 _click_sound_player = None
 _click_sound_output = None
+#: When play_click_sound() last ran: the feedback click stays out of its way.
+_pda_played_at = 0.0
 
 
 def play_click_sound() -> None:
@@ -463,7 +473,8 @@ def play_click_sound() -> None:
     A missing asset or a broken audio backend must never block or crash
     a game launch - any failure here is silently swallowed.
     """
-    global _click_sound_player, _click_sound_output
+    global _click_sound_player, _click_sound_output, _pda_played_at
+    _pda_played_at = time.monotonic()
     try:
         from PySide6.QtCore import QUrl
         from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
@@ -488,6 +499,44 @@ def play_click_sound() -> None:
         _click_sound_player.stop()
         _click_sound_player.play()
     except Exception:  # noqa: BLE001, S110 - a broken sound must never block a launch
+        pass
+
+
+_feedback_sound = None
+
+
+def play_feedback_sound() -> None:
+    """The short click for buttons, tabs and the tray menu, best-effort.
+
+    Never on top of the PDA sound: played a moment later, once every
+    handler of the same click has run, and skipped if one of them played
+    play_click_sound(). That covers buttons that only sometimes launch
+    (Multiplayer's), which no fixed list of PDA buttons could.
+    """
+    QTimer.singleShot(0, _play_feedback_now)
+
+
+def _play_feedback_now() -> None:
+    # QSoundEffect rather than play_click_sound()'s QMediaPlayer: it keeps
+    # the WAV decoded in memory, so a click plays at once, as fast as clicks come.
+    global _feedback_sound
+    if time.monotonic() - _pda_played_at < 0.3 or not gui_settings.click_sounds_enabled():
+        return
+    try:
+        from PySide6.QtCore import QUrl
+        from PySide6.QtMultimedia import QSoundEffect
+
+        from ..config import project_root
+
+        if _feedback_sound is None:
+            path = project_root() / "commander_gui" / "assets" / "click.wav"
+            if not path.is_file():
+                return
+            _feedback_sound = QSoundEffect()
+            _feedback_sound.setVolume(0.35)
+            _feedback_sound.setSource(QUrl.fromLocalFile(str(path)))
+        _feedback_sound.play()
+    except Exception:  # noqa: BLE001, S110 - a broken sound must never break a click
         pass
 
 
@@ -1929,7 +1978,48 @@ def open_in_file_manager(path: str | Path) -> bool:
         return False
 
 
-def notify_desktop(title: str, message: str) -> None:
+@functools.cache
+def _notify_send_has_actions(exe: str) -> bool:
+    """notify-send 0.7.9 and older (Ubuntu 22.04) reject --action outright."""
+    try:
+        result = subprocess.run(
+            [exe, "--help"],
+            env=child_environment(),
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return "--action" in result.stdout
+
+
+def _notify_icon() -> str:
+    from ..steam_shortcuts import ICON_DEST, bundled_icon
+
+    for icon in (ICON_DEST, bundled_icon()):
+        if icon.is_file():
+            return str(icon)
+    return DESKTOP_ID
+
+
+def _raise_main_window() -> None:
+    for widget in QApplication.topLevelWidgets():
+        if isinstance(widget, QMainWindow):
+            if hasattr(widget, "show_from_tray"):
+                widget.show_from_tray()
+            else:
+                widget.showNormal()
+                widget.raise_()
+                widget.activateWindow()
+            return
+
+
+def notify_desktop(
+    title: str,
+    message: str,
+    actions: Sequence[tuple[str, Callable[[], None]]] = (),
+) -> None:
     """Best-effort desktop notification for a long task finishing.
 
     GAMMA installs/updates can run for a long time - if the user alt-tabs
@@ -1939,20 +2029,62 @@ def notify_desktop(title: str, message: str) -> None:
     nothing new appears in the tray. Silently does nothing if it isn't
     available - a missing notification must never affect the operation
     that just completed.
+
+    Clicking the notification brings COMMANDER to the front; each of
+    ``actions`` is a (label, callback) button that does the same first.
+    The desktop draws the card itself - its colours follow the system theme.
     """
     exe = shutil.which("notify-send")
     if exe is None:
         return
-    try:
-        spawn_reaped(
-            [exe, "--app-name=STALKER COMMANDER", title, message],
-            # The host's libraries, not the AppImage's bundled ones.
-            env=child_environment(),
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-    except OSError:
-        pass
+    command = [
+        exe,
+        "--app-name=STALKER COMMANDER",
+        f"--icon={_notify_icon()}",
+        # Groups COMMANDER's notifications under its app entry, where
+        # Plasma and GNOME let the user mute them.
+        f"--hint=string:desktop-entry:{DESKTOP_ID}",
+    ]
+    if not _notify_send_has_actions(exe):
+        try:
+            spawn_reaped(
+                [*command, title, message],
+                # The host's libraries, not the AppImage's bundled ones.
+                env=child_environment(),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except OSError:
+            pass
+        return
+    callbacks = {"default": lambda: None}
+    command.append(f"--action=default={tr('Open COMMANDER')}")
+    for index, (label, callback) in enumerate(actions):
+        callbacks[f"a{index}"] = callback
+        command.append(f"--action=a{index}={label}")
+    # notify-send waits for a click and prints the chosen action's name;
+    # QProcess hands that back on the GUI thread.
+    process = QProcess(QApplication.instance())
+    environment = QProcessEnvironment()
+    for key, value in child_environment().items():
+        environment.insert(key, value)
+    process.setProcessEnvironment(environment)
+
+    def finished(*_args) -> None:
+        try:
+            chosen = bytes(process.readAllStandardOutput()).decode(errors="replace").strip()
+            process.deleteLater()
+        except RuntimeError:  # COMMANDER is quitting and Qt already freed it
+            return
+        callback = callbacks.get(chosen)
+        if callback is not None:
+            # ponytail: no Wayland activation token, so KWin may only flash an
+            # already-open window's taskbar entry; pass --activation-token-fd if that bites.
+            _raise_main_window()
+            callback()
+
+    process.finished.connect(finished)
+    process.start(command[0], [*command[1:], title, message])
 
 
 class ProgressTable(QTableWidget):

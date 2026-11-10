@@ -90,6 +90,8 @@ from .common import (
     notice,
     notify_desktop,
     open_url,
+    play_click_sound,
+    play_feedback_sound,
     resume_after_shutdown,
     shutdown_active_runners,
     tr,
@@ -518,6 +520,7 @@ class MainWindow(QMainWindow):
             tr(
                 "A new GAMMA update is available - open COMMANDER's Updates page to review it."
             ),
+            [(tr("Open Updates"), lambda: self.set_page("update"))],
         )
 
     #: How often an open COMMANDER looks for updates again. Each check keeps
@@ -558,6 +561,7 @@ class MainWindow(QMainWindow):
                 "COMMANDER {tag} is out - click the update button in COMMANDER's status bar to get it.",
                 tag=tag,
             ),
+            [(tr("Update now"), lambda: self._start_commander_update(tag))],
         )
 
     def _build_ui(self) -> None:
@@ -1336,10 +1340,28 @@ class MainWindow(QMainWindow):
             bridge.updated.emit(pct, text)
 
         task = BackgroundTask(lambda: work(task.cancel_event, _progress), parent=self)
-        progress.canceled.connect(task.cancel_event.set)
+
+        closed = []
+
+        def close_progress() -> None:
+            # Cancel closes it at once and on_result/on_error close it again;
+            # close() deletes it, so it must not be touched a second time.
+            if closed:
+                return
+            closed.append(True)
+            bridge.updated.disconnect()
+            progress.close()
+
+        def on_cancel() -> None:
+            # A stalled download only notices the cancel when its read times
+            # out, so the window goes now instead of sitting on "Stopping".
+            task.cancel_event.set()
+            close_progress()
+
+        progress.canceled.connect(on_cancel)
 
         def on_result(path: object) -> None:
-            progress.close()
+            close_progress()
             if on_installed is not None:
                 on_installed()
             restart = QMessageBox.question(
@@ -1359,7 +1381,7 @@ class MainWindow(QMainWindow):
             self._refresh_update_banner()
 
         def on_error(message: str) -> None:
-            progress.close()
+            close_progress()
             # Cancel ends the download with an error; the user asked for it.
             if not task.cancel_event.is_set():
                 self._show_commander_self_update_error(message)
@@ -2032,12 +2054,14 @@ class MainWindow(QMainWindow):
         if self.isHidden() or self.isMinimized():
             menu.addAction(tr("Show COMMANDER"), self.show_from_tray)
         play = self._pages.get("play")
+        launch = None
         if play is not None and play.is_launching:
             menu.addAction(tr("Quit game"), play._confirm_quit_game)
             # The in-game panel: it toggles, and closes with the game (stop_key).
             menu.addAction(tr("Graphics"), graphics_window.toggle)
         else:
-            menu.addAction(tr("Launch Game"), self._launch_from_tray).setEnabled(not self.install_busy)
+            launch = menu.addAction(tr("Launch Game"), self._launch_from_tray)
+            launch.setEnabled(not self.install_busy)
         profiles = menu.addMenu(tr("Profile"))
         # Same guards as the Dashboard's switcher, minus its "game still
         # running" question: no switching mid-game from here at all.
@@ -2060,6 +2084,12 @@ class MainWindow(QMainWindow):
         menu.addAction(tr("Settings"), self._settings_from_tray)
         menu.addSeparator()
         menu.addAction(tr("Quit COMMANDER"), self._quit_from_tray)
+        # A click on every pick (the PDA one for Launch Game, like the Play
+        # buttons): a hidden window gives no other sign the click landed.
+        # Per action, not QMenu.triggered - the desktop draws this menu over D-Bus.
+        for action in [*menu.actions(), *profiles.actions()]:
+            if not action.isSeparator() and not action.menu():
+                action.triggered.connect(play_click_sound if action is launch else play_feedback_sound)
 
     def _refresh_tray_tooltip(self) -> None:
         lines = ["STALKER COMMANDER"]

@@ -3854,4 +3854,8 @@ TRANSLATIONS: dict[str, str] = {
     'An icon near the clock to open COMMANDER, launch the game and more.': 'O pictogramă lângă ceas pentru a deschide COMMANDER, a porni jocul și altele.',
     'Hide to the tray when I close the window': 'Ascunde în zona de notificare când închid fereastra',
     'Quit from the tray menu instead.': 'Ieși din meniul pictogramei.',
+    'Click sounds': 'Sunete la clic',
+    'A short click when you press a button, a tab or a tray menu item.': 'Un clic scurt când apeși un buton, o filă sau o opțiune din meniul pictogramei.',
+    'Open COMMANDER': 'Deschide COMMANDER',
+    'Open Updates': 'Deschide Actualizări',
 }

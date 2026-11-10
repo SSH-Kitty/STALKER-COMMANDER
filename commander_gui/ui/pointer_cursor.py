@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .common import play_feedback_sound
 from .context_menu import polish_menu, show_text_menu
 
 _CLICKABLE = (QAbstractButton, QTabBar, QComboBox)
@@ -68,11 +69,30 @@ class AppEventFilter(QObject):
             return self._scroller.wheel(obj, event)
         if kind in _EVENTS and isinstance(obj, _CLICKABLE):
             PointerCursorFilter._apply(obj)
+            _hook_click_sound(obj)
         elif kind == QEvent.Type.Polish and isinstance(obj, QMenu):
             polish_menu(obj)
         elif kind == _CONTEXT_MENU:
             return show_text_menu(obj, event)
         return False
+
+
+def _hook_click_sound(widget: QWidget) -> None:
+    """The feedback click on every button and tab, connected once each.
+
+    Through the click signals, not mouse events: keyboard presses count,
+    and a click on a disabled button stays silent. Buttons that play the
+    PDA sound keep just that one (see play_feedback_sound).
+    """
+    if widget.property("clickSound"):
+        return
+    if isinstance(widget, QAbstractButton):
+        widget.clicked.connect(play_feedback_sound)
+    elif isinstance(widget, QTabBar):
+        widget.tabBarClicked.connect(play_feedback_sound)
+    else:
+        return
+    widget.setProperty("clickSound", True)
 
 
 def install_app_filter(window: QWidget) -> AppEventFilter | None:

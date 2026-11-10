@@ -139,7 +139,9 @@ def download_commander_update(
         )
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     try:
-        with urlopen(req, timeout=600) as resp:
+        # Per-read stall limit, not a whole-download limit: 600 s left Cancel
+        # stuck on "Stopping" for up to ten minutes when GitHub stalled.
+        with urlopen(req, timeout=60) as resp:
             header_value = resp.headers.get("Content-Length")
             try:
                 total = int(header_value) if header_value is not None else None
@@ -284,6 +286,9 @@ def download_and_install_commander_update(
     downloaded = download_commander_update(
         tag, running_path, cancel_event=cancel_event, progress_cb=progress_cb
     )
+    if cancel_event is not None and cancel_event.is_set():
+        downloaded.unlink(missing_ok=True)
+        raise CommanderSelfUpdateError("Update cancelled")
     install_commander_update(downloaded, running_path)
     return running_path
 

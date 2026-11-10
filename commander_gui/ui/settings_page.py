@@ -29,7 +29,7 @@ from PySide6.QtWidgets import (
 )
 
 from .. import __version__, __version_label__, gui_settings, overlays, plugins
-from ..config import logs_dir
+from ..config import logs_dir, project_root
 from ..deck_launch import steam_deck_model
 from ..discord_rpc import (
     DEFAULT_CLIENT_ID,
@@ -979,6 +979,16 @@ class SettingsPage(QWidget):
         self._title_bar_check.toggled.connect(self._on_title_bar_toggled)
         self._animations_check = QCheckBox(tr("Animations"))
         self._animations_check.toggled.connect(self._on_animations_toggled)
+        self._click_sounds_check = QCheckBox(tr("Click sounds"))
+        self._click_sounds_check.toggled.connect(
+            lambda on: gui_settings.save_gui_settings(click_sounds=on)
+        )
+        click_sounds_row = _check_row(
+            self._click_sounds_check,
+            tr("A short click when you press a button, a tab or a tray menu item."),
+        )
+        # No switch for a sound that isn't shipped (yet).
+        click_sounds_row.setVisible((project_root() / "commander_gui" / "assets" / "click.wav").is_file())
         self._live_animation_check = QCheckBox(tr("Live theme animation"))
         self._live_animation_check.toggled.connect(self._on_live_animation_toggled)
         self._lights_check = QCheckBox(tr("Christmas lights"))
@@ -1000,6 +1010,7 @@ class SettingsPage(QWidget):
                 self._animations_check,
                 tr("Hover effects, page fades, smooth scrolling and the game loading screen's moving scenery. Turn off for a still interface."),
             ),
+            click_sounds_row,
         )
         # Rows at the top when Themes makes the column taller.
         box.addStretch(1)
@@ -1904,6 +1915,9 @@ class SettingsPage(QWidget):
         self._animations_check.blockSignals(True)
         self._animations_check.setChecked(bool(state.get("animations_enabled", True)))
         self._animations_check.blockSignals(False)
+        self._click_sounds_check.blockSignals(True)
+        self._click_sounds_check.setChecked(bool(state.get("click_sounds", True)))
+        self._click_sounds_check.blockSignals(False)
         self._live_animation_check.blockSignals(True)
         self._live_animation_check.setChecked(bool(state.get("live_animation", True)))
         self._live_animation_check.blockSignals(False)

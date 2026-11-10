@@ -3854,4 +3854,8 @@ TRANSLATIONS: dict[str, str] = {
     'An icon near the clock to open COMMANDER, launch the game and more.': "Saatin yanında COMMANDER'ı açmak, oyunu başlatmak ve daha fazlası için bir simge.",
     'Hide to the tray when I close the window': 'Pencereyi kapattığımda tepsiye gizle',
     'Quit from the tray menu instead.': 'Bunun yerine tepsi menüsünden çıkın.',
+    'Click sounds': 'Tıklama sesleri',
+    'A short click when you press a button, a tab or a tray menu item.': 'Bir düğmeye, sekmeye veya tepsi menüsü öğesine bastığınızda kısa bir tık.',
+    'Open COMMANDER': "COMMANDER'ı aç",
+    'Open Updates': 'Güncellemeleri aç',
 }

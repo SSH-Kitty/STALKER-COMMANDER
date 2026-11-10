@@ -1605,12 +1605,39 @@ class RegressionTests(unittest.TestCase):
     def test_notify_desktop_spawns_notify_send_when_available(self):
         with (
             patch("commander_gui.ui.common.shutil.which", return_value="/usr/bin/notify-send"),
+            patch("commander_gui.ui.common._notify_send_has_actions", return_value=False),
             patch("commander_gui.ui.common.subprocess.Popen") as mock_popen,
         ):
             common.notify_desktop("Title", "Message")
         args = mock_popen.call_args.args[0]
         self.assertIn("Title", args)
         self.assertIn("Message", args)
+        self.assertIn("--hint=string:desktop-entry:stalker-gamma-commander", args)
+        self.assertFalse(any(a.startswith("--action") for a in args))
+
+    def test_notify_desktop_button_raises_window_and_runs_its_action(self):
+        clicked = Mock()
+        with (
+            patch("commander_gui.ui.common.shutil.which", return_value="/usr/bin/notify-send"),
+            patch("commander_gui.ui.common._notify_send_has_actions", return_value=True),
+            patch("commander_gui.ui.common.QProcess") as mock_process,
+            patch("commander_gui.ui.common._raise_main_window") as mock_raise,
+        ):
+            common.notify_desktop("Title", "Message", [("Update now", clicked)])
+            process = mock_process.return_value
+            program, args = process.start.call_args.args
+            self.assertEqual(program, "/usr/bin/notify-send")
+            self.assertIn("--action=a0=Update now", args)
+            self.assertEqual(args[-2:], ["Title", "Message"])
+            finished = process.finished.connect.call_args.args[0]
+            # Dismissed without a click: nothing happens.
+            process.readAllStandardOutput.return_value = b""
+            finished(0)
+            mock_raise.assert_not_called()
+            process.readAllStandardOutput.return_value = b"a0\n"
+            finished(0)
+        mock_raise.assert_called_once()
+        clicked.assert_called_once()
 
     def test_on_full_finished_notifies_only_when_the_window_is_not_active(self):
         """Regression test: a finished/failed GAMMA install must surface a
@@ -8436,6 +8463,24 @@ class UserModsTrackerTests(unittest.TestCase):
                 self.assertEqual(path, running)
                 self.assertEqual(running.read_bytes(), body)
 
+    def test_cancel_while_checking_update_does_not_install(self):
+        # Cancel pressed while the download was being checked: the closed
+        # window must not be followed by the AppImage being swapped anyway.
+        body = _FAKE_APPIMAGE_HEADER + b"new"
+        cancel = threading.Event()
+        with tempfile.TemporaryDirectory() as tmp:
+            running = Path(tmp) / "Commander.AppImage"
+            running.write_bytes(b"old")
+            with (
+                patch.dict(os.environ, {"APPIMAGE": str(running)}),
+                self._serve(body, {"Content-Length": str(len(body))}),
+                patch("commander_gui.self_update.verify_appimage_file", side_effect=lambda _p: cancel.set()),
+                self.assertRaisesRegex(CommanderSelfUpdateError, "cancelled"),
+            ):
+                download_and_install_commander_update("v9.9.9", cancel_event=cancel)
+            self.assertEqual(running.read_bytes(), b"old")
+            self.assertEqual(sorted(p.name for p in Path(tmp).iterdir()), ["Commander.AppImage"])
+
     def test_progress_dialog_closes_after_cancel(self):
         from PySide6.QtWidgets import QApplication
 
@@ -14952,3 +14997,17 @@ class WineUnsafeFolderTests(unittest.TestCase):
         self.assertEqual(wine_unsafe_folder("/home/a/G.A.M.M.A./gamma"), "/home/a/G.A.M.M.A.")
         self.assertEqual(wine_unsafe_folder("/home/a/ok", "/home/a/GAMMA /anomaly"), "/home/a/GAMMA ")
         self.assertIsNone(wine_unsafe_folder("/home/a/G.A.M.M.A/gamma", "/home/a/.cache"))
+
+
+def test_adopt_modpack_list_copies_into_active_profile(tmp_path):
+    from commander_gui.updates import adopt_modpack_list
+
+    src = tmp_path / "profiles" / "G.A.M.M.A"
+    dest = tmp_path / "profiles" / "Mine"
+    src.mkdir(parents=True)
+    dest.mkdir()
+    (src / "modpack_maker_list.json").write_text("[]")
+    (src / "modpack_maker_list.txt").write_text("x\n")
+    assert adopt_modpack_list(str(tmp_path), "Mine")
+    assert (dest / "modpack_maker_list.json").read_text() == "[]"
+    assert not adopt_modpack_list(str(tmp_path), "Mine")  # never overwrites
