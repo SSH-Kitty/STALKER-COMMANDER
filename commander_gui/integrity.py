@@ -1052,6 +1052,29 @@ def write_baseline(gamma_dir: str, scan: Md5ScanResult) -> None:
     _write_manifest(Path(gamma_dir) / MANIFEST_FILENAME, scan.digests)
 
 
+def accept_reinstalled(gamma_dir: str, scan: Md5ScanResult, folders: list[str]) -> None:
+    """Make freshly reinstalled mod folders the snapshot's reference.
+
+    A repair unpacks each mod from an archive the CLI checked by MD5, so
+    that copy is the right one - even where it differs from the snapshot
+    (taken from another installer's layout, or an older archive). Compared
+    against the old snapshot it never matched, and every Verify offered
+    the same repair again. Drops those folders' changes from *scan* too.
+    """
+    prefixes = tuple(f"mods/{folder}/" for folder in folders)
+    if not prefixes:
+        return
+    manifest = Path(gamma_dir) / MANIFEST_FILENAME
+    baseline = _read_manifest(manifest)
+    if baseline is None:
+        return
+    kept = {rel: digest for rel, digest in baseline.items() if not rel.startswith(prefixes)}
+    kept.update({rel: digest for rel, digest in scan.digests.items() if rel.startswith(prefixes)})
+    _write_manifest(manifest, kept)
+    for name in ("changed", "added", "removed"):
+        setattr(scan, name, [rel for rel in getattr(scan, name) if not rel.startswith(prefixes)])
+
+
 def reverted_gamma_overlay(anomaly_dir: str) -> list[str]:
     """GAMMA-patched Anomaly files that are currently back to vanilla.
 
@@ -1066,7 +1089,10 @@ def reverted_gamma_overlay(anomaly_dir: str) -> list[str]:
     root = Path(anomaly_dir).expanduser()
     reverted: list[str] = []
     for key, (name, digest) in _vanilla_md5s(root).items():
-        if key not in GAMMA_OVERLAY_FILES:
+        # Only the engine executables: GAMMA's repo carries those, so they
+        # can be put back. fsgame.ltx is never written by the CLI install;
+        # a vanilla one is normal on Linux and flagging it looped Verify.
+        if key not in GAMMA_OVERLAY_FILES or not key.endswith(".exe"):
             continue
         result = _md5_file(root / name)
         if result is not None and result[0].lower() == digest:
@@ -1334,6 +1360,54 @@ def gamma_repo_files(
         rel: found[-1] for rel, found in claims.items() if len({f.blob for f in found}) == 1
     }
     return files, unreadable
+
+
+_SCRIPTS_DIR = "gamedata/scripts/"
+
+
+def stray_anomaly_scripts(anomaly_dir: str, gamma_dir: str, branch: str = "main") -> list[str]:
+    """Loose scripts in ``anomaly/gamedata/scripts`` that neither Anomaly nor
+    GAMMA put there.
+
+    A GAMMA Reset leaves the Anomaly folder alone, so scripts from newer
+    modded exes installed by hand outlive it and crash the game against
+    GAMMA's older exes ("attempt to call method ... (a nil value)"). Known
+    scripts: Anomaly's checksums.md5, GAMMA's modpack_patches at the
+    installed commit, and co-op's loose files. Empty when GAMMA's repo can't
+    be read (nothing to compare with) or COMMANDER installed the exes itself
+    (their scripts belong there).
+    """
+    import shutil
+    import subprocess
+
+    from . import coop, modded_exes
+
+    anomaly = Path(anomaly_dir).expanduser()
+    scripts = anomaly / _SCRIPTS_DIR
+    git = shutil.which("git")
+    repo = Path(gamma_dir).expanduser() / "downloads" / f"{_GAMMA_REPO}"
+    if not scripts.is_dir() or git is None or modded_exes.load_state(anomaly):
+        return []
+    commit = _installed_commit(git, repo, branch) if (repo / "HEAD").is_file() else None
+    if commit is None:
+        return []
+    patches = _GAMMA_PATCH_ROOT + _SCRIPTS_DIR
+    try:
+        listing = subprocess.run(
+            _git_command(git, repo, "ls-tree", "-r", "--name-only", "-z", commit, "--", patches),
+            capture_output=True, timeout=120, env=_git_env(), check=True,
+        ).stdout.decode("utf-8", "replace")
+    except (OSError, subprocess.SubprocessError):
+        return []
+    known = {p[len(_GAMMA_PATCH_ROOT):].lower() for p in listing.split("\0") if p}
+    known |= {k for k in _vanilla_md5s(anomaly) if k.startswith(_SCRIPTS_DIR)}
+    known |= {k.lower() for k in (coop.load_state(anomaly) or {}).get("files", {})}
+    stray = []
+    for path in scripts.rglob("*"):
+        rel = path.relative_to(anomaly).as_posix()
+        if path.is_file() and rel.lower() not in known:
+            stray.append(rel)
+    return sorted(stray)
 
 
 @dataclass

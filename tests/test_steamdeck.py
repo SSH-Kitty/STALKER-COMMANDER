@@ -944,13 +944,9 @@ class DeckLayoutTests(DeckWindowFixture):
 
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
-        modpack_list = Path(tmp.name) / "modpack_maker_list.txt"
-        mod_list = Path(tmp.name) / "modlist.txt"
-        modpack_list.write_text("x")
-        mod_list.write_text("x")
-        gui_settings.save_gui_settings(
-            offline_modpack_list=str(modpack_list), offline_mod_list=str(mod_list)
-        )
+        archive = Path(tmp.name) / "offline.tar"
+        archive.write_bytes(b"x")
+        gui_settings.save_gui_settings(offline_archive=str(archive))
         install = self.goto("install")
         install.minimal_row.set_checked(True, notify=True)
         install.offline_row.set_checked(True, notify=True)
@@ -963,16 +959,7 @@ class DeckLayoutTests(DeckWindowFixture):
             install._start_install()
         args = cli.call_args[0][0]
         self.assertNotIn("--minimal", args)
-        self.assertEqual(
-            args[-5:],
-            [
-                "--offline",
-                "--mod-pack-maker-path",
-                str(modpack_list),
-                "--mod-list-path",
-                str(mod_list),
-            ],
-        )
+        self.assertEqual(args[-2:], ["--offline-archive-path", str(archive)])
         install._finish_run()
 
     def test_interactive_widgets_are_touch_sized(self):

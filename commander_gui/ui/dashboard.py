@@ -803,16 +803,24 @@ class DashboardPage(QWidget):
         )
         grid.addLayout(_field(tr("Current runner"), self.runner_combo), 1, 0)
 
-        # Download threads - a fixed 3-option "just pick a speed" choice
-        # rather than the Profiles page's free-form 1-20 spin box.
+        # Download threads - a fixed "just pick a speed" choice. Each CLI
+        # thread downloads and unpacks one mod, so 1 is one mod at a time.
         self.download_threads_combo = _field_combo()
         for value, threads_label in (
+            (1, tr("1 (One at a time)")),
+            (2, tr("2 (Slow connection)")),
             (4, tr("4 (Safe)")),
             (6, tr("6 (Balanced)")),
             (8, tr("8 (Fast)")),
         ):
             self.download_threads_combo.addItem(threads_label, value)
         idx = self.download_threads_combo.findData(profile.download_threads)
+        if idx < 0:
+            # Set from the terminal (CLI allows 1-20): show it, don't fake 1.
+            self.download_threads_combo.addItem(
+                str(profile.download_threads), profile.download_threads
+            )
+            idx = self.download_threads_combo.count() - 1
         self.download_threads_combo.blockSignals(True)
         self.download_threads_combo.setCurrentIndex(max(idx, 0))
         self.download_threads_combo.blockSignals(False)

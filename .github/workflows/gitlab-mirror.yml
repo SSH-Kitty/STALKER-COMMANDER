@@ -1,0 +1,30 @@
+name: Mirror to GitLab
+
+# Copies every branch and tag to GitLab as a backup.
+# Needs repo secret GITLAB_TOKEN (GitLab token with write_repository scope).
+on:
+  push:
+    branches: ['**']
+    tags: ['**']
+  delete:
+  workflow_dispatch:
+
+concurrency: gitlab-mirror
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Push all branches and tags to GitLab
+        env:
+          GITLAB_TOKEN: ${{ secrets.GITLAB_TOKEN }}
+        run: |
+          git push --prune \
+            "https://oauth2:${GITLAB_TOKEN}@gitlab.com/commander-group3/stalker-commander.git" \
+            '+refs/remotes/origin/*:refs/heads/*' \
+            '^refs/remotes/origin/HEAD' \
+            '+refs/tags/*:refs/tags/*'

@@ -68,6 +68,15 @@ _OVERLAY_SHORTCUTS = (
     ("Off", "off"),
 )
 
+#: Download threads, as the desktop Dashboard offers them.
+_THREADS = (
+    (1, "1 (One at a time)"),
+    (2, "2 (Slow connection)"),
+    (4, "4 (Safe)"),
+    (6, "6 (Balanced)"),
+    (8, "8 (Fast)"),
+)
+
 _STARTUP_CHOICES = (
     ("always", "Steam Deck"),
     ("never", "Desktop"),
@@ -127,6 +136,10 @@ class SettingsScreen(DeckScreen):
         self.graphics_row = DeckRow(tr("Graphics"))
         self.graphics_row.activated.connect(lambda: self.window.set_page("graphics"))
         self.body.addWidget(self.graphics_row)
+        # The desktop Dashboard's "just pick a speed" choice, per profile.
+        self.threads_row = DeckRow(tr("Download threads"))
+        self.threads_row.activated.connect(self._pick_threads)
+        self.body.addWidget(self.threads_row)
 
         # The desktop Play page's one-click launch options, as switches.
         self.body.addWidget(deck_label(tr("Launch options"), role="rowTitle"))
@@ -297,6 +310,15 @@ class SettingsScreen(DeckScreen):
         self.steam_row.set_value(
             tr("Adding") if self._steam_task is not None else ""
         )
+        profile = self.profile()
+        self.threads_row.setVisible(profile is not None)
+        if profile is not None:
+            self.threads_row.set_value(
+                next(
+                    (tr(label) for value, label in _THREADS if value == profile.download_threads),
+                    str(profile.download_threads),
+                )
+            )
         self._render_build()
 
     # -- COMMANDER build --------------------------------------------------
@@ -470,6 +492,33 @@ class SettingsScreen(DeckScreen):
         gui_settings.save_gui_settings(
             runner=str(kind), deck_runner_confirmed=True
         )
+        self.refresh()
+
+    # -- download threads -------------------------------------------------
+    def _pick_threads(self) -> None:
+        profile = self.profile()
+        if profile is None:
+            return
+        picker = DeckPicker("", [(tr(label), value) for value, label in _THREADS], profile.download_threads)
+        picker.chosen.connect(self._apply_threads)
+        self.window.show_overlay(self._overlay_for(picker, tr("Download threads")))
+
+    def _apply_threads(self, value: object) -> None:
+        self.window.dismiss_overlay()
+        profile = self.profile()
+        if profile is None or profile.download_threads == value:
+            return
+        if self.window.install_busy:
+            # A running install already read the old value.
+            self.window.notify(tr("An install is already running."))
+            return
+        old = profile.download_threads
+        profile.download_threads = int(value)
+        try:
+            self.window.settings.save()
+        except OSError as exc:
+            profile.download_threads = old
+            self.window.notify(tr("Could not write settings.json:\n{exc}", exc=exc), 8000)
         self.refresh()
 
     # -- startup ----------------------------------------------------------

@@ -667,15 +667,15 @@ class RegressionTests(unittest.TestCase):
             ],
         )
 
-    def test_full_install_args_offline_passes_both_list_paths(self):
+    def test_full_install_args_offline_passes_the_archive(self):
+        """CLI 1.41 removed --offline; the archive carries both lists."""
         from commander_gui.ui.install_page import _full_install_args
 
-        args = _full_install_args(False, False, False, offline_lists=("a.txt", "b.txt"))
-        self.assertEqual(
-            args[-5:],
-            ["--offline", "--mod-pack-maker-path", "a.txt", "--mod-list-path", "b.txt"],
-        )
-        self.assertNotIn("--offline", _full_install_args(False, False, False))
+        args = _full_install_args(False, False, False, offline_archive="o.tar", anomaly_mirror=True)
+        self.assertEqual(args[-2:], ["--offline-archive-path", "o.tar"])
+        self.assertNotIn("--offline", args)
+        self.assertNotIn("--use-anomaly-mirror", args)
+        self.assertNotIn("--offline-archive-path", _full_install_args(False, False, False))
 
     def test_offline_checkbox_turns_off_minimal_and_requires_lists(self):
         """Minimal deletes the cache an offline install depends on."""
@@ -757,10 +757,11 @@ class RegressionTests(unittest.TestCase):
             self.assertIn("Auto-retry", page.gamma_chain_note.text())
             page.checkboxes["minimal"].setChecked(True)
             page.checkboxes["offline"].setChecked(True)
+            page.offline_edit.setText(str(Path(tmp) / "offline.tar"))
             self.assertFalse(page.checkboxes["minimal"].isChecked())
             self.assertFalse(page.checkboxes["minimal"].isEnabled())
             self.assertNotIn("--minimal", page._build_full_command())
-            self.assertIn("--offline", page._build_full_command())
+            self.assertIn("--offline-archive-path", page._build_full_command())
             self.assertEqual(page.install_button.text(), "Install GAMMA offline")
             # `anomaly install` can't run offline: no auto-chain, no Anomaly button.
             auto = page.anomaly_checkboxes["auto_continue_gamma"]
@@ -779,15 +780,16 @@ class RegressionTests(unittest.TestCase):
             self.assertTrue(page.anomaly_button.isEnabled())
             page.checkboxes["offline"].setChecked(True)
 
-            lists = (str(Path(tmp) / "mpm.txt"), str(Path(tmp) / "modlist.txt"))
-            self.assertIsNotNone(offline_install_problem(lists, profile.cache))
-            for path in lists:
-                Path(path).write_text("x")
-            # Lists present, cache still empty.
-            self.assertIsNotNone(offline_install_problem(lists, profile.cache))
-            Path(profile.cache).mkdir()
-            (Path(profile.cache) / "addon.zip").write_bytes(b"")
-            self.assertIsNone(offline_install_problem(lists, profile.cache))
+            archive = Path(tmp) / "offline.tar"
+            self.assertIsNotNone(offline_install_problem(""))
+            # A cache unpacked by hand, archive deleted: points to a normal install.
+            unpacked = Path(tmp) / "unpacked"
+            unpacked.mkdir()
+            (unpacked / "mod.zip").write_bytes(b"x")
+            self.assertIn("Untick Offline", offline_install_problem("", str(unpacked)))
+            self.assertIsNotNone(offline_install_problem(str(archive)))
+            archive.write_bytes(b"x")
+            self.assertIsNone(offline_install_problem(str(archive)))
 
     def test_automatic_install_chains_dependencies_into_anomaly_and_gamma(self):
         """Automatic: defaults back on, no dependencies pop-up, and their
@@ -889,33 +891,27 @@ class RegressionTests(unittest.TestCase):
             page._show_view("chooser")
             self.assertTrue(page._auto_choice.isEnabled())
 
-    def test_offline_lists_found_beside_cache_folder_and_nested_extract_flagged(self):
-        """The archive holds cache/ plus both lists, so they sit beside the cache folder."""
-        from commander_gui.ui.install_page import (
-            offline_install_problem,
-            offline_list_paths,
-        )
+    def test_offline_archive_is_remembered_only_while_it_exists(self):
+        from commander_gui.ui.install_page import offline_archive
 
-        with tempfile.TemporaryDirectory() as tmp, patch(
-            "commander_gui.ui.install_page.gui_settings.load_gui_settings",
-            return_value={"offline_modpack_list": "", "offline_mod_list": ""},
-        ):
-            base = Path(tmp)
-            cache = base / "cache"
-            (cache / "cache").mkdir(parents=True)
-            (cache / "cache" / "addon.zip").write_bytes(b"")
-            self.assertEqual(offline_list_paths(str(cache)), ("", ""))
-            for name in ("modpack_maker_list.txt", "modlist.txt"):
-                (base / name).write_text("x")
-            lists = offline_list_paths(str(cache))
-            self.assertEqual(
-                lists, (str(base / "modpack_maker_list.txt"), str(base / "modlist.txt"))
-            )
-            # Extracted one level too deep: say where the archives are.
-            problem = offline_install_problem(lists, str(cache))
-            self.assertIn(str(cache / "cache"), problem)
-            (cache / "cache" / "addon.zip").rename(cache / "addon.zip")
-            self.assertIsNone(offline_install_problem(lists, str(cache)))
+        with tempfile.TemporaryDirectory() as tmp:
+            archive = Path(tmp) / "offline.tar"
+            with patch(
+                "commander_gui.ui.install_page.gui_settings.load_gui_settings",
+                return_value={"offline_archive": str(archive)},
+            ):
+                self.assertEqual(offline_archive(), "")
+                archive.write_bytes(b"x")
+                self.assertEqual(offline_archive(), str(archive))
+
+    def test_offline_unpack_progress_is_not_install_progress(self):
+        """The archive's own [1/1] line must not fill the install bar."""
+        from commander_gui.parsers import parse_progress_line
+
+        unpack = parse_progress_line("[03:10:08] offline.tar | Extract | 100.00% | [1/1]")
+        self.assertTrue(unpack.offline_unpack)
+        addon = parse_progress_line("[03:10:08] Stealth Overhaul | Extract | 100.00% | [1/1]")
+        self.assertFalse(addon.offline_unpack)
 
     def test_repair_install_args_always_preserve_user_content(self):
         """Verify & Repair must never touch user.ltx or MCM settings."""
@@ -1041,6 +1037,18 @@ class RegressionTests(unittest.TestCase):
                 )
             )
         )
+
+        # CLI 1.41's 7-Zip library, captured from real runs.
+        for stderr in (
+            "Exception Message: 1 item(s) failed to extract from x.zip\n  cache/big.bin: DataError\n",
+            "Exception Message: Cannot open archive as zip, it may be corrupt or truncated: x.zip\n",
+        ):
+            self.assertIsNotNone(
+                _broken_archive(
+                    output.replace("Exception Message: Error executing unzip\n", stderr)
+                    .replace("StdErr:   End-of-central-directory signature not found.  Either this file is not\n", "")
+                )
+            )
 
         # A failure that isn't a broken archive (full disk) is left alone.
         self.assertIsNone(
@@ -2177,6 +2185,7 @@ class RegressionTests(unittest.TestCase):
         page.window = MagicMock()
         page.window.install_busy = False
         page._install_active = False
+        page.profile_combo = MagicMock()
 
         with (
             patch.object(page, "_mo2_running", return_value=False),
@@ -2185,6 +2194,12 @@ class RegressionTests(unittest.TestCase):
             patch.object(page, "_start_mod_install") as mock_start,
         ):
             page._reinstall_mod_from_cache("Some Mod")
+            # The archive lookup runs on a BackgroundTask (real QThread).
+            app = QApplication.instance()
+            deadline = time.monotonic() + 5
+            while not mock_info.called and time.monotonic() < deadline:
+                app.processEvents()
+                time.sleep(0.01)
 
         mock_info.assert_called_once()
         mock_start.assert_not_called()
@@ -2218,6 +2233,7 @@ class RegressionTests(unittest.TestCase):
             page.window.install_busy = False
             page._install_active = False
             page.window.settings.active_profile = profile
+            page.profile_combo = MagicMock()
 
             with (
                 patch.object(page, "_mo2_running", return_value=False),
@@ -6684,7 +6700,7 @@ class ModCounterTests(unittest.TestCase):
                 "umup:/path/to/proton",
             )
 
-    def test_dashboard_download_threads_combo_has_exactly_three_options(self):
+    def test_dashboard_download_threads_combo_options(self):
         from PySide6.QtWidgets import QApplication
 
         from commander_gui.ui.dashboard import DashboardPage
@@ -6712,9 +6728,20 @@ class ModCounterTests(unittest.TestCase):
                     (combo.itemText(i), combo.itemData(i))
                     for i in range(combo.count())
                 ],
-                [("4 (Safe)", 4), ("6 (Balanced)", 6), ("8 (Fast)", 8)],
+                [
+                    ("1 (One at a time)", 1),
+                    ("2 (Slow connection)", 2),
+                    ("4 (Safe)", 4),
+                    ("6 (Balanced)", 6),
+                    ("8 (Fast)", 8),
+                ],
             )
             self.assertEqual(combo.currentData(), 6)
+            # A CLI-set value off the list is shown as-is, not as 1.
+            p1.download_threads = 12
+            with patch("commander_gui.ui.dashboard.BackgroundTask"):
+                page = DashboardPage(FakeWindow())
+            self.assertEqual(page.download_threads_combo.currentData(), 12)
 
     def test_dashboard_download_threads_switch_updates_the_active_profile(self):
         from PySide6.QtWidgets import QApplication
@@ -14038,7 +14065,8 @@ class OverlayRevertTests(unittest.TestCase):
             (root / "bin").mkdir()
             vanilla = b"vanilla engine"
             (root / "bin" / "AnomalyDX11.exe").write_bytes(vanilla)
-            (root / "fsgame.ltx").write_bytes(b"gamma fsgame")
+            # A vanilla fsgame.ltx is normal: the CLI never writes GAMMA's.
+            (root / "fsgame.ltx").write_bytes(b"vanilla fsgame")
             (root / "tools" / "checksums.md5").write_text(
                 f"{hashlib.md5(vanilla).hexdigest()} *bin/AnomalyDX11.exe\n"
                 f"{hashlib.md5(b'vanilla fsgame').hexdigest()} *fsgame.ltx\n"
@@ -15030,3 +15058,83 @@ def test_adopt_modpack_list_copies_into_active_profile(tmp_path):
     assert adopt_modpack_list(str(tmp_path), "Mine")
     assert (dest / "modpack_maker_list.json").read_text() == "[]"
     assert not adopt_modpack_list(str(tmp_path), "Mine")  # never overwrites
+
+
+class TesterNov2VerifyAndImportTests(unittest.TestCase):
+    def test_reinstalled_folders_become_the_snapshot(self):
+        from commander_gui.integrity import (
+            MANIFEST_FILENAME,
+            accept_reinstalled,
+            scan_mods_md5,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            gamma = Path(tmp)
+            mod, other = gamma / "mods" / "101- BAS", gamma / "mods" / "11- Other"
+            (mod / "fomod").mkdir(parents=True)
+            other.mkdir(parents=True)
+            (mod / "old.script").write_text("windows layout")
+            (other / "a.script").write_text("a")
+            scan_mods_md5(str(gamma))  # snapshot
+            # Repair unpacks a different layout; an unrelated mod is edited.
+            (mod / "old.script").unlink()
+            (mod / "fomod" / "info.xml").write_text("cli layout")
+            (other / "a.script").write_text("edited")
+            post = scan_mods_md5(str(gamma), trust_baseline=True)
+            accept_reinstalled(str(gamma), post, ["101- BAS"])
+            self.assertEqual(post.changed, ["mods/11- Other/a.script"])
+            self.assertEqual((post.added, post.removed), ([], []))
+            manifest = (gamma / MANIFEST_FILENAME).read_text()
+            self.assertIn("mods/101- BAS/fomod/info.xml", manifest)
+            self.assertNotIn("old.script", manifest)
+            again = scan_mods_md5(str(gamma), trust_baseline=True)
+            self.assertEqual(again.changed, ["mods/11- Other/a.script"])
+
+    def test_split_cache_moves_downloads_next_to_gamma(self):
+        from commander_gui.game_installs import split_cache
+
+        with tempfile.TemporaryDirectory() as tmp:
+            gamma = Path(tmp) / "GAMMA"
+            (gamma / "downloads").mkdir(parents=True)
+            (gamma / "downloads" / "a.zip").write_text("x")
+            cache = split_cache(gamma, gamma / "downloads")
+            self.assertEqual(cache, str(Path(tmp) / "cache"))
+            self.assertTrue((gamma / "downloads").is_symlink())
+            self.assertEqual((gamma / "downloads" / "a.zip").read_text(), "x")
+            # Already split: nothing changes.
+            self.assertEqual(split_cache(gamma, gamma / "downloads"), str(gamma / "downloads"))
+        # GAMMA straight in the home folder: no bare ~/cache.
+        with tempfile.TemporaryDirectory() as tmp:
+            gamma = Path(tmp) / "GAMMA"
+            (gamma / "downloads").mkdir(parents=True)
+            with patch("pathlib.Path.home", return_value=Path(tmp)):
+                self.assertEqual(split_cache(gamma, gamma / "downloads"), str(gamma / "downloads"))
+            self.assertFalse((gamma / "downloads").is_symlink())
+
+    def test_copy_leaves_out_the_windows_launcher_folder(self):
+        from commander_gui.game_installs import WINDOWS_LAUNCHER_DIR, copy_install
+
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "win"
+            (src / "Anomaly").mkdir(parents=True)
+            (src / "GAMMA" / WINDOWS_LAUNCHER_DIR).mkdir(parents=True)
+            (src / "GAMMA" / WINDOWS_LAUNCHER_DIR / "big.bin").write_text("x")
+            (src / "GAMMA" / "ModOrganizer.exe").write_text("x")
+            target = Path(tmp) / "linux"
+            target.mkdir()
+            install = (str(src / "Anomaly"), str(src / "GAMMA"), str(src / "GAMMA" / "downloads"))
+            _a, new_gamma, _c = copy_install(install, target, 2, lambda *_: None, lambda: False)
+            self.assertTrue((Path(new_gamma) / "ModOrganizer.exe").is_file())
+            self.assertFalse((Path(new_gamma) / WINDOWS_LAUNCHER_DIR).exists())
+
+    def test_log_dump_skips_the_windows_launcher_folder(self):
+        from commander_gui.log_dump import _walk_candidates
+
+        with tempfile.TemporaryDirectory() as tmp:
+            junk = Path(tmp) / ".Grok's Modpack Installer" / "resources"
+            junk.mkdir(parents=True)
+            (junk / "Dumper.pm").write_text("x")
+            (Path(tmp) / "logs").mkdir()
+            (Path(tmp) / "logs" / "mo_interface.log").write_text("x")
+            names = [p.name for p in _walk_candidates(Path(tmp))]
+        self.assertEqual(names, ["mo_interface.log"])

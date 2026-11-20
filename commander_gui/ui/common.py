@@ -2599,6 +2599,14 @@ class ProgressArea(QWidget):
         if self.log is not None:
             self.log.append_line(clean)
         event = parse_progress_line(clean)
+        if event is not None and event.offline_unpack and not self.stage_progress:
+            # Before the install proper: its [1/1] must not count as the
+            # whole install done (the bar never goes back down).
+            pct = round(event.percent * 100)
+            self.bar.setRange(0, 100)
+            self.bar.setValue(pct)
+            self.bar.setFormat(tr("Unpacking the offline archive {pct}%", pct=pct))
+            return
         if event is not None:
             # Clearing an already-empty sheet still re-styles the bar, and
             # this runs for every progress line.

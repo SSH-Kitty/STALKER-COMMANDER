@@ -48,12 +48,14 @@ from ..game_backup import (
     prepare_anomaly_reinstall,
 )
 from ..game_installs import (
+    WINDOWS_LAUNCHER_DIR,
     copy_install,
     find_install,
     fix_windows_paths,
     is_gamma,
     mo2_profile_for,
     needs_fix,
+    split_cache,
     windows_drive_folder,
     windows_paths,
 )
@@ -63,6 +65,7 @@ from ..integrity import (
     CacheArchiveVerifyResult,
     Finding,
     RepoRepairResult,
+    accept_reinstalled,
     anomaly_status,
     build_findings,
     compare_repo_files,
@@ -77,6 +80,7 @@ from ..integrity import (
     restore_repo_files,
     reverted_gamma_overlay,
     scan_mods_md5,
+    stray_anomaly_scripts,
     verify_cache_archives,
     verify_gamma,
     write_baseline,
@@ -202,13 +206,16 @@ _CHECKBOXES = [
         (
             "offline",
             "Offline install (cache only)",
-            "Install from a cache already in the cache folder. Nothing is downloaded.",
+            "Install from the offline cache archive. Nothing is downloaded.",
         ),
     )
 ]
 
 #: Where players download the offline cache archive and its two list files.
 OFFLINE_GUIDE_URL = "https://github.com/FaithBeam/stalker-gamma-cli/wiki/Offline-Install"
+
+#: What the CLI's 7-Zip library opens for --offline-archive-path (CLI 1.41+).
+OFFLINE_ARCHIVE_SUFFIXES = (".tar", ".7z", ".zip", ".gz", ".tgz", ".xz", ".zst")
 
 #: Checkboxes an offline install greys out: Minimal would delete the cache
 #: the offline install depends on, and the other two only affect downloads.
@@ -358,14 +365,14 @@ def _full_install_args(
     preserve_mcm: bool,
     skip_extract_on_hash_match: bool = False,
     skip_github_downloads: bool = True,
-    offline_lists: tuple[str, str] | None = None,
+    offline_archive: str | None = None,
     anomaly_mirror: bool = False,
 ) -> list[str]:
     """Build the full-install argv.
 
-    ``offline_lists`` is ``(modpack_maker_list.txt, modlist.txt)``: install
-    only from the pre-extracted cache. Both paths are needed - ``--offline``
-    alone still downloads the two lists.
+    ``offline_archive`` is the offline cache archive: the CLI (1.41+)
+    unpacks it into the cache folder, skipping files already there, and
+    installs with the two lists inside it. Nothing is downloaded.
 
     ``--skip-github-downloads`` reuses a cached GitHub addon archive instead
     of downloading it again: those archives have no MD5 in the modpack list,
@@ -397,60 +404,27 @@ def _full_install_args(
         args.append("--skip-extract-on-hash-match")
     if skip_github_downloads:
         args.append("--skip-github-downloads")
-    if offline_lists:
-        modpack_list, mod_list = offline_lists
-        args += ["--offline", "--mod-pack-maker-path", modpack_list, "--mod-list-path", mod_list]
+    if offline_archive:
+        args += ["--offline-archive-path", offline_archive]
     elif anomaly_mirror:
         args.append("--use-anomaly-mirror")
     return args
 
 
-def offline_list_paths(cache: str) -> tuple[str, str]:
-    """The (modpack_maker_list.txt, modlist.txt) for an offline install.
-
-    The cache archive holds a ``cache/`` folder with both lists beside it, so
-    extracting it into the cache folder's parent leaves them there. A saved
-    choice that still exists wins; otherwise they are looked for beside (or
-    in) the cache folder. No fallback to the profile's own copies: the lists
-    must match the cache snapshot. Empty string where nothing is found.
-    """
-    saved = gui_settings.load_gui_settings()
-    cache_dir = Path(cache).expanduser() if cache else None
-    result = []
-    for key, name in (
-        ("offline_modpack_list", "modpack_maker_list.txt"),
-        ("offline_mod_list", "modlist.txt"),
-    ):
-        found = saved[key] if Path(saved[key]).is_file() else ""
-        if not found and cache_dir is not None:
-            found = next(
-                (str(c) for c in (cache_dir.parent / name, cache_dir / name) if c.is_file()),
-                "",
-            )
-        result.append(found)
-    return (result[0], result[1])
+def offline_archive() -> str:
+    """The offline cache archive picked last, or "" when it is gone."""
+    saved = gui_settings.load_gui_settings()["offline_archive"]
+    return saved if saved and Path(saved).is_file() else ""
 
 
-def offline_install_problem(lists: tuple[str, str], cache: str) -> str | None:
+def offline_install_problem(archive: str, cache: str = "") -> str | None:
     """Why an offline install can't start yet, or None if it can."""
-    if not all(Path(path).is_file() for path in lists):
-        return tr("Pick both list files for the offline install: modpack_maker_list.txt and modlist.txt.")
-    if count_cached_archives(cache) == 0:
-        nested = str(Path(cache).expanduser() / "cache")
-        if count_cached_archives(nested):
-            # The archive has its own top-level cache/ folder: extracted
-            # into the cache folder itself, it ends up one level too deep.
-            return tr(
-                "The archives ended up in {nested}. Move them up into {cache}, or extract the archive into {parent} instead.",
-                nested=nested,
-                cache=cache,
-                parent=str(Path(cache).expanduser().parent),
-            )
-        return tr(
-            "No archives found in {cache}. Extract the offline cache archive into {parent} first.",
-            cache=cache,
-            parent=str(Path(cache).expanduser().parent),
-        )
+    if not archive or not Path(archive).is_file():
+        if count_cached_archives(str(Path(cache).expanduser()) if cache else ""):
+            # Unpacked by hand under the old guide, archive since deleted:
+            # CLI 1.41 has no offline install without the archive.
+            return tr("Your cache is already unpacked. Untick Offline: a normal install reuses it and downloads only what's missing.")
+        return tr("Pick the offline cache archive. It holds the cache folder and both list files.")
     return None
 
 
@@ -1258,6 +1232,15 @@ _BROKEN_ARCHIVE_MARKERS = (
     "cannot open the file as",
     "is not archive",
     "unexpected end of archive",
+    # CLI 1.41+ (in-process 7-Zip library): "Cannot open archive as zip,
+    # it may be corrupt or truncated", "Unsupported archive type" (an
+    # error page saved as the archive), per-file "<path>: UnexpectedEnd".
+    "may be corrupt or truncated",
+    "unsupported archive type",
+    ": unexpectedend",
+    ": dataerror",
+    ": crcerror",
+    ": headerserror",
 )
 
 
@@ -1449,6 +1432,7 @@ class InstallPage(QWidget):
         self._repo_files = {}
         self._repo_repair_pending = False
         self._repo_restored: list[str] = []
+        self._stray_scripts: list[str] = []
         # Unpacking broken mods again from their cached archives.
         self._repair_reuse_keys: dict[str, str] = {}
         self._repair_reused: set[str] = set()
@@ -1583,27 +1567,20 @@ class InstallPage(QWidget):
         # Offline: the same install from an extracted cache archive. Above
         # the hints it swaps, so it stays put when clicked.
         self.auto_offline = QCheckBox(tr("Offline install (cache only)"))
-        self.auto_offline.setToolTip(tr("Install from a cache already in the cache folder. Nothing is downloaded."))
+        self.auto_offline.setToolTip(tr("Install from the offline cache archive. Nothing is downloaded."))
         setup_layout.addWidget(self.auto_offline)
         setup_layout.addWidget(auto_folder_hint)
         self.auto_offline_box = QWidget()
         self.auto_offline_box.setObjectName("panelTransparent")
         offline_layout = QVBoxLayout(self.auto_offline_box)
         offline_layout.setContentsMargins(0, 0, 0, 0)
-        offline_layout.addWidget(info_label(tr(
-            "Extract the offline cache archive into the installation directory first, so the cache folder and both list files sit inside it. Only the Windows runtimes are downloaded, about 150 MB."
-        )))
-        auto_guide = QLabel(
-            f'<a href="{OFFLINE_GUIDE_URL}" style="color: {ACCENT.name()};">'
-            + html.escape(tr("Where to download the offline cache"))
-            + " ↗</a>"
-        )
-        auto_guide.setOpenExternalLinks(True)
-        offline_layout.addWidget(auto_guide)
+        auto_archive_box, self.auto_offline_edit = self._offline_archive_box(tr(
+            "COMMANDER unpacks the archive into the cache folder, then installs from it. Only the Windows runtimes are downloaded."
+        ))
+        offline_layout.addWidget(auto_archive_box)
         self.auto_offline_box.setVisible(False)
         self.auto_offline.toggled.connect(self.auto_offline_box.setVisible)
-        # Offline wants the folder the archive went into, not an empty one.
-        self.auto_offline.toggled.connect(lambda on: auto_folder_hint.setVisible(not on))
+        self.auto_offline.toggled.connect(lambda on: on and self.auto_offline_edit.setText(offline_archive()))
         setup_layout.addWidget(self.auto_offline_box)
         self.auto_tiles = {
             "deps": _CheckTile(tr("Runtimes")),
@@ -1876,38 +1853,12 @@ class InstallPage(QWidget):
             self.checkboxes[key] = cb
         option_groups(body, _GAMMA_OPTION_GROUPS, self.checkboxes)
 
-        # Offline install: the two list files, shown only while ticked.
+        # Offline install: the archive, shown only while ticked.
         # Checkbox states to put back when Offline is unticked again.
         self._offline_saved: dict[str, bool] = {}
-        self.offline_box = QWidget()
-        self.offline_box.setObjectName("panelTransparent")
-        offline_layout = QGridLayout(self.offline_box)
-        offline_layout.setContentsMargins(0, 4, 0, 0)
-        offline_layout.setVerticalSpacing(8)
-        self.offline_hint = info_label("")
-        offline_layout.addWidget(self.offline_hint, 0, 0, 1, 2)
-        self.offline_edits = []
-        for row, (label, key, placeholder) in enumerate(
-            (
-                ("Modpack maker list:", "offline_modpack_list", "Choose modpack_maker_list.txt"),
-                ("Mod list:", "offline_mod_list", "Choose modlist.txt"),
-            ),
-            start=1,
-        ):
-            edit = _PathEdit()
-            edit.setPlaceholderText(tr(placeholder))
-            edit.clicked.connect(lambda key=key: self._browse_offline_list(key))
-            self.offline_edits.append(edit)
-            offline_layout.addWidget(QLabel(tr(label)), row, 0)
-            offline_layout.addWidget(edit, row, 1)
-        guide = QLabel(
-            f'<a href="{OFFLINE_GUIDE_URL}" style="color: {ACCENT.name()};">'
-            + html.escape(tr("Where to download the offline cache"))
-            + " ↗</a>"
-        )
-        guide.setOpenExternalLinks(True)
-        offline_layout.addWidget(guide, 3, 0, 1, 2)
-        offline_layout.setColumnStretch(1, 1)
+        self.offline_box, self.offline_edit = self._offline_archive_box(tr(
+            "COMMANDER unpacks the offline archive into the cache folder, then installs from it. Nothing is downloaded."
+        ))
         self.offline_box.setVisible(False)
         body.addWidget(self.offline_box)
         self.checkboxes["offline"].toggled.connect(self._on_offline_toggled)
@@ -2135,7 +2086,7 @@ class InstallPage(QWidget):
             self.anomaly_edit.setText(profile.anomaly)
             self.gamma_edit.setText(profile.gamma)
             self.cache_edit.setText(profile.cache)
-            self._fill_offline_lists(profile)
+            self.offline_edit.setText(offline_archive())
             if not self.window.install_busy:
                 # Anomaly's installed/not-installed state is already shown
                 # by anomaly_status above - the shared progress console
@@ -2460,8 +2411,36 @@ class InstallPage(QWidget):
                 return
             if answer != QMessageBox.StandardButton.No:
                 return
-        if self._fix_for_linux(install):
-            self._use_install(install, info)
+            on_windows_drive = True
+        else:
+            on_windows_drive = False
+        from_windows = needs_fix(install[0], install[1])
+        if not self._fix_for_linux(install):
+            return
+        if not on_windows_drive:
+            # On a Linux drive: the Linux layout, cache next to GAMMA. Only
+            # once the player said yes, so a cancel leaves the folders alone.
+            install = (install[0], install[1], split_cache(install[1], install[2]))
+        if self._use_install(install, info) and from_windows:
+            self._offer_update()
+
+    def _offer_update(self) -> None:
+        """A Windows install is usually behind: offer the GAMMA update."""
+        answer = QMessageBox.question(
+            self,
+            tr("Update GAMMA now?"),
+            tr("Installs copied from Windows are often behind. Update GAMMA before you play."),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+            points=(tr("Your saves, user.ltx and MCM settings are kept."),),
+            labels={
+                QMessageBox.StandardButton.Yes: tr("Open Updates"),
+                QMessageBox.StandardButton.No: tr("Later"),
+            },
+        )
+        if answer == QMessageBox.StandardButton.Yes:
+            # The Updates page checks for updates when it opens.
+            self.window.set_page("update")
 
     def _copy_to_linux(self, install: tuple[str, str, str]) -> None:
         games = Path.home() / "Games"
@@ -2490,7 +2469,11 @@ class InstallPage(QWidget):
         progress.setWindowModality(Qt.WindowModality.WindowModal)
 
         def work(report):
-            total = dir_size(install[0], max_entries=None) + dir_size(install[1], max_entries=None)
+            total = (
+                dir_size(install[0], max_entries=None)
+                + dir_size(install[1], max_entries=None)
+                - dir_size(Path(install[1]) / WINDOWS_LAUNCHER_DIR, max_entries=None)
+            )
             free = free_space_bytes(target)
             if free is not None and free < total:
                 raise OSError(tr("It needs {need}, but only {free} is free there.", need=human_size(total), free=human_size(free)))
@@ -2721,13 +2704,12 @@ class InstallPage(QWidget):
                 return
         offline = self.auto_offline.isChecked()
         if offline:
-            cache = str(Path(root).expanduser() / "cache")
-            problem = offline_install_problem(offline_list_paths(cache), cache)
+            problem = offline_install_problem(offline_archive(), str(Path(root).expanduser() / "cache"))
             if problem:
                 QMessageBox.warning(self, tr("Offline install"), problem)
                 return
-        # Offline: the cache is already on disk, only the install remains.
-        required = 100 if offline else 150
+        # Offline too: the archive is unpacked into the cache first.
+        required = 150
         free = free_space_bytes(root)
         note = None
         if self._resume_state is not None:
@@ -2765,7 +2747,7 @@ class InstallPage(QWidget):
                 for key in ("preserve_user", "preserve_mcm"):
                     self.checkboxes[key].setChecked(True)
         # Ticked after the reset: it switches off the download-only options
-        # and fills in the two list files found beside the cache.
+        # and fills in the archive.
         self.checkboxes["offline"].setChecked(offline)
         self._auto_active = True
         if self._wt_installed is True:
@@ -3046,12 +3028,12 @@ class InstallPage(QWidget):
             label = tr(_RESUME_BUTTON_LABEL)
             tooltip = tr("Resume the install where it stopped. Installed mods are skipped.")
         elif reinstall:
-            label = tr("Reinstall GAMMA offline") if self._offline_lists() else tr("Reinstall GAMMA")
+            label = tr("Reinstall GAMMA offline") if self.checkboxes["offline"].isChecked() else tr("Reinstall GAMMA")
             tooltip = tr(
                 "Unpack every GAMMA mod again over your install to fix broken mods."
             )
         else:
-            label = tr("Install GAMMA offline") if self._offline_lists() else tr("Install GAMMA")
+            label = tr("Install GAMMA offline") if self.checkboxes["offline"].isChecked() else tr("Install GAMMA")
             tooltip = tr("Install or update GAMMA. Anomaly is installed first if it is missing.")
         self.install_button.setText(label)
         self.install_button.setToolTip(tooltip)
@@ -3236,43 +3218,49 @@ class InstallPage(QWidget):
             edit.setText(folder)
         return bool(folder)
 
-    def _browse_offline_list(self, key):
-        edit = self.offline_edits[0 if key == "offline_modpack_list" else 1]
+    def _offline_archive_box(self, hint: str) -> tuple[QWidget, _PathEdit]:
+        """Hint, archive box and guide link for an offline install."""
+        box = QWidget()
+        box.setObjectName("panelTransparent")
+        layout = QGridLayout(box)
+        layout.setContentsMargins(0, 4, 0, 0)
+        layout.setVerticalSpacing(8)
+        layout.addWidget(info_label(hint), 0, 0, 1, 2)
+        edit = _PathEdit()
+        edit.setPlaceholderText(tr("Choose the offline cache archive"))
+        edit.setText(offline_archive())
+        edit.clicked.connect(lambda: self._browse_offline_archive(edit))
+        layout.addWidget(QLabel(tr("Offline archive:")), 1, 0)
+        layout.addWidget(edit, 1, 1)
+        guide = QLabel(
+            f'<a href="{OFFLINE_GUIDE_URL}" style="color: {ACCENT.name()};">'
+            + html.escape(tr("Where to download the offline cache"))
+            + " ↗</a>"
+        )
+        guide.setOpenExternalLinks(True)
+        layout.addWidget(guide, 2, 0, 1, 2)
+        layout.setColumnStretch(1, 1)
+        return box, edit
+
+    def _browse_offline_archive(self, edit) -> None:
         start = edit.text() or str(Path.home())
+        patterns = " ".join(f"*{suffix}" for suffix in OFFLINE_ARCHIVE_SUFFIXES)
         path, _filter = QFileDialog.getOpenFileName(
-            self, tr("Select list file"), start, tr("Text files (*.txt);;All files (*)")
+            self, tr("Select the offline cache archive"), start,
+            tr("Archives ({patterns});;All files (*)", patterns=patterns),
         )
         if not path:
             return
-        changes = {key: path}
-        # Both lists are published side by side: fill in the other one too.
-        for other_key, name, other_edit in (
-            ("offline_modpack_list", "modpack_maker_list.txt", self.offline_edits[0]),
-            ("offline_mod_list", "modlist.txt", self.offline_edits[1]),
-        ):
-            sibling = Path(path).with_name(name)
-            if other_key != key and sibling.is_file():
-                changes[other_key] = str(sibling)
-                other_edit.setText(str(sibling))
-        edit.setText(path)
-        gui_settings.save_gui_settings(**changes)
-
-    def _fill_offline_lists(self, profile) -> None:
-        for edit, path in zip(self.offline_edits, offline_list_paths(profile.cache)):
-            edit.setText(path)
-        self.offline_hint.setText(
-            tr(
-                "Extract the downloaded cache archive into {parent}. COMMANDER finds the two list files it unpacks there. If they are somewhere else, choose them below.",
-                parent=str(Path(profile.cache).expanduser().parent),
-            )
-        )
+        gui_settings.save_gui_settings(offline_archive=path)
+        for box in (self.offline_edit, self.auto_offline_edit):
+            box.setText(path)
+        self._update_button_states()
 
     def _on_offline_toggled(self, offline: bool):
         self.offline_box.setVisible(offline)
-        profile = self.window.settings.active_profile
-        if offline and profile is not None:
-            # Re-detect: the archive may have been extracted since the page loaded.
-            self._fill_offline_lists(profile)
+        if offline:
+            # Re-read: the archive may have been moved since the page loaded.
+            self.offline_edit.setText(offline_archive())
         # Options that only matter for a download, or that chain into the
         # online `anomaly install`: off (and put back later) while offline.
         boxes = {key: self.checkboxes[key] for key in _OFFLINE_DISABLES}
@@ -3287,10 +3275,11 @@ class InstallPage(QWidget):
                 cb.setChecked(self._offline_saved.pop(key))
             cb.setEnabled(usable)
 
-    def _offline_lists(self) -> tuple[str, str] | None:
+    def _offline_archive(self) -> str | None:
+        """The archive to install from, or None for an online install."""
         if not self.checkboxes["offline"].isChecked():
             return None
-        return (self.offline_edits[0].text(), self.offline_edits[1].text())
+        return self.offline_edit.text()
 
     def _browse_anomaly(self):
         if self._pick_folder(self.anomaly_edit, tr("Select Anomaly install folder")):
@@ -3407,7 +3396,7 @@ class InstallPage(QWidget):
             preserve_mcm,
             skip_extract_on_hash_match,
             not self.checkboxes["redownload_github"].isChecked(),
-            self._offline_lists(),
+            self._offline_archive(),
             self.anomaly_checkboxes["anomaly_mirror"].isChecked(),
         )
 
@@ -3444,9 +3433,9 @@ class InstallPage(QWidget):
             return
         if not skip_confirm and not confirm_singleplayer(self, profile, tr("installing GAMMA")):
             return
-        offline_lists = self._offline_lists()
-        if offline_lists is not None:
-            problem = offline_install_problem(offline_lists, profile.cache)
+        offline_archive_path = self._offline_archive()
+        if offline_archive_path is not None:
+            problem = offline_install_problem(offline_archive_path, profile.cache)
             if problem:
                 QMessageBox.warning(self, tr("Offline install"), problem)
                 # A chained or retried start finds install_busy already set.
@@ -3469,8 +3458,8 @@ class InstallPage(QWidget):
             warnings = [
                 tr("Your keybindings, controls (user.ltx) and MCM settings will be replaced, unless you ticked the options above to keep them.")
             ]
-            # Offline: the cache is already on disk, only the install remains.
-            required_gb = 100 if minimal or offline_lists else 150
+            # Offline too: the archive is unpacked into the cache first.
+            required_gb = 100 if minimal else 150
             free = free_space_bytes(profile.gamma)
             if free is not None and free < required_gb * 1024**3:
                 warnings.append(tr(
@@ -3489,9 +3478,9 @@ class InstallPage(QWidget):
                     "Mods already in the download cache are reused, so only missing "
                     "ones are downloaded."
                 )
-                if reinstall and offline_lists is None
-                else tr("COMMANDER installs GAMMA from your local cache. Nothing is downloaded.")
-                if offline_lists is not None
+                if reinstall and offline_archive_path is None
+                else tr("COMMANDER unpacks the offline archive into the cache folder, then installs from it. Nothing is downloaded.")
+                if offline_archive_path is not None
                 else tr("COMMANDER downloads and installs all GAMMA mods ({size_hint}), plus Anomaly if it isn't installed yet.", size_hint=size_hint),
                 (QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No),
                 points=tuple(points),
@@ -4360,6 +4349,7 @@ class InstallPage(QWidget):
         self._repo_files = {}
         self._repo_repair_pending = False
         self._repo_restored = []
+        self._stray_scripts = []
         self._anomaly_recheck_done = False
         self._pending_repair = None
         # Read here, on the GUI thread: the GAMMA check runs on a worker.
@@ -4521,6 +4511,10 @@ class InstallPage(QWidget):
         if not stopped():
             report("Reading GAMMA's own files from the download cache")
             repo_files, unreadable_repos = gamma_repo_files(profile.gamma, repo_branches(profile))
+            # Read on the GUI thread once this task's result arrives.
+            self._stray_scripts = stray_anomaly_scripts(
+                profile.anomaly, profile.gamma, repo_branches(profile)["Stalker_GAMMA"]
+            )
         report("Starting full MD5 scan of mod files")
         scan = scan_mods_md5(
             profile.gamma,
@@ -5048,6 +5042,16 @@ class InstallPage(QWidget):
                     len(self._repo_restored),
                 )
             )
+        if self._stray_scripts:
+            extra.append(
+                Finding(
+                    "problem",
+                    tr("Extra scripts in Anomaly's gamedata folder"),
+                    tr("They aren't part of Anomaly or GAMMA, often left over from newer modded exes, and can crash the game on load. Fresh Reset on the Utilities page clears them."),
+                    list(self._stray_scripts),
+                    len(self._stray_scripts),
+                )
+            )
         profile = self.window.settings.active_profile
         nothing_checked = getattr(self, "_anomaly_skipped", False) and self._gamma_skipped
         if nothing_checked:
@@ -5491,6 +5495,10 @@ class InstallPage(QWidget):
         )
         if post.cancelled:
             return (post, None, None)
+        try:
+            accept_reinstalled(profile.gamma, post, self._repaired_folders)
+        except OSError:
+            pass
         report("Re-checking GAMMA mods are present")
         presence = verify_gamma(
             profile.gamma,
@@ -5576,10 +5584,11 @@ class InstallPage(QWidget):
         )
 
     def _set_verify_console(self, running: bool) -> None:
-        """Show Console is only there while a check or repair runs."""
+        """The console opens while a check or repair runs (they take
+        minutes; the CLI's output shows it isn't stuck) and closes after."""
         progress = self.verify_progress
-        if not running and progress.log.isVisible():
-            progress._toggle_log()
+        progress.log.setVisible(running)
+        progress.log_toggle.setText(tr("Hide Console") if running else tr("Show Console"))
         progress.log_toggle.setVisible(running)
 
     def _finish_verify(self, ok, message, summary, baseline_created=False, verdict=None):

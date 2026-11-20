@@ -43,14 +43,13 @@ from .dialogs import add_close_button, style_window
 
 #: (name, role) - the same English strings as the Help page's credits table.
 _CREDITS = (
-    ("SSH-Kitty", "COMMANDER's graphical interface."),
-    ("Dnttnd", "Testing implementations, dev builds, bug reports, and helping polish the UI."),
-    ("FaithBeam", "stalker-gamma-cli, the installer COMMANDER bundles and drives. All installation, download and checksum logic is theirs."),
-    ("Harbingerr", "xrRazom Co-op, the multiplayer mod the Multiplayer page installs."),
+    ("SSH-Kitty", "Creator of COMMANDER."),
+    ("Dnttnd", "Testing, dev builds, bug reports and UI polish."),
+    ("FaithBeam", "stalker-gamma-cli, the installer COMMANDER bundles and runs."),
     ("Grokitach and the GAMMA team", "The GAMMA modpack."),
-    ("The Anomaly Team", "Developers of the standalone S.T.A.L.K.E.R. Anomaly modification and engine base."),
-    ("GSC Game World", "Creators of the original S.T.A.L.K.E.R. games and universe."),
-    ("Other projects", "Proton-GE (GloriousEggroll), umu-launcher, Winetricks and Mod Organizer 2."),
+    ("The Anomaly Team", "The standalone S.T.A.L.K.E.R. Anomaly."),
+    ("GSC Game World", "The original S.T.A.L.K.E.R. games."),
+    ("Open-source projects", "Proton-GE, umu-launcher, Winetricks, Mod Organizer 2, MangoHud and vkBasalt. Every bundled component is listed under Third-party notices."),
 )
 
 _COPYRIGHT = "Copyright \u00a9 2026 SSH-Kitty and contributors"

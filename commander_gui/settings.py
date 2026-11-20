@@ -38,7 +38,7 @@ class CliProfile:
     gamma: str = "gamma/gamma"
     cache: str = "gamma/cache"
     mo2_profile: str = "G.A.M.M.A"
-    download_threads: int = 6
+    download_threads: int = 4
     mod_pack_maker_url: str = DEFAULT_MOD_PACK_MAKER_URL
     mod_list_url: str = DEFAULT_MOD_LIST_URL
     gamma_setup_repo_url: str = "https://github.com/Grokitach/gamma_setup"

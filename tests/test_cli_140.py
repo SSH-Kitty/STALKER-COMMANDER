@@ -27,7 +27,7 @@ class Cli140Test(unittest.TestCase):
 
     def test_mirror_flag_only_online(self):
         self.assertIn("--use-anomaly-mirror", _full_install_args(False, True, True, anomaly_mirror=True))
-        offline = _full_install_args(False, True, True, offline_lists=("a", "b"), anomaly_mirror=True)
+        offline = _full_install_args(False, True, True, offline_archive="a.tar", anomaly_mirror=True)
         self.assertNotIn("--use-anomaly-mirror", offline)
 
 

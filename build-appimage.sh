@@ -83,6 +83,7 @@ die() { printf '\033[1;31mERROR:\033[0m %s\n' "$*" >&2; exit 1; }
 [ -d "$PROJECT_DIR/commander_gui" ] || die "run this from the project root"
 [ -f "$PROJECT_DIR/assistant/__main__.py" ] || die "assistant package missing"
 [ -x "$PROJECT_DIR/cli/usr/bin/stalker-gamma" ] || die "cli/usr/bin/stalker-gamma missing or not executable"
+[ -f "$PROJECT_DIR/cli/usr/bin/resources/7z.so" ] || die "cli/usr/bin/resources/7z.so missing (CLI 1.41+ unpacks archives with it)"
 
 # The payload is copied straight from the working tree: an uncommitted or
 # untracked file would ship in a release that nobody can rebuild from git.

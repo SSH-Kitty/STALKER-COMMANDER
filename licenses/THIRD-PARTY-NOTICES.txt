@@ -30,10 +30,10 @@ runtime, and can be replaced: extract the AppImage with
 squashfs-root/AppRun.
 
 
-stalker-gamma-cli 1.40.0                     (cli/usr/bin/stalker-gamma)
+stalker-gamma-cli 1.41.1                     (cli/usr/bin/stalker-gamma)
   Copyright (C) FaithBeam and contributors.
   License: GPL-3.0 (texts/GPL-3.0-only.txt)
-  Source:  https://github.com/FaithBeam/stalker-gamma-cli/tree/1.40.0
+  Source:  https://github.com/FaithBeam/stalker-gamma-cli/tree/1.41.1
 
   The CLI is a .NET native (AOT) program and contains:
   - .NET runtime and libraries - Copyright (c) .NET Foundation and
@@ -113,7 +113,8 @@ vkBasalt 0.3.2.10                 (cli/usr/lib/vkbasalt/libvkbasalt.so)
     (vkBasalt/LICENSE_RESHADE.md)
   - stb_image, stb_image_resize - Sean Barrett - public domain
 
-7-Zip 26.03                               (cli/usr/bin/resources/7zz)
+7-Zip 26.03                               (cli/usr/bin/resources/7z.so,
+                                           cli/usr/bin/resources/7zz)
   Copyright (C) 1999-2026 Igor Pavlov.
   License: GNU LGPL-2.1-or-later, BSD-3-Clause for some parts, and the
            unRAR license restriction for the RAR code

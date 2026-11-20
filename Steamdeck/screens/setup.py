@@ -10,7 +10,9 @@ it derives the rest:
     <drive>/GAMMA/Anomaly   <drive>/GAMMA/GAMMA   <drive>/GAMMA/cache
 
 The name defaults to "GAMMA" and can be changed with the on-screen
-keyboard. Creation runs the CLI's own ``config create`` with the same
+keyboard. "Import from file" first loads a profile exported from the
+desktop Profiles page (its MO2 profile and download threads; never its
+download sources or folders, as on the desktop). Creation runs the CLI's own ``config create`` with the same
 arguments the desktop Profiles page builds (``create_profile_args``), so a
 profile made here is indistinguishable from one made there.
 """
@@ -21,14 +23,20 @@ from pathlib import Path
 
 from PySide6.QtWidgets import QLineEdit
 
+from commander_gui import atomic
 from commander_gui.i18n import tr
 from commander_gui.modlist import seed_new_mo2_profile
+from commander_gui.profile_bundle import (
+    ProfileBundleError,
+    read_profile_bundle,
+    reset_sources,
+)
 from commander_gui.settings import CliProfile, cli_ok, run_config_command
 from commander_gui.ui.common import BackgroundTask, free_space_bytes, human_size
 from commander_gui.ui.profiles_page import create_profile_args
 
 from ..folder_picker import candidate_roots, show_folder_picker
-from ..widgets import DeckCard, DeckRow, deck_button, deck_label
+from ..widgets import DeckCard, DeckRow, deck_button, deck_label, show_detail
 from .base import DeckScreen
 
 #: What a full install needs, used only to label drives that are too small.
@@ -78,6 +86,8 @@ class SetupScreen(DeckScreen):
         self.name_edit.setMaxLength(40)
         self._widgets: list = []
         self._default = None
+        #: (bundle file, its parsed contents) from "Import from file".
+        self._imported = None
         self._render()
 
     # -- rendering --------------------------------------------------------
@@ -139,6 +149,11 @@ class SetupScreen(DeckScreen):
         other = DeckRow(tr("Choose another folder"))
         other.activated.connect(self._browse)
         self.body.addWidget(other)
+        imported = DeckRow(
+            tr("Import from file"), self._imported[0].name if self._imported else ""
+        )
+        imported.activated.connect(self._import)
+        self.body.addWidget(imported)
         self._default = self.drive_rows[0] if self.drive_rows else other
 
     def _render_review(self) -> None:
@@ -205,6 +220,7 @@ class SetupScreen(DeckScreen):
             # starts a fresh one rather than showing the old success page.
             self._step = "drive"
             self._root = None
+            self._imported = None
             self.name_edit.clear()
         if self._step == "drive":
             self._render()
@@ -218,6 +234,54 @@ class SetupScreen(DeckScreen):
             title=tr("Install location"),
             start=None,
             on_choose=lambda path: self._set_root(Path(path) / _INSTALL_DIR),
+        )
+
+    def _import(self) -> None:
+        from ..mod_installer import pick_file
+
+        def _chosen(path: Path) -> None:
+            try:
+                bundle = read_profile_bundle(path)
+            except ProfileBundleError as exc:
+                self.window.notify(tr("Couldn't import the profile") + ": " + str(exc), 8000)
+                return
+            self._imported = (path, bundle)
+            self.window.notify(
+                tr("Settings loaded. Choose a name and install folders, then create the profile."),
+                6000,
+            )
+            self._render()
+
+        downloads = Path.home() / "Downloads"
+        pick_file(
+            self.window,
+            tr("Import Profile"),
+            downloads if downloads.is_dir() else Path.home(),
+            (".zip",),
+            _chosen,
+        )
+
+    def _save_imported_modlist(self) -> str | None:
+        """The desktop's way with a bundle's mod list: saved beside the
+        bundle (never over an existing file), with how to use it."""
+        if self._imported is None or self._imported[1].modlist_text is None:
+            return None
+        path = self._imported[0]
+        stem = path.with_suffix("").stem
+        out = path.with_name(f"{stem}.modlist.txt")
+        number = 2
+        while out.exists() or out.is_symlink():
+            out = path.with_name(f"{stem}.modlist-{number}.txt")
+            number += 1
+        try:
+            atomic.write_bytes(out, self._imported[1].modlist_text.encode("utf-8"), lock=False)
+        except OSError:
+            return None
+        return tr(
+            "The file also had a mod list (modlist.txt). It's saved here:\n{path}\n\n"
+            "To get its load order back, copy it to <GAMMA>/profiles/<MO2 profile>/modlist.txt "
+            "after installing GAMMA.",
+            path=str(out),
         )
 
     def _set_root(self, root: Path) -> None:
@@ -258,6 +322,10 @@ class SetupScreen(DeckScreen):
             self.window.notify(tr("A profile named '{name}' already exists.", name=name))
             return
         profile = profile_for(self._root, name)
+        if self._imported is not None:
+            self._imported[1].apply_to(profile)
+            # A bundle is a file someone sends you: never its download sources.
+            reset_sources(profile)
         for path in (profile.anomaly, profile.gamma, profile.cache):
             try:
                 Path(path).mkdir(parents=True, exist_ok=True)
@@ -290,8 +358,12 @@ class SetupScreen(DeckScreen):
             seed_new_mo2_profile(profile.gamma, profile.mo2_profile)
         except OSError:
             pass  # best-effort, as on the desktop Profiles page
+        note = self._save_imported_modlist()
+        self._imported = None
         self._step = "done"
         self._render()
+        if note:
+            show_detail(self.window, tr("Profile imported"), note)
 
     def _on_error(self, message: str) -> None:
         self._task = None

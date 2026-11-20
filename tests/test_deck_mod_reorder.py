@@ -86,7 +86,7 @@ class StartupModeTests(unittest.TestCase):
         self.assertEqual(asked, [1])
 
 
-class DeckModReorderTests(DeckWindowFixture):
+class _ModsScreenFixture(DeckWindowFixture):
     def setUp(self):
         super().setUp()
         self.modlist.write_text(_MODLIST, encoding="utf-8")
@@ -112,6 +112,8 @@ class DeckModReorderTests(DeckWindowFixture):
         self.window._focus.dispatch(action)
         self.pump()
 
+
+class DeckModReorderTests(_ModsScreenFixture):
     def test_screen_asks_for_holds_only_on_the_list(self):
         self.assertTrue(self.window._accept_hold_wanted())
         self.mods.search_button.setFocus()
@@ -212,3 +214,68 @@ class DeckModReorderTests(DeckWindowFixture):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DeckModMenuTests(_ModsScreenFixture):
+    """X menus on the Mods screen: nicknames, categories, reinstall rollback."""
+
+    def _headers(self):
+        return [
+            self.mods.list.item(row).data(self.mods_module._CATEGORY)
+            for row in range(self.mods.list.count())
+            if self.mods.list.item(row).data(self.mods_module._KIND) == "header"
+        ]
+
+    def setUp(self):
+        super().setUp()
+        from Steamdeck.screens import mods
+
+        self.mods_module = mods
+
+    def test_nickname_shows_but_edits_use_the_real_name(self):
+        self.mods._set_nickname("W1", "Rifles")
+        self.assertIn("Rifles", self._names())
+        self.mods._move_to_category("W1", "Audio")
+        text = self.modlist.read_text(encoding="utf-8")
+        self.assertIn("+W1", text)
+        self.assertLess(text.index("+W1"), text.index("+Audio_separator"))
+        self.assertNotIn("Rifles", text)
+
+    def test_move_category_up_on_screen(self):
+        self.assertEqual(self._headers(), ["Weapons", "Audio"])
+        self.mods._move_category("Audio", 1)
+        self.assertEqual(self._headers(), ["Audio", "Weapons"])
+
+    def test_delete_user_category_keeps_its_mods_and_backs_up(self):
+        self.mods._save_tracked(lambda names: names + ["Audio"])
+        self.mods._delete_category("Audio")
+        self.window.current_overlay().buttons[0].click()  # Delete Category
+        self.pump()
+        text = self.modlist.read_text(encoding="utf-8")
+        self.assertNotIn("Audio_separator", text)
+        self.assertIn("+A1", text)
+        self.assertIn("+A2", text)
+        backups = list(self.modlist.parent.glob("modlist*.bak"))
+        self.assertTrue(backups)
+
+    def test_gamma_category_offers_no_delete(self):
+        with patch.object(self.mods, "_menu") as menu:
+            self.mods._category_menu("Weapons")
+        labels = [label for label, _action in menu.call_args[0][1]]
+        self.assertNotIn("Delete Category", labels)
+
+    def test_failed_reinstall_puts_the_old_folder_back(self):
+        from Steamdeck.mod_installer import DeckModInstaller
+
+        folder = self.gamma / "mods" / "W1"
+        folder.mkdir(parents=True)
+        (folder / "keep.txt").write_text("old", encoding="utf-8")
+        installer = DeckModInstaller(self.mods)
+        with patch.object(installer, "_extract"):
+            installer.reinstall(self.tmp / "new.7z", "W1", "done")
+        self.assertFalse(folder.exists())
+        installer._fail("cancelled")
+        self.assertEqual((folder / "keep.txt").read_text(encoding="utf-8"), "old")
+        self.assertEqual(
+            [p.name for p in folder.parent.iterdir()], ["W1"]
+        )

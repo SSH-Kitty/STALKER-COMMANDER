@@ -17,6 +17,7 @@ released, through the Mods screen's guarded writer.
 from __future__ import annotations
 
 import shutil
+import uuid
 import zipfile
 from collections.abc import Callable
 from pathlib import Path
@@ -51,6 +52,8 @@ from commander_gui.romeo import (
     is_romeo_profile,
     mcm_changed,
     old_mods,
+    remove_old_mods,
+    space_needed,
     unpacked_size,
 )
 from commander_gui.romeo import install as install_romeo
@@ -235,6 +238,9 @@ class DeckModInstaller(QObject):
         self._archive: Path | None = None
         self._progress_overlay = None
         self._progress_hidden = False
+        #: Reinstall/update of a listed mod: (folder, moved-aside copy or
+        #: None, message when done). Its modlist entry is left as it is.
+        self._reinstall: tuple[Path, Path | None, str] | None = None
 
     # -- 1. pick ----------------------------------------------------------------
     def start(self) -> None:
@@ -418,6 +424,51 @@ class DeckModInstaller(QObject):
             return
         self._extract(safe)
 
+    # -- reinstall / update --------------------------------------------------------
+    def reinstall(self, archive: Path, name: str, done_message: str) -> None:
+        """Replace listed mod ``name``'s files with ``archive``'s.
+
+        The desktop's Reinstall from Cache / Update from Archive: the old
+        folder is moved aside first and put back if the install fails or is
+        cancelled; the modlist entry (place, on/off, category) never changes.
+        """
+        reason = self._blocked()
+        if reason:
+            self.window.notify(reason, 6000)
+            return
+        mods_dir = Path(self.screen.profile().gamma) / "mods"
+        if mods_dir.is_symlink():
+            self.window.notify(tr("The GAMMA mods directory cannot be a symlink."), 6000)
+            return
+        destination = mods_dir / name
+        backup = None
+        if destination.exists() or destination.is_symlink():
+            # Same folder, so a rename: instant even for a big mod.
+            backup = destination.with_name(f".{name}.reinstall-backup-{uuid.uuid4().hex}")
+            try:
+                destination.rename(backup)
+            except OSError as exc:
+                self.window.notify(tr("Couldn't reinstall the mod") + ": " + str(exc), 8000)
+                return
+        self._reinstall = (destination, backup, done_message)
+        self._archive = archive
+        self._extract(name)
+
+    def _undo_reinstall(self) -> None:
+        """Put a moved-aside mod folder back after a failed reinstall."""
+        pending, self._reinstall = self._reinstall, None
+        if pending is None or pending[1] is None:
+            return
+        destination, backup, _message = pending
+        try:
+            if destination.exists() and not destination.is_symlink():
+                shutil.rmtree(destination)
+            backup.rename(destination)
+        except OSError as exc:
+            self.window.notify(
+                tr("The original mod folder couldn't be put back:\n{error}", error=str(exc)), 8000
+            )
+
     # -- 3. extract / FOMOD -------------------------------------------------------
     def _show_progress(self, text: str) -> None:
         if self._progress_hidden:
@@ -530,6 +581,7 @@ class DeckModInstaller(QObject):
         destination = Path(profile.gamma) / "mods" / self._name
         selected = self._staging_root / "selected"
         archive_name = self._archive.name if self._archive is not None else ""
+        old = self._reinstall[1] if self._reinstall is not None else None
         self._show_progress(tr("Installing {name}", name=self._name))
 
         def worker():
@@ -540,6 +592,8 @@ class DeckModInstaller(QObject):
                 payload = selected
             move_payload(payload, destination, task.cancel_event)
             write_basic_meta_ini(destination, archive_name)
+            if old is not None:
+                shutil.rmtree(old, ignore_errors=True)
             return str(destination)
 
         task = BackgroundTask(worker, parent=self)
@@ -552,6 +606,17 @@ class DeckModInstaller(QObject):
         self._task = None
         self._cleanup()
         self._close_progress()
+        if self._reinstall is not None:
+            message = self._reinstall[2]
+            self._reinstall = None
+            try:
+                invalidate_baseline(self.screen.profile().gamma)
+            except (OSError, AttributeError):
+                pass
+            self.screen.refresh()
+            self.screen.reveal_mod(destination.name)
+            self.window.announce_finished(tr("Mod reinstalled"), message)
+            return
         path = self.screen._path
         try:
             lines = read_lines(path)
@@ -634,8 +699,12 @@ class DeckModInstaller(QObject):
             self.window.notify(tr("ROMEO goes on top of GAMMA. Install GAMMA for this profile, then install ROMEO."), 8000)
             return True
         gamma, anomaly = Path(profile.gamma), Path(profile.anomaly)
+        update = (gamma / "profiles" / mo2_profile).is_dir()
         need = unpacked_size(archiver, archive)
         free = shutil.disk_usage(gamma).free
+        remove_first = False
+        if need:
+            need, remove_first = space_needed(gamma, need, free, update)
         if need and need > free:
             self.window.notify(
                 tr(
@@ -659,11 +728,10 @@ class DeckModInstaller(QObject):
             )
             return True
         requirements = tr("ROMEO needs GAMMA 0.9.5 and modded exes from 2026.9.12 or newer. Unpacking takes a while.")
-        update = (gamma / "profiles" / mo2_profile).is_dir()
 
         def _go(keep_mcm: bool) -> None:
             self.window.dismiss_overlay()
-            self._install_romeo(archive, wrapper, mo2_profile, gamma, anomaly, keep_mcm, update)
+            self._install_romeo(archive, wrapper, mo2_profile, gamma, anomaly, keep_mcm, update, remove_first)
 
         if not update:
             self.window.confirm(
@@ -679,6 +747,8 @@ class DeckModInstaller(QObject):
         def _confirm_update(keep_mcm: bool) -> None:
             self.window.dismiss_overlay(refocus=False)
             message = tr("COMMANDER removes the {count} old xx- mods, as ROMEO's guide says, then installs the new version.", count=len(old_mods(gamma)))
+            if remove_first:
+                message += "\n\n" + tr("There isn't room for the old and new versions at once, so the old mods go before unpacking. If the update stops part way, run it again.")
             if keep_mcm:
                 message += "\n\n" + tr("Your MCM settings are kept as '{name}', turned on in place of ROMEO's.", name=KEPT_MCM)
             self.window.confirm(
@@ -711,7 +781,7 @@ class DeckModInstaller(QObject):
 
     def _install_romeo(
         self, archive: Path, wrapper: str, mo2_profile: str, gamma: Path, anomaly: Path,
-        keep_mcm: bool, update: bool,
+        keep_mcm: bool, update: bool, remove_first: bool = False,
     ) -> None:
         reason = self._blocked()
         if reason:
@@ -727,6 +797,9 @@ class DeckModInstaller(QObject):
         task: StreamTask | None = None
 
         def worker(report):
+            if remove_first:
+                report(tr("Removing the old xx- mods"))
+                remove_old_mods(gamma, keep_mcm)
             extract_archive(
                 archive, staging, task.cancel_event,
                 lambda percent, text: report(
@@ -736,7 +809,7 @@ class DeckModInstaller(QObject):
             install_romeo(
                 staging, wrapper, mo2_profile, gamma, anomaly, task.cancel_event,
                 lambda done, total: report(tr("Installing ROMEO mods {done}/{total}", done=done, total=total)),
-                keep_mcm,
+                keep_mcm and not remove_first,
             )
             return mo2_profile
 
@@ -808,6 +881,7 @@ class DeckModInstaller(QObject):
 
     def _fail(self, message: str) -> None:
         self._task = None
+        self._undo_reinstall()
         self._cleanup()
         self._close_progress()
         self.window.notify(tr("Mod installation failed") + ": " + message, 8000)

@@ -4,7 +4,8 @@ Three things a player cannot get back from a reinstall live inside the
 install folders, so a Fresh Reset, GAMMA Reset or Full Uninstall deletes
 them along with everything else:
 
-* saves - ``<anomaly>/appdata/savedgames``;
+* saves - ``<anomaly>/appdata/savedgames``, and under MO2 also
+  ``<gamma>/overwrite/appdata/savedgames`` and ``<gamma>/profiles/*/saves``;
 * game options, controls and keybinds - ``<anomaly>/appdata/user.ltx``;
 * MCM (Mod Configuration Menu) settings - ``axr_options.ltx``, which MO2
   keeps inside GAMMA's "MCM values" mod (or a renamed copy of it) and, when
@@ -144,11 +145,28 @@ def collect(
     """The ``(name in the zip, file on disk)`` pairs a backup would hold."""
     files: list[tuple[str, Path]] = []
     if saves:
-        folder = saves_dir(anomaly)
-        if folder.is_dir():
-            for item in sorted(folder.rglob("*")):
-                if item.is_file() and not item.is_symlink():
-                    files.append(("saves/" + item.relative_to(folder).as_posix(), item))
+        # Under MO2 a save can also land in the GAMMA folder: overwrite (a
+        # save MO2's virtual file system created) or a profile's local saves.
+        # A reset wipes those too, so all of them go in, newest copy of a
+        # name winning; a restore puts them all in Anomaly's folder.
+        folders = [saves_dir(anomaly)]
+        if str(gamma).strip():  # Path("") is the working directory
+            root = Path(gamma).expanduser()
+            folders += [
+                *sorted((root / "profiles").glob("*/saves")),
+                root / "overwrite" / "appdata" / "savedgames",
+            ]
+        newest: dict[str, Path] = {}
+        for folder in folders:
+            if not folder.is_dir():
+                continue
+            for item in folder.rglob("*"):
+                if not item.is_file() or item.is_symlink():
+                    continue
+                name = "saves/" + item.relative_to(folder).as_posix()
+                if name not in newest or item.stat().st_mtime > newest[name].stat().st_mtime:
+                    newest[name] = item
+        files.extend(sorted(newest.items()))
     if settings:
         ltx = user_ltx_path(anomaly)
         if ltx.is_file():
@@ -505,8 +523,9 @@ def backup_before_wipe(
 ) -> BackupInfo | None:
     """The automatic backup that runs before a reset or uninstall.
 
-    Saves and user.ltx are at risk when the Anomaly folder is wiped; MCM
-    settings when the GAMMA folder is. user.ltx is always included - it is
+    Saves are at risk with either folder (MO2 can keep them in GAMMA's
+    overwrite or a profile's local saves), user.ltx when Anomaly is wiped
+    and MCM settings when GAMMA is. user.ltx is always included - it is
     tiny, and a GAMMA reinstall without "preserve" resets it too.
     """
     anomaly_wiped = "Anomaly" in wipe_labels
@@ -519,7 +538,7 @@ def backup_before_wipe(
         profile.anomaly,
         profile.gamma,
         reason=reason,
-        saves=anomaly_wiped,
+        saves=True,  # a GAMMA-only wipe takes overwrite and MO2 local saves
         settings=True,
         report=report,
     )

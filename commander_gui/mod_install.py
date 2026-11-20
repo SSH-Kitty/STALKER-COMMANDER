@@ -32,7 +32,11 @@ class ModInstallError(RuntimeError):
 
 
 def find_archiver() -> Path:
-    """Locate the bundled 7zz helper, falling back to a system 7-Zip."""
+    """Locate the bundled 7zz helper, falling back to a system 7-Zip.
+
+    COMMANDER ships this 7zz itself: the CLI dropped it in 1.41 for an
+    in-process 7z.so, which only the CLI can use. Keep it on a CLI update.
+    """
     bundled = cli_binary_path().parent / "resources" / "7zz"
     if bundled.is_file() and os.access(bundled, os.X_OK):
         return bundled

@@ -77,6 +77,21 @@ TOPICS: list[dict] = [
                 ],
             ),
             (
+                "Around the window",
+                [
+                    ("table", [
+                        ("Installation status", "The Dashboard card says in one line whether everything is installed. Click a row to open the page that fixes it."),
+                        ("Version number", "Click the version at the bottom left to copy your COMMANDER, CLI and Proton versions, GPU and CPU. Paste it into a bug report."),
+                        ("System tray icon", "Click it to show or hide COMMANDER. Its menu launches or quits the game, opens Graphics while the game runs, switches profile and opens Settings."),
+                        ("Hiding to the tray", "The close button can hide COMMANDER instead of quitting it, and COMMANDER can hide while the game runs. Quit from the tray menu. Both are in Settings → General."),
+                        ("Starting at login", "With Start COMMANDER when I log in on, COMMANDER starts hidden in the tray."),
+                        ("File picker", "COMMANDER picks files and folders with its own window in your theme: places and drives on the left, a path bar, a filter box and the folder list. System picker opens your desktop's own dialog instead."),
+                        ("Right-click menus", "Text boxes get COMMANDER's own Undo, Cut, Copy and Paste menu, translated and in your theme. It also works on Wayland desktops where the old menu didn't open."),
+                        ("Click sounds", "A short click on buttons, tabs and tray menu items. Turn it off in Settings → Appearance."),
+                    ]),
+                ],
+            ),
+            (
                 "This installation",
                 [
                     ("live", [
@@ -227,10 +242,10 @@ TOPICS: list[dict] = [
                 "Step by step",
                 [
                     ("steps", [
-                        "Open System Check. Install anything shown as Missing with the copy-command button next to it, then press Refresh Checks. The minimum is a runner (umu-run is best), Vulkan including 32-bit, and unzip.",
-                        "Open Install. Pick an empty base folder on a drive with about 150 GB free and press Create folders. COMMANDER makes anomaly, gamma and cache folders inside it and saves them to your profile.",
-                        "Press Install Dependencies. COMMANDER installs any missing tools first (umu-run, winetricks), then installs the Windows runtime libraries into your runner's Wine prefix. This is about 150 MB and only needs doing once per prefix.",
-                        "Press Install GAMMA. If Anomaly is not installed yet, it is installed first (stalker-gamma anomaly install), then GAMMA (stalker-gamma full-install). This downloads many gigabytes and can take a few hours. You can pause, cancel and resume.",
+                        "Open System Check. Install anything shown as Missing with the copy-command button next to it, then press Refresh Checks. The minimum is a runner (umu-run is best) and Vulkan including 32-bit.",
+                        "Open Install and pick Automatic install. Choose a folder on a drive with about 150 GB free and press Start install. COMMANDER installs the Windows runtimes, then Anomaly, then GAMMA, with GAMMA's recommended settings.",
+                        "Want to choose every option yourself? Pick Manual install instead and go through its five steps: Folder, Dependencies, Anomaly, GAMMA and Verify.",
+                        "The install downloads many gigabytes and can take a few hours. You can pause, cancel and resume, even after closing COMMANDER.",
                         "When it finishes, COMMANDER takes you to Play. Keep the runner on Auto-detect. If you have no Proton-GE yet, press Manage Proton-GE and download the newest one.",
                         "Press Launch Game. The first start is slow while shaders are built.",
                     ]),
@@ -241,6 +256,7 @@ TOPICS: list[dict] = [
                 "Using an existing install",
                 [
                     "If you already installed GAMMA with the CLI, COMMANDER finds the profile in ~/.config/stalker-gamma/settings.json and uses it straight away. If you installed it somewhere else, create a profile on Profiles that points at your existing Anomaly and GAMMA folders. Nothing is downloaded until you ask for an install or update.",
+                    "Copied GAMMA over from Windows? Use Open a Windows install on the Install page. See Installing Anomaly and GAMMA.",
                 ],
             ),
             (
@@ -249,7 +265,7 @@ TOPICS: list[dict] = [
                     ("table", [
                         ("Disk space", "About 150 GB in total, or about 100 GB with Minimal."),
                         ("Time", "Mostly depends on your connection and on moddb's download servers. A few hours is normal."),
-                        ("Download threads", "How many files download at once (Dashboard or Profiles): 4 is safe, 6 is balanced (the default), 8 is fast. Lower it if downloads keep failing."),
+                        ("Download threads", "How many mods download and unpack at once (Dashboard): 1 is one at a time, 4 is safe (the default), 8 is fast. Lower it if installs stall or downloads keep failing."),
                     ]),
                 ],
             ),
@@ -260,6 +276,53 @@ TOPICS: list[dict] = [
         "summary": "Exactly what the Install page runs, what each option changes, and how failures are handled.",
         "page": "install",
         "sections": [
+            (
+                "The Install page",
+                [
+                    "The Install page has four cards:",
+                    ("table", [
+                        ("Automatic install", "Pick a folder and COMMANDER installs the Windows runtimes, Anomaly and GAMMA with GAMMA's recommended settings. Best for a first install. Once GAMMA is installed, use Manual install to reinstall, update or repair."),
+                        ("Manual install", "Five steps, one page each: Folder, Dependencies, Anomaly, GAMMA and Verify. You choose the folders and every option."),
+                        ("Open a Windows install", "Plays a GAMMA install that was set up on Windows. See below."),
+                        ("Switch install", "Swaps between GAMMA installs in different folders. See below."),
+                    ]),
+                ],
+            ),
+            (
+                "Manual install steps",
+                [
+                    ("table", [
+                        ("1. Folder", "Pick a base folder and press Create folders. COMMANDER makes anomaly, gamma and cache folders inside it and saves them to your profile."),
+                        ("2. Dependencies", "Installs the Windows runtimes into the runner's Wine prefix. See Dependencies and System Check."),
+                        ("3. Anomaly", "Downloads and installs STALKER Anomaly 1.5.3. Reinstall Anomaly unpacks it again over your install (see below)."),
+                        ("4. GAMMA", "Downloads and installs GAMMA and all its mods, with the options below. Anomaly is installed first if it is missing."),
+                        ("5. Verify", "Finds and repairs missing or changed game files. See Verify Integrity and Repair."),
+                    ]),
+                    ("note", "You can change the folders later in Settings → Game → Folders."),
+                ],
+            ),
+            (
+                "Open a Windows install",
+                [
+                    "Copied a GAMMA install over from Windows? Pick the folder that holds both the Anomaly and GAMMA folders. COMMANDER changes the Windows paths in ModOrganizer.ini so it runs on Linux, then plays from it. Mods, saves and settings stay as they are, and the old file is kept as ModOrganizer.ini.windows.bak.",
+                    "Paths that point at another Windows drive are left as they are. Change them in Mod Organizer if you need them.",
+                    "If the install is still on a Windows drive (NTFS), COMMANDER offers Copy to Linux drive: it copies the Anomaly and GAMMA folders to an empty folder you pick and leaves the copy on the Windows drive as it is. Installs from Windows are often behind, so COMMANDER then offers to update GAMMA.",
+                    ("warn", "GAMMA can run slow, fail to save or not start from a Windows drive (NTFS, exFAT or FAT). COMMANDER warns you whenever a folder you pick is on one."),
+                ],
+            ),
+            (
+                "Switch install",
+                [
+                    "Switch install lists your GAMMA installs. Play this switches the game to another one: only the folders change, your runner and launch options stay. Add install adds a folder to the list, and Remove takes one off it without deleting any files.",
+                ],
+            ),
+            (
+                "Reinstall Anomaly",
+                [
+                    "Reinstall Anomaly on step 3 unpacks STALKER Anomaly 1.5.3 again over your install, reusing the Anomaly archive in the download cache when it is still valid. A backup of your saves, user.ltx and MCM settings is made first, and Keep saves and Keep user.ltx and MCM settings keep them in place.",
+                    "GAMMA is reinstalled right after, so its own files go back on top of Anomaly. Files you added to the Anomaly folder yourself stay. For a clean install, use Fresh Reset on the Utilities page.",
+                ],
+            ),
             (
                 "The commands COMMANDER runs",
                 [
@@ -283,7 +346,7 @@ TOPICS: list[dict] = [
                         ("Re-download GitHub addons", "Without this, COMMANDER passes --skip-github-downloads so archives hosted on GitHub are reused from the cache (they have no MD5 in GAMMA's list, so the CLI would otherwise download every one again). A missing archive is always downloaded."),
                         ("Auto-retry on large file pack failures", "GAMMA's large-files repository on GitHub sometimes fails part way. With this on, COMMANDER retries it up to 10 times by itself."),
                         ("Keep my current engine executables", "GAMMA puts its own engine exes into the Anomaly folder. Tick this only if you installed different (for example newer, modded) exes on purpose and want to keep them."),
-                        ('Offline install (--offline)', 'Installs from the offline cache archive, passing --mod-pack-maker-path and --mod-list-path so nothing is downloaded. Extract the archive into the folder that contains your cache folder: the modlist.txt and modpack_maker_list.txt it holds are found automatically, or you can choose them yourself. Minimal, Re-download GitHub addons and Auto-retry are turned off while it is on.'),
+                        ('Offline install (--offline-archive-path)', "Installs from the offline cache archive you choose. The CLI unpacks it into your cache folder, skipping files already there, then installs with the modlist.txt and modpack_maker_list.txt inside it. Nothing is downloaded. Minimal, Re-download GitHub addons and Auto-retry are turned off while it is on. Keep the archive until the install is done. A cache you unpacked yourself, without the archive, needs a normal install: it reuses the cache and downloads only what's missing."),
                     ]),
                     ("warn", "Install options are not remembered between runs. Check them every time."),
                 ],
@@ -306,6 +369,8 @@ TOPICS: list[dict] = [
                     "Pause freezes the CLI process; Resume continues it. Cancel stops it cleanly (it gets an interrupt signal first, and is only killed if it does not stop). Downloads that already finished stay in the cache.",
                     "If an install fails or is cancelled, COMMANDER remembers which folders it was installing into. Next time the Install button becomes Resume GAMMA Installation. The CLI then checks every cached archive's MD5 and only downloads what is missing or changed. The resume state follows the folders, not the profile name, so renaming a profile does not lose it.",
                     "If a cached archive fails its MD5 check, the CLI downloads it again and COMMANDER says so in the status line, so you know why something is being fetched twice.",
+                    "Closing COMMANDER during an install works the same way: next time, the Install page opens on the card that started it, ready to resume.",
+                    "A cut-off archive that 7-Zip can't open is deleted and downloaded again, so a resume doesn't fail on it every time.",
                 ],
             ),
             (
@@ -348,6 +413,7 @@ TOPICS: list[dict] = [
                         ("Runtime libraries", "How many of the eight verbs above are in your prefix. Hover for the list."),
                         ("Proton builds", "Every Proton-GE build found in Steam's compatibilitytools.d folders."),
                         ("GameMode and MangoHud", "Optional extras."),
+                        ("NTSync", "Optional. Whether Proton can use NTSync: Linux 6.14 or newer with the ntsync module loaded, and /dev/ntsync open to you. The command shown loads the module or fixes the permission. Turn it on with the NTSync launch option."),
                     ]),
                     "For anything missing, COMMANDER detects your distribution and package manager (and your GPU vendor for Vulkan drivers) and gives you the exact install command to copy into a terminal.",
                 ],
@@ -426,6 +492,13 @@ TOPICS: list[dict] = [
                 ],
             ),
             (
+                "Mod list safety at launch",
+                [
+                    "Before each launch, COMMANDER saves a copy of modlist.txt if it changed since the last copy. That is a restore point if Mod Organizer loses the list mid-game.",
+                    "If every mod in the profile is turned off when you press Launch Game, which can happen after a PC crash or power cut, COMMANDER offers Restore and launch. It backs up the current list, then puts back the newest copy that had mods on. Launch anyway starts the game as it is.",
+                ],
+            ),
+            (
                 "Launch targets",
                 [
                     "Targets come from the [customExecutables] section of GAMMA's ModOrganizer.ini, the same list as MO2's dropdown. COMMANDER keeps both in step: picking a target in COMMANDER selects it in MO2 too. The default is MO2's own selection, then your last choice, then Anomaly (DX11-AVX), Anomaly (DX11) or Anomaly Launcher.",
@@ -470,6 +543,28 @@ TOPICS: list[dict] = [
                         ("Hotkeys", "Insert shows or hides the performance overlay, and Home switches image effects off and on. You can change both in Settings."),
                     ]),
                     ("note", "The built-in copies only work while the game runs on Vulkan, the default. With the OpenGL launch option on, they show nothing."),
+                ],
+            ),
+            (
+                "Frame generation",
+                [
+                    "Frame generation adds generated frames between the game's own, for smoother motion. It plays best above 40 FPS and adds a little input lag. It is built into COMMANDER: switch it on with the Frame generation card on the Play page.",
+                    ("table", [
+                        ("What it needs", "Lossless.dll from Lossless Scaling (paid, on Steam). Set Lossless Scaling's Properties > Compatibility to a Proton version and install it, and COMMANDER finds the file. Choose DLL picks it by hand."),
+                        ("Multiplier", "2x to 5x: how many frames are shown for each one the game draws."),
+                        ("Detail", "100% down to 25%. Lower is faster but less sharp."),
+                        ("Mode", "Quality or Performance."),
+                    ]),
+                    "Changes reach a running game right away. If frame generation was off when the game started, they apply from the next launch. Its settings are kept in the launch options, so shortcuts, Deck Mode and co-op use them too.",
+                    ("note", "lsfg-vk.dll from Lossless Scaling's lsfg-vk beta doesn't work. In Steam, set Lossless Scaling's Properties > Betas back to None."),
+                ],
+            ),
+            (
+                "The graphics overlay",
+                [
+                    "While the game runs, Shift+` (the console key) opens Graphics in a panel down the left of the screen, over the game: frame generation, the performance overlay and image effects, all changing live. Press the key again or Esc to close it. A pop-up at game start reminds you of the key.",
+                    "Change the key (Shift+`, Numpad * or Ctrl+Shift+G) or turn it off in Settings → Graphics. The tray menu opens it too. It doesn't work in Steam Deck Game Mode: there, hold the back grips (see Steam Deck Mode).",
+                    "A short pop-up also shows when you switch the performance overlay or image effects on or off with their keys in-game.",
                 ],
             ),
             (
@@ -619,6 +714,27 @@ TOPICS: list[dict] = [
                 ],
             ),
             (
+                "ModDB browser",
+                [
+                    "Get mods from ModDB opens a ModDB browser inside COMMANDER. Search Anomaly addons, open a mod and press Download. When it finishes, COMMANDER asks before installing it like any other archive.",
+                    "The browser is an optional plugin, about 100 MB, because it needs a whole web engine. Install, update or remove it in Settings → Plugins. It comes from COMMANDER's GitHub releases. From a file installs a plugin .tar.xz you downloaded yourself, and warns you when there is no .sha512sum file next to it to check it with.",
+                    "Downloads go to COMMANDER's own folder unless you pick another Download folder in Settings → Plugins. Delete downloads only deletes files the browser saved, never anything else in that folder. Open in browser opens the page in your web browser, where you can sign in to comment.",
+                ],
+            ),
+            (
+                "ROMEO",
+                [
+                    "ROMEO is CLIKRΔD's repack that goes on top of GAMMA. Install it with Install Mod like any archive: COMMANDER recognises it and adds its mods and its own Mod Organizer profile. Your G.A.M.M.A mod list isn't changed.",
+                    ("table", [
+                        ("Needs", "GAMMA 0.9.5 and modded exes from 2026.9.12 or newer."),
+                        ("Shared Anomaly folder", "As ROMEO's guide asks, GAMMA's Atmos weather files and the shader cache are removed from the Anomaly folder. A GAMMA update puts the Atmos files back for G.A.M.M.A."),
+                        ("Updating", "Install the new archive the same way. The old xx- mods are removed first, as ROMEO's guide says. If you changed MCM settings, Keep mine keeps yours. The previous mod list is saved as modlist.txt.before-update."),
+                        ("Afterwards", "COMMANDER offers to switch this profile to ROMEO. Start a new save: ROMEO doesn't work with old saves."),
+                    ]),
+                    "To remove it, use Uninstall ROMEO on the Utilities page.",
+                ],
+            ),
+            (
                 "FOMOD installers",
                 [
                     "Many mods ship a FOMOD installer (fomod/ModuleConfig.xml) with choices. COMMANDER shows these as a step-by-step wizard, the same one in both interfaces. It supports install steps and option groups, options whose type depends on earlier choices (Required options are locked on, Recommended ones pre-ticked, Not usable ones disabled), steps that only appear for some choices, conditional files and file priorities. Option preview images are shown when the archive has them.",
@@ -648,6 +764,16 @@ TOPICS: list[dict] = [
                         ("Download cache", "Cached archives are compared against the MD5s in GAMMA's official list. Problems here only affect future installs."),
                     ]),
                     "Results are shown as plain-language rows, worst first, with an overall verdict: healthy, needs attention, or snapshot taken.",
+                ],
+            ),
+            (
+                "Verify step options",
+                [
+                    ("table", [
+                        ("What to check", "GAMMA mods and mod files are always checked: the repair is worked out from them. Untick Anomaly files or Download cache to save time."),
+                        ("Show the repair list right away", "Shows what Repair would fix as soon as a check finds problems."),
+                        ("Check after a GAMMA install", "Runs Verify Integrity as soon as a GAMMA install or reinstall finishes."),
+                    ]),
                 ],
             ),
             (
@@ -691,7 +817,7 @@ TOPICS: list[dict] = [
                         ("ProfileName", "The name shown everywhere."),
                         ("Anomaly / Gamma / Cache", "The three folders. Use absolute paths."),
                         ("Mo2Profile", "Which MO2 profile to use, normally G.A.M.M.A."),
-                        ("DownloadThreads", "Parallel downloads, 6 by default."),
+                        ("DownloadThreads", "Parallel downloads, 4 by default."),
                         ("ModPackMakerUrl / ModListUrl", "Where GAMMA's mod list comes from (stalker-gamma.com and the Stalker_GAMMA repository)."),
                         ("Repository URLs and branches", "gamma_setup, Stalker_GAMMA, gamma_large_files_v2 and teivaz_anomaly_gunslinger. Change these only to use a fork or mirror. Profiles shows a notice when any differs from the official one, with a way to reset."),
                         ("Active", "Which profile is in use. Exactly one is active."),
@@ -744,6 +870,14 @@ TOPICS: list[dict] = [
                     "Switch to co-op backs up whatever is in the Anomaly folder now, then copies the co-op files in and enables the mod. Switch to Singleplayer puts the originals back, removes what co-op added and disables the mod. Your co-op saves are kept.",
                     "Export co-op on the Manage tab writes one zip with all your saves, the co-op settings, keybinds and MCM values, the Steam game and the join address. Uninstall offers to export first. Import co-op puts it all back once co-op is installed again, and keeps a copy of every file it replaces in the backups folder.",
                     "Launches are checked: with co-op on, only co-op can be launched; with it off, only singleplayer. Updates and repairs ask you to switch back to singleplayer first, because they rewrite the same engine files. If an update put the original engine back, Re-apply co-op fixes it.",
+                ],
+            ),
+            (
+                "Mod check",
+                [
+                    "The Mod check tab shows a short code for your enabled mods. Everyone in a session needs the same code. Copy code copies it, and Copy full list copies the whole list.",
+                    "Paste a friend's code or full list into the box to compare. With a full list, COMMANDER shows the mods only your friend has, the mods only you have, and mods in a different place in the load order.",
+                    "If xrRazom still turns the join down with matching lists, a file inside a mod differs. Search the game log for [xrRazom] cfg-diff to find it.",
                 ],
             ),
             (
@@ -825,6 +959,13 @@ TOPICS: list[dict] = [
                 ],
             ),
             (
+                "Uninstall ROMEO",
+                [
+                    "Shown while ROMEO is installed. It removes ROMEO's mods, its Mod Organizer profile, its appdata presets and splash screen, puts GAMMA's Atmos files back from the download cache, and switches every COMMANDER profile on ROMEO back to G.A.M.M.A.",
+                    "Your G.A.M.M.A mod list and saves aren't touched, but saves made with ROMEO won't load in G.A.M.M.A. Files ROMEO added to MO2's overwrite folder stay, because they can't be told apart from your own.",
+                ],
+            ),
+            (
                 "Reset and uninstall",
                 [
                     ("table", [
@@ -853,11 +994,19 @@ TOPICS: list[dict] = [
                 "Settings page",
                 [
                     "Open Settings with the cog at the top right or Ctrl+,. Most changes apply straight away. Language, theme and font cannot change while an install runs or the game is open.",
+                    "Settings has seven tabs: General, Game, Graphics, Appearance, Integrations, Plugins and Maintenance.",
                     ("table", [
                         ("Page on startup", "Which tab COMMANDER opens on."),
                         ("When COMMANDER starts", "Desktop interface, Steam Deck Mode, or ask (on a real Steam Deck)."),
                         ("Start COMMANDER when I log in", "Writes ~/.config/autostart/stalker-gamma-commander.desktop."),
                         ("Update notifications", "One desktop notification per new GAMMA or COMMANDER version."),
+                        ("System tray icon", "An icon near the clock to open COMMANDER, launch the game and more. See Overview."),
+                        ("Hide to the tray when I close the window", "The close button hides COMMANDER instead of quitting. Quit from the tray menu."),
+                        ("Hide COMMANDER while the game runs", "Hides to the tray while you play. It comes back when the game closes."),
+                        ("Show the Welcome screen on startup", "The latest patch notes and links to GitHub, Discord and the credits."),
+                        ("Developer mode", "Unlocks extra features for testing, each with its own switch. Some can overwrite your game settings."),
+                        ("Folders", "Settings → Game: the active profile's Anomaly, GAMMA and cache folders. To swap between installs, use Install > Switch install."),
+                        ("Graphics overlay key", "The key that opens Graphics over the running game: Shift+`, Numpad * or Ctrl+Shift+G, or Off."),
                         ("COMMANDER build", "Stable or unstable (see Installing COMMANDER)."),
                         ("Default runner", "The runner Play uses unless you pick another."),
                         ("Always use GameMode", "Wraps every launch in gamemoderun."),
@@ -868,6 +1017,13 @@ TOPICS: list[dict] = [
                         ("Theme", "Eight themes: GAMMA (default), GAMMA Black, Dusk, Midnight, Terminal, Reactor, Red Forest (Live) and Winter (Live)."),
                         ("Font and size", "Six font families (Exo 2 by default) and 9 to 22 px."),
                         ("Use COMMANDER's own title bar", "Draws COMMANDER's own title bar; turn it off to use your desktop's."),
+                        ("Animations", "Hover effects, page fades, smooth scrolling and the moving scenery on the game loading screen."),
+                        ("Click sounds", "A short click on buttons, tabs and tray menu items."),
+                        ("Live theme animation", "Snow in Winter (Live); trees, campfire and leaves in Red Forest (Live). Pauses while COMMANDER is in the background."),
+                        ("Live theme time of day", "Keeps the Live themes at dawn, day, dusk or night instead of following the clock."),
+                        ("Christmas lights", "The string of lights under the top bar in Winter (Live)."),
+                        ("Top bar", "Which pages get a tab in the top bar. Dashboard is always shown."),
+                        ("ModDB browser", "Settings → Plugins: install, update or remove the ModDB browser plugin, and pick its download folder. See Mod Manager."),
                         ("Discord Rich Presence", "See Playing and launching. A custom Discord Application ID can be set for your own app."),
                         ("Playtime", "Sets the active profile's playtime to zero."),
                         ("Add COMMANDER to Steam", "See Steam integration."),
@@ -900,6 +1056,21 @@ TOPICS: list[dict] = [
                         ("move_dest, move_expected, move_sources", "An unfinished Move Installation, cleared when it completes."),
                         ("pending_settings_restore", "Settings to put back after a GAMMA reinstall."),
                         ("welcome_hidden, welcome_seen_version", "The Welcome screen."),
+                        ("tray_icon, tray_close_to_tray, tray_hide_while_playing, tray_hint_shown", "The system tray icon, hiding to the tray, and whether the one-time 'still running in the tray' notice was shown."),
+                        ("animations_enabled, click_sounds, live_animation, live_time, christmas_lights, hidden_nav_tabs", "Appearance and the top bar."),
+                        ("developer_mode, developer_features", "Developer mode and the features turned on under it."),
+                        ("auto_proton", "The Proton-GE build Auto-detect is pinned to."),
+                        ("lossless_dll", "Lossless.dll picked by hand for frame generation."),
+                        ("graphics_overlay_key, umbriel_rule_offered", "The graphics overlay key, and whether the Umbriel window rule was offered."),
+                        ("offline_archive", "The offline cache archive last picked."),
+                        ("verify_repair_prompt, verify_after_gamma", "The Install page's Verify step options."),
+                        ("game_installs", "The GAMMA installs listed under Switch install."),
+                        ("gamma_install_resume", "An unfinished GAMMA install to resume, cleared when it finishes."),
+                        ("gamma_seen_version", "GAMMA versions already seen, for the Updates page."),
+                        ("storage_sizes", "Folder sizes last measured, shown while new ones are measured."),
+                        ("moddb_downloads", "The ModDB browser's download folder, if you picked one."),
+                        ("dismissed_update_tag", "The COMMANDER update whose banner you closed."),
+                        ("deck_overlay_shortcut", "The back grips that open Graphics over a running game in Deck Mode."),
                         ("deck_mode_preference, deck_font_scale, deck_start_screen, deck_runner_confirmed, deck_finish_sound, deck_finish_rumble", "Steam Deck Mode."),
                     ]),
                 ],
@@ -955,6 +1126,7 @@ TOPICS: list[dict] = [
                         ("Steam shortcuts", "<Steam>/userdata/<account>/config/shortcuts.vdf, only when you use Add to Steam or set up co-op."),
                         ("Steam icon", "~/.local/share/icons/stalker-gamma-commander.png"),
                         ("Desktop shortcuts", "Your desktop folder (from xdg-user-dir), only when you ask for one."),
+                        ("ModDB browser plugin", "~/.local/share/stalker-gamma-commander/plugins: the plugin, its cookies and cache, and its downloads unless you picked another folder."),
                     ]),
                     "Every file COMMANDER writes is written atomically: to a temporary file beside it, then renamed into place.",
                 ],
@@ -1262,7 +1434,7 @@ TOPICS: list[dict] = [
                     ("steps", [
                         "Make a log dump right after the problem happens.",
                         "Open it in ASSISTANT and check whether the finding already explains it.",
-                        "Ask on the COMMANDER Discord, or open an issue on GitHub, with the dump attached and what you did just before the problem. Include your COMMANDER version (bottom left of the window).",
+                        "Ask on the COMMANDER Discord, or open an issue on GitHub, with the dump attached and what you did just before the problem. Click the version number at the bottom left to copy your versions and hardware, and paste them in too.",
                     ]),
                 ],
             ),
@@ -1462,14 +1634,13 @@ TOPICS: list[dict] = [
                 "Credits",
                 [
                     ("table", [
-                        ("SSH-Kitty", "COMMANDER's graphical interface."),
-                        ("Dnttnd", "Testing implementations, dev builds, bug reports, and helping polish the UI."),
-                        ("FaithBeam", "stalker-gamma-cli, the installer COMMANDER bundles and drives. All installation, download and checksum logic is theirs."),
-                        ("Harbingerr", "xrRazom Co-op, the multiplayer mod the Multiplayer page installs."),
+                        ("SSH-Kitty", "Creator of COMMANDER."),
+                        ("Dnttnd", "Testing, dev builds, bug reports and UI polish."),
+                        ("FaithBeam", "stalker-gamma-cli, the installer COMMANDER bundles and runs."),
                         ("Grokitach and the GAMMA team", "The GAMMA modpack."),
-                        ("The Anomaly Team", "Developers of the standalone S.T.A.L.K.E.R. Anomaly modification and engine base."),
-                        ("GSC Game World", "Creators of the original S.T.A.L.K.E.R. games and universe."),
-                        ("Other projects", "Proton-GE (GloriousEggroll), umu-launcher, Winetricks and Mod Organizer 2."),
+                        ("The Anomaly Team", "The standalone S.T.A.L.K.E.R. Anomaly."),
+                        ("GSC Game World", "The original S.T.A.L.K.E.R. games."),
+                        ("Open-source projects", "Proton-GE, umu-launcher, Winetricks, Mod Organizer 2, MangoHud and vkBasalt. Every bundled component is listed under Third-party notices."),
                     ]),
                 ],
             ),

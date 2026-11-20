@@ -103,6 +103,8 @@ from ..romeo import (
     is_romeo_profile,
     mcm_changed,
     old_mods,
+    remove_old_mods,
+    space_needed,
     unpacked_size,
 )
 from ..romeo import install as install_romeo
@@ -780,6 +782,31 @@ def _query_mo2_profiles() -> tuple[list[str], str]:
     # appends, which is never part of a profile name.
     selected = qt_ini_text(next((line.strip() for line in out.splitlines() if line.strip()), ""))
     return names, selected if rc == 0 else ""
+
+
+def cached_archive_for(profile, mo2_profile: str, name: str) -> Path | None:
+    """The verified cached archive of GAMMA mod ``name``, or None.
+
+    Shared with Deck Mode's Mods screen; see
+    ModManagerPage._cached_archive_for() for why None is common.
+    """
+    records = local_modpack_records(profile.gamma, mo2_profile)
+    record = records.get(name) if records is not None else None
+    if record is None:
+        return None
+    cache_dir = Path(profile.cache)
+    for archive_name in record.archive_names():
+        if not archive_name or Path(archive_name).name != archive_name:
+            continue
+        archive = cache_dir / archive_name
+        if not archive.is_file() or archive.is_symlink():
+            continue
+        if record.md5_mod_db:
+            digest = _md5_file(archive)
+            if digest is None or digest[0].lower() != record.md5_mod_db.lower():
+                continue
+        return archive
+    return None
 
 
 def _delete_mod_folders(mods_dir: Path, names: list[str]) -> list[str]:
@@ -1888,7 +1915,7 @@ class ModManagerPage(QWidget):
             return False
         return True
 
-    def _cached_archive_for(self, name: str) -> Path | None:
+    def _cached_archive_for(self, name: str, mo2_profile: str | None = None) -> Path | None:
         """Return the cached archive for an already-listed mod, if findable.
 
         Matches by the ModPackRecord.folder_name convention (see
@@ -1908,26 +1935,10 @@ class ModManagerPage(QWidget):
             profile = self._active_profile()
         except RuntimeError:
             return None
-        mo2_profile = self.profile_combo.currentText()
-        records = local_modpack_records(profile.gamma, mo2_profile)
-        if records is None:
-            return None
-        record = records.get(name)
-        if record is None:
-            return None
-        cache_dir = Path(profile.cache)
-        for archive_name in record.archive_names():
-            if not archive_name or Path(archive_name).name != archive_name:
-                continue
-            archive = cache_dir / archive_name
-            if not archive.is_file() or archive.is_symlink():
-                continue
-            if record.md5_mod_db:
-                digest = _md5_file(archive)
-                if digest is None or digest[0].lower() != record.md5_mod_db.lower():
-                    continue
-            return archive
-        return None
+        # A worker thread passes mo2_profile: it must not read the combo.
+        if mo2_profile is None:
+            mo2_profile = self.profile_combo.currentText()
+        return cached_archive_for(profile, mo2_profile, name)
 
     def _reinstall_mod_from_cache(self, name: str) -> None:
         """Re-extract an already-listed mod from its cached archive.
@@ -1942,7 +1953,29 @@ class ModManagerPage(QWidget):
         if self.window.install_busy or self._install_active or self._mo2_running():
             self._update_guard()
             return
-        archive = self._cached_archive_for(name)
+        if getattr(self, "_archive_lookup_task", None) is not None:
+            return
+        # The MD5 check reads the whole archive (some are GBs): off the GUI thread.
+        self.window.statusBar().showMessage(tr("Checking the cached copy of {name}", name=name))
+        # No parent, like the move-aside task below; kept alive by the attribute.
+        task = BackgroundTask(self._cached_archive_for, name, self.profile_combo.currentText())
+        self._archive_lookup_task = task
+
+        def _done(archive) -> None:
+            self._archive_lookup_task = None
+            self.window.statusBar().clearMessage()
+            self._ask_reinstall_from_cache(name, archive)
+
+        def _failed(_message: str) -> None:
+            self._archive_lookup_task = None
+            self.window.statusBar().clearMessage()
+            self._ask_reinstall_from_cache(name, None)
+
+        task.result.connect(_done)
+        task.error.connect(_failed)
+        task.start()
+
+    def _ask_reinstall_from_cache(self, name: str, archive: Path | None) -> None:
         if archive is None:
             QMessageBox.information(
                 self,
@@ -2350,8 +2383,12 @@ class ModManagerPage(QWidget):
             )
             return True
         gamma, anomaly = Path(profile.gamma), Path(profile.anomaly)
+        update = (gamma / "profiles" / mo2_profile).is_dir()
         need = unpacked_size(archiver, archive)
         free = shutil.disk_usage(gamma).free
+        remove_first = False
+        if need:
+            need, remove_first = space_needed(gamma, need, free, update)
         if need and need > free:
             QMessageBox.warning(
                 self,
@@ -2375,7 +2412,6 @@ class ModManagerPage(QWidget):
                 self.window.set_page("update")
             return True
         requirements = tr("ROMEO needs GAMMA 0.9.5 and modded exes from 2026.9.12 or newer. Unpacking takes a while.")
-        update = (gamma / "profiles" / mo2_profile).is_dir()
         keep_mcm = False
         if not update:
             answer = QMessageBox.question(
@@ -2410,17 +2446,20 @@ class ModManagerPage(QWidget):
                 tr("Update ROMEO?"),
                 tr("COMMANDER removes the {count} old xx- mods, as ROMEO's guide says, then installs the new version.", count=len(old_mods(gamma))),
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                info=tr("Your MCM settings are kept as '{name}', turned on in place of ROMEO's.", name=KEPT_MCM) if keep_mcm else "",
+                info="\n\n".join(
+                    ([tr("There isn't room for the old and new versions at once, so the old mods go before unpacking. If the update stops part way, run it again.")] if remove_first else [])
+                    + ([tr("Your MCM settings are kept as '{name}', turned on in place of ROMEO's.", name=KEPT_MCM)] if keep_mcm else [])
+                ),
                 note=requirements,
                 labels={QMessageBox.StandardButton.Yes: tr("Update ROMEO"), QMessageBox.StandardButton.No: tr("Cancel")},
             )
         if answer == QMessageBox.StandardButton.Yes:
-            self._start_romeo_install(archive, wrapper, mo2_profile, gamma, anomaly, keep_mcm, update)
+            self._start_romeo_install(archive, wrapper, mo2_profile, gamma, anomaly, keep_mcm, update, remove_first)
         return True
 
     def _start_romeo_install(
         self, archive: Path, wrapper: str, mo2_profile: str, gamma: Path, anomaly: Path,
-        keep_mcm: bool, update: bool,
+        keep_mcm: bool, update: bool, remove_first: bool = False,
     ) -> None:
         if self.window.install_busy or self._install_active or self._mo2_running():
             self._update_guard()
@@ -2448,6 +2487,9 @@ class ModManagerPage(QWidget):
             staging_parent = make_staging_dir(gamma)
             try:
                 staging = staging_parent / "archive"
+                if remove_first:
+                    report("0\t" + tr("Removing the old xx- mods"))
+                    remove_old_mods(gamma, keep_mcm)
                 extract_archive(
                     archive,
                     staging,
@@ -2462,7 +2504,7 @@ class ModManagerPage(QWidget):
                         f"{95 + done * 5 // total}\t"
                         + tr("Installing ROMEO mods {done}/{total}", done=done, total=total)
                     ),
-                    keep_mcm,
+                    keep_mcm and not remove_first,
                 )
                 return mo2_profile
             finally:

@@ -17,24 +17,30 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QVBoxLayout, QWidget
 
 from commander_gui import modded_exes
+from commander_gui.atomic import write_bytes
 from commander_gui.cli_runner import cli_command, cli_resume_args
 from commander_gui.game_backup import backup_settings_before
-from commander_gui.atomic import write_bytes
 from commander_gui.i18n import tr
 from commander_gui.integrity import invalidate_baseline
 from commander_gui.keep_state import capture, discard, restore
+from commander_gui.modlist import modlist_path_for
 from commander_gui.parsers import parse_progress_line, strip_ansi
 from commander_gui.settings import cli_ok
-from commander_gui.modlist import modlist_path_for
 from commander_gui.themes import active_theme_tokens
 from commander_gui.ui.common import (
     BackgroundTask,
     CommandRunner,
     aggregate_progress_value,
+    free_space_bytes,
     game_running,
+    human_size,
     notice,
 )
-from commander_gui.ui.update_page import UpdatePage, _format_relative_time
+from commander_gui.ui.update_page import (
+    _LOW_DISK_SPACE_WARNING_BYTES,
+    UpdatePage,
+    _format_relative_time,
+)
 from commander_gui.updates import (
     check_updates,
     parse_patchnotes_sections,
@@ -500,11 +506,25 @@ class UpdateScreen(DeckScreen):
                     "and MCM settings are preserved."
                 )
             )
+            + self._space_warning()
             + battery_warning(),
             lambda: confirm_singleplayer(
                 self.window, self.profile(), tr("updating GAMMA"), self._apply_if_still_idle
             ),
             confirm_text=tr("Apply"),
+        )
+
+    def _space_warning(self) -> str:
+        """The desktop Updates page's low-space question, as a line here."""
+        profile = self.profile()
+        if profile is None:
+            return ""
+        free = free_space_bytes(profile.cache or profile.gamma)
+        if free is None or free >= _LOW_DISK_SPACE_WARNING_BYTES:
+            return ""
+        return "\n\n" + tr(
+            "Only {free} is free. GAMMA updates can need several GB to download and unpack, so the update may fail partway.",
+            free=human_size(free),
         )
 
     def _apply_if_still_idle(self) -> None:

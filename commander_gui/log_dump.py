@@ -64,6 +64,8 @@ _SKIP_DIRS = frozenset(
         "node_modules",
         "licenses",
         "dumps",
+        # The Windows launcher's own files: perl, vim, its install logs.
+        ".grok's modpack installer",
     }
 )
 

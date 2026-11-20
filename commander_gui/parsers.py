@@ -57,6 +57,15 @@ class ProgressEvent:
     size: str = ""
 
     @property
+    def offline_unpack(self) -> bool:
+        """The CLI (1.41+) unpacking an --offline-archive-path archive before
+        the install: its own [0/1]..[1/1] line, named after the archive
+        file. Install items are named after addons, never archive files."""
+        return self.total == 1 and self.name.lower().endswith(
+            (".tar", ".7z", ".zip", ".gz", ".tgz", ".xz", ".zst")
+        )
+
+    @property
     def amount(self) -> str:
         """Display text: the percent, or the byte count when there is none."""
         return self.size or f"{self.percent:.1%}"

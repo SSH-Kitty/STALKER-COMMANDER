@@ -108,6 +108,34 @@ def old_mods(gamma: Path) -> list[Path]:
     return sorted(p for p in mods.iterdir() if p.name.startswith("xx-") and p.is_dir()) if mods.is_dir() else []
 
 
+def space_needed(gamma: Path, unpacked: int, free: int, update: bool) -> tuple[int, bool]:
+    """Free bytes an install needs, and whether the old ``xx-`` mods go first.
+
+    install() keeps the old mods until the new ones are in, which needs room
+    for both copies (~75 GB each in the 2026.11.09 release). When that
+    doesn't fit, an update does as ROMEO's guide does instead and removes
+    them before unpacking, so the room they take counts as free.
+    """
+    if not update or unpacked <= free:
+        return unpacked, False
+    old = sum(
+        os.lstat(os.path.join(root, name)).st_size
+        for mod in old_mods(gamma) for root, _dirs, files in os.walk(mod) for name in files
+    )
+    return unpacked - old, True
+
+
+def remove_old_mods(gamma: Path, keep_mcm: bool) -> None:
+    """The guide's update order: every ``xx-`` mod goes before the new
+    release is unpacked. A cancel or failure after this leaves ROMEO without
+    its mods until the update is run again (install() places a kept MCM copy
+    then, as usual)."""
+    if keep_mcm:
+        _keep_mcm(gamma)
+    for old in old_mods(gamma):
+        shutil.rmtree(old)
+
+
 def _keep_mcm(gamma: Path) -> None:
     """Rename the player's MCM mod out of the ``xx-`` range."""
     source = gamma / "mods" / MCM_MOD

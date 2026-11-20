@@ -16,6 +16,8 @@ from commander_gui.romeo import (
     installed,
     is_romeo_profile,
     mcm_changed,
+    remove_old_mods,
+    space_needed,
     uninstall,
 )
 
@@ -146,6 +148,34 @@ class InstallTest(unittest.TestCase):
                 install(tmp / "v2", ROOT, PROFILE, gamma, anomaly, cancel_event=cancel)
             self.assertEqual((gamma / "mods/xx-A/a.ltx").read_text(), "v1")
             self.assertTrue((gamma / "mods/xx-B").is_dir())
+    def test_short_on_space_update_removes_old_mods_first(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            gamma, anomaly = tmp / "gamma", tmp / "anomaly"
+            _write(gamma / "mods/xx-A/a.ltx", "x" * 100)
+            _write(gamma / "mods/10- GAMMA mod/a.ltx", "x" * 1000)
+            _write(gamma / f"mods/{MCM_MOD}/gamedata/configs/axr_options.ltx", "player")
+            (gamma / f"profiles/{PROFILE}").mkdir(parents=True)
+            # Room for both copies, or a first install: the safe order.
+            self.assertEqual(space_needed(gamma, 150, 200, True), (150, False))
+            self.assertEqual(space_needed(gamma, 150, 10, False), (150, False))
+            # Too little for both: the old xx- mods' room counts (GAMMA's doesn't).
+            self.assertEqual(space_needed(gamma, 150, 10, True), (150 - 106, True))
+
+            remove_old_mods(gamma, keep_mcm=True)
+            self.assertFalse((gamma / "mods/xx-A").exists())
+            self.assertTrue((gamma / "mods/10- GAMMA mod").is_dir())
+            src = tmp / "v2" / ROOT
+            _write(src / "GAMMA/mods/xx-A/a.ltx", "v2")
+            _write(src / f"GAMMA/mods/{MCM_MOD}/gamedata/configs/axr_options.ltx", "v2")
+            _write(src / f"GAMMA/profiles/{PROFILE}/modlist.txt", f"+xx-A\n+{MCM_MOD}\n")
+            install(tmp / "v2", ROOT, PROFILE, gamma, anomaly)
+            self.assertEqual((gamma / f"mods/{KEPT_MCM}/gamedata/configs/axr_options.ltx").read_text(), "player")
+            self.assertEqual(
+                (gamma / f"profiles/{PROFILE}/modlist.txt").read_text().splitlines(),
+                ["+xx-A", f"+{KEPT_MCM}", f"-{MCM_MOD}"],
+            )
+
 
 class UninstallTest(unittest.TestCase):
     def test_uninstall_puts_gamma_back(self):

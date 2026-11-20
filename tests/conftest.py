@@ -30,6 +30,15 @@ import pytest
 # No real windows: same as CI, and nothing pops up on the desktop mid-run.
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+# Same for desktop notifications: a silent stand-in notify-send goes first
+# on PATH, so finished-task pop-ups never reach the real desktop.
+import tempfile
+
+_fake_bin = Path(tempfile.mkdtemp(prefix="commander-tests-bin-"))
+(_fake_bin / "notify-send").write_text("#!/bin/sh\nexit 0\n")
+(_fake_bin / "notify-send").chmod(0o755)
+os.environ["PATH"] = f"{_fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"
+
 # commander.log attaches its file once, at first use - often before any
 # fixture has pointed XDG_CONFIG_HOME away - so tests that launch, fail a
 # download or end a play session wrote into the developer's real log.

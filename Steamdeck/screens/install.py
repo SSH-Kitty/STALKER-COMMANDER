@@ -48,18 +48,19 @@ from commander_gui.ui.common import (
     aggregate_progress_value,
     anomaly_installed,
     free_space_bytes,
+    game_running,
     gamma_installed,
     human_size,
-    game_running,
     use_stock_mo2_profile_if_missing,
 )
 from commander_gui.ui.install_page import (
+    OFFLINE_ARCHIVE_SUFFIXES,
     OFFLINE_GUIDE_URL,
     _full_install_args,
     _install_failure_message,
     _resume_state_matches,
+    offline_archive,
     offline_install_problem,
-    offline_list_paths,
 )
 from commander_gui.ui.proton_manager import build_status, release_installed
 from commander_gui.winetricks import (
@@ -73,8 +74,8 @@ from commander_gui.winetricks import (
 )
 
 from .. import gamepad as pad
-from ..folder_picker import show_folder_picker
 from ..install_switcher import InstallSwitcher
+from ..mod_installer import pick_file
 from ..power import on_battery
 from ..scale import px
 from ..verify import DeckVerifyCard
@@ -272,9 +273,8 @@ class InstallScreen(DeckScreen):
         self.offline_row = DeckToggleRow(tr("Offline install (cache only)"), False)
         self.anomaly_mirror_row = DeckToggleRow(tr("Faster Anomaly download (mirror)"), True)
         self.offline_row.toggled.connect(lambda _on: self._update_buttons())
-        # Deck has only a folder picker: pick the folder holding both lists.
-        self.offline_lists_row = DeckRow(tr("Offline list folder"))
-        self.offline_lists_row.activated.connect(self._pick_offline_lists)
+        self.offline_archive_row = DeckRow(tr("Offline archive"))
+        self.offline_archive_row.activated.connect(self._pick_offline_archive)
         self.offline_guide_row = DeckRow(tr("Where to download the offline cache"))
         self.offline_guide_row.activated.connect(
             lambda: open_url(self.window, OFFLINE_GUIDE_URL)
@@ -285,7 +285,7 @@ class InstallScreen(DeckScreen):
             self.preserve_mcm_row,
             self.anomaly_mirror_row,
             self.offline_row,
-            self.offline_lists_row,
+            self.offline_archive_row,
             self.offline_guide_row,
         ):
             options_card.body.addWidget(row)
@@ -385,15 +385,13 @@ class InstallScreen(DeckScreen):
             row.setEnabled(idle)
         self.minimal_row.setEnabled(idle and not offline)
         self.anomaly_mirror_row.setEnabled(idle and not offline)
-        self.offline_lists_row.setEnabled(idle and offline)
-        self.offline_lists_row.setVisible(offline)
+        self.offline_archive_row.setEnabled(idle and offline)
+        self.offline_archive_row.setVisible(offline)
         self.offline_guide_row.setVisible(offline)
         profile = self.profile()
         if profile is not None:
-            lists = offline_list_paths(profile.cache)
-            self.offline_lists_row.set_value(
-                str(Path(lists[0]).parent) if all(lists) else tr("Not set")
-            )
+            archive = offline_archive()
+            self.offline_archive_row.set_value(Path(archive).name if archive else tr("Not set"))
         self._update_proton_button()
         self.update_hints()
 
@@ -582,28 +580,24 @@ class InstallScreen(DeckScreen):
             status=tr("Installing Anomaly"),
         )
 
-    def _pick_offline_lists(self) -> None:
-        def _chosen(folder: Path) -> None:
-            lists = (folder / "modpack_maker_list.txt", folder / "modlist.txt")
-            if not all(path.is_file() for path in lists):
-                self.window.notify(
-                    tr("That folder needs both modpack_maker_list.txt and modlist.txt."), 6000
-                )
-                return
-            gui_settings.save_gui_settings(
-                offline_modpack_list=str(lists[0]), offline_mod_list=str(lists[1])
-            )
+    def _pick_offline_archive(self) -> None:
+        def _chosen(path: Path) -> None:
+            gui_settings.save_gui_settings(offline_archive=str(path))
             self._update_buttons()
 
-        show_folder_picker(
-            self.window, title=tr("Offline list folder"), start=None, on_choose=_chosen
+        archive = offline_archive()
+        pick_file(
+            self.window,
+            tr("Select the offline cache archive"),
+            Path(archive).parent if archive else Path.home(),
+            OFFLINE_ARCHIVE_SUFFIXES,
+            _chosen,
         )
 
-    def _offline_lists(self) -> tuple[str, str] | None:
-        profile = self.profile()
-        if profile is None or not self.offline_row.is_checked():
+    def _offline_archive(self) -> str | None:
+        if self.profile() is None or not self.offline_row.is_checked():
             return None
-        return offline_list_paths(profile.cache)
+        return offline_archive()
 
     # -- GAMMA install ----------------------------------------------------
     def _confirm_install(self) -> None:
@@ -614,18 +608,18 @@ class InstallScreen(DeckScreen):
             self.window.notify(tr("Close the game first"))
             return
 
-        offline_lists = self._offline_lists()
-        if offline_lists is not None:
-            problem = offline_install_problem(offline_lists, profile.cache)
+        offline = self._offline_archive()
+        if offline is not None:
+            problem = offline_install_problem(offline, profile.cache)
             if problem:
                 self.window.notify(problem, 6000)
                 return
         minimal = self.minimal_row.is_checked()
-        # Offline: the cache is already on disk, only the install remains.
-        needed = _MINIMAL_INSTALL_BYTES if minimal or offline_lists else _FULL_INSTALL_BYTES
+        # Offline too: the archive is unpacked into the cache first.
+        needed = _MINIMAL_INSTALL_BYTES if minimal else _FULL_INSTALL_BYTES
         message = (
-            tr("COMMANDER installs GAMMA from your local cache. Nothing is downloaded.")
-            if offline_lists is not None
+            tr("COMMANDER unpacks the offline archive into the cache folder, then installs from it. Nothing is downloaded.")
+            if offline is not None
             else tr(
                 "This installs Anomaly (if missing) and every GAMMA addon. "
                 "Expect about {size} of downloads.",
@@ -694,7 +688,7 @@ class InstallScreen(DeckScreen):
             self.preserve_user_row.is_checked(),
             self.preserve_mcm_row.is_checked(),
             skip_extract,
-            offline_lists=self._offline_lists(),
+            offline_archive=self._offline_archive(),
             anomaly_mirror=self.anomaly_mirror_row.is_checked(),
         )
         if self._resuming:
@@ -837,6 +831,10 @@ class InstallScreen(DeckScreen):
             return
         event = parse_progress_line(strip_ansi(line))
         if event is None:
+            return
+        if event.offline_unpack:
+            self.progress.set_percent(round(event.percent * 100))
+            self.progress.status_message(tr("Unpacking the offline archive"))
             return
         self.progress.set_percent(
             aggregate_progress_value(

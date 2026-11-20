@@ -206,6 +206,43 @@ class GammaRepoFilesTests(unittest.TestCase):
             self.assertEqual(outside.read_text(), "keep")
 
 
+@unittest.skipUnless(__import__("shutil").which("git"), "needs git")
+class StrayAnomalyScriptsTests(unittest.TestCase):
+    def test_a_leftover_modded_exes_script_is_flagged_and_gammas_are_not(self):
+        from commander_gui.integrity import stray_anomaly_scripts
+
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp) / "work"
+            patch_dir = work / "G.A.M.M.A" / "modpack_patches" / "gamedata" / "scripts"
+            patch_dir.mkdir(parents=True)
+            (patch_dir / "Gamma_Patch.script").write_text("gamma")
+            _git("init", "-q", cwd=work)
+            _git("add", ".", cwd=work)
+            _git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "x", cwd=work)
+            gamma = Path(tmp) / "gamma"
+            repo = gamma / "downloads" / "Stalker_GAMMA.git"
+            _git("clone", "-q", "--bare", str(work), str(repo))
+            _git("--git-dir", str(repo), "update-ref", "refs/remotes/origin/main", "HEAD")
+            anomaly = Path(tmp) / "anomaly"
+            scripts = anomaly / "gamedata" / "scripts"
+            scripts.mkdir(parents=True)
+            (scripts / "gamma_patch.script").write_text("gamma")
+            (scripts / "vanilla.script").write_text("v")
+            (scripts / "dynamic_items_by_level.script").write_text("new exes")
+            (anomaly / "tools").mkdir()
+            (anomaly / "tools" / "checksums.md5").write_text(
+                "0123 *gamedata\\scripts\\vanilla.script\n"
+            )
+            self.assertEqual(
+                stray_anomaly_scripts(str(anomaly), str(gamma)),
+                ["gamedata/scripts/dynamic_items_by_level.script"],
+            )
+            # Exes COMMANDER installed bring their own scripts: not stray.
+            (anomaly / "commander-exes").mkdir()
+            (anomaly / "commander-exes" / "state.json").write_text('{"version": "2026.11.15"}')
+            self.assertEqual(stray_anomaly_scripts(str(anomaly), str(gamma)), [])
+
+
 class ReextractFromCacheTests(unittest.TestCase):
     def test_resume_keys_follow_the_cli_grouping(self):
         from commander_gui.repair import parse_modpack_records, resume_keys

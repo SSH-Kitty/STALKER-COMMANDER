@@ -221,10 +221,17 @@ class CopyCancelled(Exception):
     """The copy was stopped; nothing of it is left behind."""
 
 
+#: The Windows launcher's own folder inside GAMMA (27 GB: its tools and
+#: package copies). Linux never uses it, so a copy leaves it out.
+WINDOWS_LAUNCHER_DIR = ".Grok's Modpack Installer"
+
+
 def _copy_tree(src: Path, dst: Path, copied: list[int], on_file) -> None:
     """Copy *src* into *dst* (made here) file by file. Contents only, not
     the Windows drive's mount permissions, so everything stays writable."""
     for folder, dirs, files in os.walk(src):
+        if folder == str(src) and WINDOWS_LAUNCHER_DIR in dirs:
+            dirs.remove(WINDOWS_LAUNCHER_DIR)
         rel = Path(folder).relative_to(src)
         (dst / rel).mkdir(parents=True, exist_ok=True)
         for name in [*files, *(d for d in dirs if (Path(folder) / d).is_symlink())]:
@@ -235,6 +242,30 @@ def _copy_tree(src: Path, dst: Path, copied: list[int], on_file) -> None:
             shutil.copyfile(source, target)
             copied[0] += source.stat().st_size
             on_file()
+
+
+def split_cache(gamma: str | Path, cache: str | Path) -> str:
+    """Move a cache kept in ``gamma/downloads`` (the Windows layout) to a
+    ``cache`` folder next to GAMMA, leaving ``downloads`` as a symlink to
+    it - the Linux layout the CLI makes. Returns the cache to use: the
+    old one when there is nothing to move or the move fails."""
+    gamma, cache = Path(gamma), Path(cache)
+    downloads = gamma / "downloads"
+    target = gamma.parent / "cache"
+    # GAMMA straight in the home folder: a bare ~/cache would be a mystery.
+    if gamma.parent == Path.home() or cache != downloads or downloads.is_symlink() or not downloads.is_dir() or target.exists():
+        return str(cache)
+    try:
+        downloads.rename(target)
+    except OSError:
+        return str(cache)
+    try:
+        downloads.symlink_to(target, target_is_directory=True)
+    except OSError:
+        # No link, no move: the install keeps working as it was.
+        target.rename(downloads)
+        return str(cache)
+    return str(target)
 
 
 def copy_install(install, target: str | Path, total: int, report, cancelled) -> tuple[str, str, str]:

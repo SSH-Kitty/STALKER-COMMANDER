@@ -57,13 +57,12 @@ _DISCORD = "https://discord.gg/6A9psrtYhh"
 #: (English) credit lines, shown on Deck Mode's and the Welcome screen;
 #: translated with tr() where displayed.
 CREDITS = (
-    "SSH-Kitty — COMMANDER graphical user interface.",
-    "Dnttnd — testing implementations, dev builds, bug reports, and helping polish the UI.",
-    "FaithBeam — the STALKER-GAMMA CLI.",
-    "Harbingerr — xrRazom Co-op, the multiplayer mod.",
+    "SSH-Kitty — creator of COMMANDER.",
+    "Dnttnd — testing, dev builds, bug reports and UI polish.",
+    "FaithBeam — stalker-gamma-cli, the installer COMMANDER bundles and runs.",
     "Grokitach and the GAMMA team — the GAMMA modpack.",
-    "The Anomaly Team — developers of the standalone S.T.A.L.K.E.R. Anomaly modification and engine base.",
-    "GSC Game World — creators of the original S.T.A.L.K.E.R. games and universe.",
+    "The Anomaly Team — the standalone S.T.A.L.K.E.R. Anomaly.",
+    "GSC Game World — the original S.T.A.L.K.E.R. games.",
 )
 
 #: Live keys that are not paths, so get no Open button.

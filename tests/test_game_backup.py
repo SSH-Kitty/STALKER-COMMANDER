@@ -1,4 +1,5 @@
 import os
+import shutil
 import tempfile
 import unittest
 import zipfile
@@ -123,10 +124,33 @@ class GameBackupTests(unittest.TestCase):
             create_backup("p", self.anomaly, self.gamma)
         self.assertEqual(list_backups("p"), [])
 
-    def test_backup_before_wipe_skips_saves_for_a_gamma_reset(self) -> None:
+    def test_saves_in_the_gamma_folder_survive_a_reset(self) -> None:
+        # MO2 can write saves into overwrite or a profile's local saves; a
+        # Fresh Reset deleted those for good because only Anomaly's folder
+        # was backed up (a player lost 60 hours this way).
+        overwrite = self.gamma / "overwrite" / "appdata" / "savedgames"
+        overwrite.mkdir(parents=True)
+        (overwrite / "latest.scop").write_bytes(b"newest")
+        (overwrite / "two.scop").write_bytes(b"save-two-newer")
+        os.utime(overwrite / "two.scop", (2e9, 2e9))
+        local = self.gamma / "profiles" / "G.A.M.M.A" / "saves"
+        local.mkdir(parents=True)
+        (local / "local.scop").write_bytes(b"local")
+        profile = SimpleNamespace(profile_name="p", anomaly=str(self.anomaly), gamma=str(self.gamma))
+        info = backup_before_wipe(profile, {"Anomaly", "GAMMA"}, "fresh-reset", lambda _l: None)
+        self.assertEqual(info.saves, 4)
+        shutil.rmtree(self.anomaly / "appdata")
+        shutil.rmtree(self.gamma)
+        restore_backup(info, self.anomaly, self.gamma)
+        saves = self.anomaly / "appdata" / "savedgames"
+        self.assertEqual((saves / "latest.scop").read_bytes(), b"newest")
+        self.assertEqual((saves / "local.scop").read_bytes(), b"local")
+        self.assertEqual((saves / "two.scop").read_bytes(), b"save-two-newer")
+
+    def test_backup_before_wipe_includes_saves_for_a_gamma_reset(self) -> None:
         profile = SimpleNamespace(profile_name="p", anomaly=str(self.anomaly), gamma=str(self.gamma))
         info = backup_before_wipe(profile, {"GAMMA"}, "gamma-reset", lambda _l: None)
-        self.assertEqual(info.saves, 0)
+        self.assertEqual(info.saves, 2)
         self.assertTrue(info.mcm)
         info = backup_before_wipe(profile, {"Anomaly", "GAMMA"}, "fresh-reset", lambda _l: None)
         self.assertEqual(info.saves, 2)
