@@ -35,9 +35,9 @@ from PySide6.QtWidgets import (
 from .. import __version_label__
 from ..config import project_root
 from ..themes import active_theme, active_theme_tokens
+from . import reflow
 from .about_page import _DISCORD, _GITHUB
 from .brand_icons import brand_icon, icon_size
-from . import reflow
 from .common import info_label, make_card, open_url, section_label, tr
 from .dialogs import add_close_button, style_window
 

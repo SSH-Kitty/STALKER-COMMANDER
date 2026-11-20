@@ -36,8 +36,8 @@ from ..i18n import tr
 from ..integrity import format_size
 from .common import (
     StreamTask,
-    info_label,
     game_running,
+    info_label,
     open_in_file_manager,
 )
 from .dialogs import InputDialog as QInputDialog

@@ -38,8 +38,8 @@ from ..config import (
     settings_path,
 )
 from ..themes import active_theme_tokens
-from .about_docs import TOPICS
 from . import reflow
+from .about_docs import TOPICS
 from .common import (
     info_label,
     make_card,

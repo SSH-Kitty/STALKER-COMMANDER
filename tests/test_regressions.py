@@ -11117,17 +11117,17 @@ class UserModsTrackerTests(unittest.TestCase):
     def test_check_commander_update_raises_when_unreachable(self):
         from commander_gui.updates import check_commander_update
 
+        # Not None: that would read as "up to date" for a check that
+        # never happened.
         with (
             patch("commander_gui.network.time.sleep"),
             patch(
                 "commander_gui.updates.urllib.request.urlopen",
                 side_effect=OSError("no network"),
             ),
+            self.assertRaises(OSError),
         ):
-            # Not None: that would read as "up to date" for a check that
-            # never happened.
-            with self.assertRaises(OSError):
-                check_commander_update("1.2.9-unstable")
+            check_commander_update("1.2.9-unstable")
 
     def test_network_urlopen_allows_https_and_local_http_only(self):
         with patch("commander_gui.network.urllib.request.urlopen") as urlopen:

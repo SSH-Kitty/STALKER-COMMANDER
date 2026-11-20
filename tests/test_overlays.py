@@ -86,8 +86,7 @@ class OverlayTests(unittest.TestCase):
                     patch.object(overlays, "mangohud_installed", return_value=True):
                 command = launch_options.apply(["game"], env, text)
             self.assertEqual(command, ["game"])
-            self.assertEqual(env["VK_INSTANCE_LAYERS"], ":".join((
-                launch_options.FRAME_GEN_LAYER, "VK_LAYER_COMMANDER_vkbasalt_explicit", "VK_LAYER_COMMANDER_mangohud_explicit")))
+            self.assertEqual(env["VK_INSTANCE_LAYERS"], f"{launch_options.FRAME_GEN_LAYER}:VK_LAYER_COMMANDER_vkbasalt_explicit:VK_LAYER_COMMANDER_mangohud_explicit")
             for name in ("DISABLE_LSFG", "DISABLE_LSFGVK", "DISABLE_GAMESCOPE_WSI"):
                 self.assertEqual(env[name], "1")
             config = Path(env["MAKO_CONFIG"]).read_text()
@@ -121,8 +120,7 @@ class OverlayTests(unittest.TestCase):
         for options in (steam, again):
             env: dict[str, str] = {}
             launch_options.apply(["%command%"], env, options, resolve=False)
-            self.assertEqual(env["VK_INSTANCE_LAYERS"], ":".join((
-                launch_options.FRAME_GEN_LAYER, "VK_LAYER_COMMANDER_vkbasalt_explicit", "VK_LAYER_COMMANDER_mangohud_explicit")))
+            self.assertEqual(env["VK_INSTANCE_LAYERS"], f"{launch_options.FRAME_GEN_LAYER}:VK_LAYER_COMMANDER_vkbasalt_explicit:VK_LAYER_COMMANDER_mangohud_explicit")
             self.assertEqual(env["STEAM_COMPAT_X"], "1")
 
     def test_settings_changes_rewrite_the_live_config(self):
@@ -339,7 +337,7 @@ class OverlayTests(unittest.TestCase):
             (folder / "Lossless.dll").unlink()
             self.assertFalse(card.sync())
             self.assertIn("Properties > Betas > None", card._missing.text())
-            on, off = (button for button, _value in card._rows[0][0])
+            _on, off = (button for button, _value in card._rows[0][0])
             self.assertTrue(off.isEnabled())  # left on: it can still go off
             self.assertFalse(any(button.isEnabled() for button, _value in card._rows[1][0]))
             # Off: the settings show no pick, so they don't look live.
@@ -428,6 +426,7 @@ class OverlayTests(unittest.TestCase):
     def test_umbriel_rule_and_socket_move(self):
         import socket
         import threading
+
         import tomllib
 
         from commander_gui.ui import graphics_window

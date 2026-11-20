@@ -314,7 +314,7 @@ def debug_summary() -> str:
 
     try:
         proton = configured_runner().label
-    except Exception:  # no runner found is still worth reporting
+    except Exception:  # noqa: BLE001 - no runner found is still worth reporting
         proton = "none"
     cli = _cli_version()
     cpu = _first_line("/proc/cpuinfo", "model name").lstrip(": ") or platform.machine()

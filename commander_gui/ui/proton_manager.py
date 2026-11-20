@@ -36,7 +36,7 @@ from ..proton_installer import (
     installed_builds,
     remove_build,
 )
-from .common import BackgroundTask, info_label, game_running, section_label
+from .common import BackgroundTask, game_running, info_label, section_label
 from .dialogs import MessageBox as QMessageBox
 from .dialogs import style_window
 

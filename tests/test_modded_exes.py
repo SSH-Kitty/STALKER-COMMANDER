@@ -87,9 +87,8 @@ class ModdedExesTest(unittest.TestCase):
             anomaly = tmp / "anomaly"
             _gamma_anomaly(anomaly)
             before = _tree(anomaly)
-            with patch.object(exes, "_save_state", side_effect=OSError("disk full")):
-                with self.assertRaises(OSError):
-                    exes.install(_release(tmp, "2026.9.12"), anomaly, "2026.9.12")
+            with patch.object(exes, "_save_state", side_effect=OSError("disk full")), self.assertRaises(OSError):
+                exes.install(_release(tmp, "2026.9.12"), anomaly, "2026.9.12")
             self.assertEqual(_tree(anomaly), before)
             self.assertFalse((anomaly / "commander-exes" / "original").exists())
 

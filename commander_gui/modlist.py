@@ -16,7 +16,6 @@ from pathlib import Path
 
 from .atomic import split_lines, write_bytes, write_text
 
-
 #: Path separators and control characters - one regex search instead of a
 #: per-character loop, which made parsing a ~1000-line modlist slow.
 _BAD_NAME_CHARS = re.compile(r"[/\\\x00-\x1f\x7f]")

@@ -823,7 +823,7 @@ class ModsScreen(DeckScreen):
             return
         pristine = backup_path(self._path)
         if pristine.is_file():
-            stamp = datetime.fromtimestamp(pristine.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
+            stamp = datetime.fromtimestamp(pristine.stat().st_mtime).astimezone().strftime("%Y-%m-%d %H:%M")
             status = tr("Backup: {name} ({stamp})", name=pristine.name, stamp=stamp)
         else:
             status = tr("No backup yet")
@@ -878,7 +878,7 @@ class ModsScreen(DeckScreen):
         options = []
         for bak in backups:
             try:
-                stamp = datetime.fromtimestamp(bak.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
+                stamp = datetime.fromtimestamp(bak.stat().st_mtime).astimezone().strftime("%Y-%m-%d %H:%M")
             except OSError:
                 continue
             options.append((f"{stamp}   ·   {bak.name}", str(bak)))

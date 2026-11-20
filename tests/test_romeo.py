@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
+from commander_gui.mod_install import ModInstallError
 from commander_gui.romeo import (
     KEPT_MCM,
     MCM_MOD,
@@ -239,7 +240,7 @@ class UninstallTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             gamma = Path(tmp) / "gamma"
             _write(gamma / "mods/xx-A/a.ltx")
-            with self.assertRaises(Exception):
+            with self.assertRaises(ModInstallError):
                 uninstall(gamma, Path(tmp) / "anomaly", Path(tmp) / "cache")
             self.assertTrue((gamma / "mods/xx-A/a.ltx").exists())
 

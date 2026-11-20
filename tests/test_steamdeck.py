@@ -3700,7 +3700,7 @@ class DeckPortedFeatureTests(DeckWindowFixture):
         from commander_gui.ui.utilities_page import custom_prefix
 
         gui_settings.save_gui_settings(runner="umu", prefixes={"umu": str(self.tmp / "pfx")})
-        kind, _default, saved = custom_prefix()
+        _kind, _default, saved = custom_prefix()
         self.assertEqual(saved, str(self.tmp / "pfx"))
         page = self.goto("utilities")
         with patch("Steamdeck.screens.utilities.game_running", return_value=False):
