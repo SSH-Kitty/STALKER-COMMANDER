@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import os
 import re
 import shutil
@@ -10,6 +11,7 @@ import sys
 import threading
 import time
 from collections import OrderedDict
+from collections.abc import Callable, Sequence
 from datetime import datetime
 from pathlib import Path
 
@@ -17,42 +19,103 @@ from PySide6.QtCore import (
     QEasingCurve,
     QEvent,
     QObject,
+    QPoint,
+    QProcess,
+    QProcessEnvironment,
+    QRect,
+    QSize,
     Qt,
     QThread,
+    QTimer,
     QVariantAnimation,
     Signal,
 )
-from PySide6.QtGui import QColor, QFont
+from PySide6.QtGui import QColor, QFont, QPainter
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QComboBox,
     QFrame,
     QHBoxLayout,
     QLabel,
-    QMessageBox,
+    QLayout,
+    QMainWindow,
     QProgressBar,
     QPushButton,
+    QSpinBox,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 
-from ..config import child_environment, is_secondary_instance
+from .. import gui_settings
+from ..config import child_environment, is_secondary_instance, spawn_reaped
+from ..desktop_integration import DESKTOP_ID
 from ..i18n import tr
 from ..integrity import format_size
 from ..modlist import count_mods, read_lines
 from ..parsers import ProgressEvent, parse_progress_line, strip_ansi
 from ..winetricks import WINETRICKS_VERBS
+from .dialogs import InputDialog as QInputDialog
+from .dialogs import MessageBox as QMessageBox
 
-ACCENT = QColor("#8fe45c")
-WARN = QColor("#d9a04c")
-OK_GREEN = QColor("#7dc963")
-STATUS_RED = QColor("#e0554f")
-STATUS_GREY = QColor("#7f8f78")
-ITEM_GREEN = QColor("#e2ead8")
-TEAL = QColor("#5db7a8")
-LIGHT_GREY = QColor("#cfd9c6")
+
+def notice(text: str) -> str:
+    """A short status notice reads as a label, not a sentence: no closing full stop.
+
+    Leaves "..." and multi-line messages (log tails) alone.
+    """
+    if "\n" not in text and text.endswith(".") and not text.endswith(".."):
+        return text[:-1]
+    return text
+
+
+class _ThemeColor:
+    """A colour read from the active theme each time it is used.
+
+    Same ``.name()`` as the QColor constants below, so call sites need no
+    change - but an accent follows the theme (dusk is orange, reactor teal)
+    instead of staying GAMMA green on every theme.
+    """
+
+    def __init__(self, token: str, default: str | None = None) -> None:
+        self._token = token
+        self._default = default
+
+    def name(self) -> str:
+        from ..themes import active_theme_tokens
+
+        tokens = active_theme_tokens()
+        if self._default is None:
+            return tokens[self._token]
+        return tokens.get(self._token, self._default)
+
+
+ACCENT = _ThemeColor("accent_strong")
+# Status colours stay fixed on purpose: "Installed" is the same green and a
+# failure the same red in every dark theme (see themes.py's #verifyPill).
+# Only a light theme (Winter) overrides them, as these are too pale on white.
+WARN = _ThemeColor("status_warn", "#d9a04c")
+OK_GREEN = _ThemeColor("status_ok", "#7dc963")
+STATUS_RED = _ThemeColor("status_red", "#e0554f")
+STATUS_GREY = _ThemeColor("status_grey", "#7f8f78")
+ITEM_GREEN = _ThemeColor("status_item", "#e2ead8")
+#: "Check MD5" rows in the download table: secondary text, not a blue.
+TEAL = _ThemeColor("text_info")
+LIGHT_GREY = _ThemeColor("status_light", "#cfd9c6")
+
+_TINTS = {"status_ok": "ok", "status_warn": "warn", "status_grey": "grey", "accent_strong": "accent"}
+
+
+def tint(widget: QWidget, color: _ThemeColor | None) -> None:
+    """Colour *widget*'s text with *color* (OK_GREEN, WARN, STATUS_GREY or
+    ACCENT; None for the default) through the theme stylesheet. A colour
+    put in setStyleSheet() stays the theme's of that moment."""
+    widget.setProperty("tint", _TINTS[color._token] if color is not None else "")
+    widget.style().unpolish(widget)
+    widget.style().polish(widget)
+
 
 ANOMALY_MARKERS = ("AnomalyLauncher.exe", "fsgame.ltx")
 GAMMA_MARKERS = ("ModOrganizer.exe", "ModOrganizer.ini")
@@ -78,6 +141,52 @@ def normalize_path(raw: str) -> str:
     return str(Path(value).expanduser().resolve())
 
 
+def wine_unsafe_folder(*paths: str) -> str | None:
+    """First folder in *paths* that Wine can't open, else None.
+
+    Windows path rules drop a dot or space at the end of a folder name, so
+    Wine turns ``G.A.M.M.A./gamma`` into ``G.A.M.M.A\\gamma``, a folder that
+    doesn't exist, and MO2 and the game fail to start.
+    """
+    for path in paths:
+        parts = Path(path).expanduser().parts
+        for depth, name in enumerate(parts):
+            if name not in (".", "..") and name.endswith((".", " ")):
+                return str(Path(*parts[: depth + 1]))
+    return None
+
+
+def warn_wine_unsafe_folder(parent, folder: str) -> None:
+    QMessageBox.warning(
+        parent,
+        tr("Rename this folder"),
+        tr(
+            "Wine can't use a folder whose name ends with a dot or a space, so the game can't start from this one:\n{folder}\n\nRename it without the dot or space at the end, then choose it again on the Install page.",
+            folder=folder,
+        ),
+    )
+
+
+def windows_drive_ok(parent, *paths: str) -> bool:
+    """True unless one of *paths* is on a Windows drive and the user picks
+    another folder instead of using it anyway."""
+    from ..game_installs import windows_drive_folder
+
+    folder = windows_drive_folder(*paths)
+    if folder is None:
+        return True
+    answer = QMessageBox.warning(
+        parent,
+        tr("This folder is on a Windows drive"),
+        tr("GAMMA can run slow, fail to save or not start from a Windows drive (NTFS). Pick a folder on your Linux drive instead."),
+        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        QMessageBox.StandardButton.No,
+        info=folder,
+        labels={QMessageBox.StandardButton.Yes: tr("Use it anyway"), QMessageBox.StandardButton.No: tr("Pick another folder")},
+    )
+    return answer == QMessageBox.StandardButton.Yes
+
+
 def count_cached_archives(cache_path: str) -> int:
     """Count .zip archives in *cache_path*."""
     if not cache_path:
@@ -89,29 +198,6 @@ def count_cached_archives(cache_path: str) -> int:
     for _ in cache_dir.glob("*.zip"):
         count += 1
     return count
-
-
-def update_cache_label(label: QLabel, cache_path: str) -> None:
-    """Set *label* text and colour based on archive count."""
-    if not cache_path:
-        label.setText("")
-        return
-    count = count_cached_archives(cache_path)
-    if count == 0:
-        label.setText(tr("No archives cached"))
-        label.setStyleSheet(f"color: {STATUS_RED.name()};")
-    else:
-        # Separate singular/plural keys instead of an English-only "s" suffix
-        # appended to a translated noun: Romanian (and most languages) plural
-        # by changing the word itself ("arhivă" -> "arhive"), not by adding a
-        # suffix, so a shared "{count} archive{arg} cached" template could
-        # never translate correctly for them.
-        label.setText(
-            tr("{count} archive cached", count=count)
-            if count == 1
-            else tr("{count} archives cached", count=count)
-        )
-        label.setStyleSheet(f"color: {OK_GREEN.name()};")
 
 
 def format_playtime(total_seconds: float) -> str:
@@ -151,6 +237,31 @@ def format_last_played(timestamp: float | None) -> str:
     return datetime.fromtimestamp(timestamp).astimezone().strftime("%d/%m/%Y %H:%M")
 
 
+def process_running(pattern: str) -> bool:
+    """True when another process's command line matches ``pattern``,
+    ignoring case - ``pgrep -if`` without the subprocess. Spawning pgrep
+    from this process cost about 27 ms on the GUI thread, a hitch on every
+    page that checks; reading /proc takes about 5 ms.
+
+    Case-insensitive: Wine/umu-run can report the running process's own
+    path in a different case than the real filename (e.g. fully lowercased).
+    """
+    regex = re.compile(pattern.encode(), re.IGNORECASE)
+    own = str(os.getpid())
+    try:
+        pids = [name for name in os.listdir("/proc") if name.isdigit() and name != own]
+    except OSError:
+        return False
+    for pid in pids:
+        try:
+            with open(f"/proc/{pid}/cmdline", "rb") as cmdline:
+                if regex.search(cmdline.read().replace(b"\0", b" ")):
+                    return True
+        except OSError:
+            continue  # exited meanwhile, or not ours to read
+    return False
+
+
 _MO2_RUNNING_CACHE: float = 0.0
 _MO2_RUNNING_RESULT: bool = False
 _MO2_CACHE_TTL: float = 3.0
@@ -174,35 +285,8 @@ def mo2_running(*, force: bool = False) -> bool:
     now = time.monotonic()
     if not force and now - _MO2_RUNNING_CACHE < _MO2_CACHE_TTL:
         return _MO2_RUNNING_RESULT
-    exe = shutil.which("pgrep")
-    if not exe:
-        # Cache the "pgrep unavailable" answer too, or every caller re-probes
-        # the PATH on each poll.
-        _MO2_RUNNING_CACHE = now
-        _MO2_RUNNING_RESULT = False
-        return False
-    try:
-        proc = subprocess.run(
-            # Case-insensitive: Wine/umu-run can report the running
-            # process's own path in a different case than the literal
-            # "ModOrganizer.exe" filename (e.g. fully lowercased) - a
-            # bracket expression on just the first letter (the previous
-            # form of this pattern) does not cover that. pgrep excludes
-            # its own PID by default, so this cannot self-match.
-            [exe, "-if", r"ModOrganizer\.exe"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=2,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        # Cache the failure for the TTL as well; a missing/slow pgrep must
-        # not block the GUI thread on every poll.
-        _MO2_RUNNING_CACHE = now
-        _MO2_RUNNING_RESULT = False
-        return False
     _MO2_RUNNING_CACHE = now
-    _MO2_RUNNING_RESULT = proc.returncode == 0
+    _MO2_RUNNING_RESULT = process_running(r"ModOrganizer\.exe")
     return _MO2_RUNNING_RESULT
 
 
@@ -228,20 +312,7 @@ def game_running(*, force: bool = False) -> bool:
     now = time.monotonic()
     if not force and now - _GAME_RUNNING_CACHE < _MO2_CACHE_TTL:
         return _GAME_RUNNING_RESULT
-    exe = shutil.which("pgrep")
-    result = False
-    if exe:
-        try:
-            proc = subprocess.run(
-                [exe, "-if", r"Anomaly[A-Za-z0-9]*\.exe"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=2,
-                check=False,
-            )
-            result = proc.returncode == 0
-        except (OSError, subprocess.TimeoutExpired):
-            result = False
+    result = process_running(r"Anomaly[A-Za-z0-9]*\.exe")
     _GAME_RUNNING_CACHE = now
     _GAME_RUNNING_RESULT = result
     return result
@@ -271,6 +342,28 @@ def steam_running() -> bool:
     return proc.returncode == 0
 
 
+def pick_shortcuts_vdf(parent: QWidget, title: str, prompt: str) -> Path | None:
+    """The shortcuts.vdf to write to: the only Steam account, the one Steam
+    logs into on start, or the one the user picks. None if there is no Steam or the user
+    cancelled (a warning is already shown for the first)."""
+    from ..steam_shortcuts import (
+        autologin_shortcuts_vdf,
+        find_shortcuts_vdf,
+        list_steam_accounts,
+    )
+
+    vdf_path = find_shortcuts_vdf() or autologin_shortcuts_vdf()
+    if vdf_path is not None:
+        return vdf_path
+    accounts = list_steam_accounts()
+    if not accounts:
+        QMessageBox.warning(parent, tr("Steam wasn't found"), tr("COMMANDER couldn't find Steam on this computer. Install Steam and sign in once, then try again."))
+        return None
+    labels = [label for label, _path in accounts]
+    label, ok = QInputDialog.getItem(parent, title, prompt, labels, 0, False, confirm=tr("Use this account"))
+    return dict(accounts)[label] if ok else None
+
+
 def mo2_pids() -> set[int]:
     """PIDs of currently running Mod Organizer processes, uncached.
 
@@ -281,6 +374,49 @@ def mo2_pids() -> set[int]:
     own instance closes while a pre-existing one lingers.
     """
     return exe_pids("ModOrganizer.exe")
+
+
+_CMDLINES: tuple[float, dict[int, bytes]] = (0.0, {})
+
+
+def _proc_cmdlines() -> dict[int, bytes]:
+    """pid -> lower-cased command line of every other process.
+
+    Shared for 0.2 s: a watched launch asks for MO2's, the game's and the
+    launcher's PIDs on the same tick, and each scan reads every process.
+    """
+    global _CMDLINES
+    import time
+
+    now = time.monotonic()
+    if now - _CMDLINES[0] < 0.2:
+        return _CMDLINES[1]
+    own = os.getpid()
+    found: dict[int, bytes] = {}
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        entries = []
+    for entry in entries:
+        if not entry.isdigit() or int(entry) == own:
+            continue
+        # Raw os.open/os.read: a Python file object per process made
+        # this scan of every process take ~40% longer.
+        try:
+            fd = os.open(f"/proc/{entry}/cmdline", os.O_RDONLY)
+        except OSError:
+            continue  # exited meanwhile, or not ours to read
+        try:
+            chunks = []
+            while chunk := os.read(fd, 65536):
+                chunks.append(chunk)
+            found[int(entry)] = b"".join(chunks).replace(b"\0", b" ").lower()
+        except OSError:
+            continue
+        finally:
+            os.close(fd)
+    _CMDLINES = (now, found)
+    return found
 
 
 def exe_pids(exe_name: str) -> set[int]:
@@ -295,6 +431,13 @@ def exe_pids(exe_name: str) -> set[int]:
     guaranteed to match how Wine reports the running process's own
     command line.
     """
+    proc_root = Path("/proc")
+    if proc_root.is_dir():
+        # Read directly: this runs on the GUI thread up to four times a
+        # second while a launch is watched, and spawning pgrep each time
+        # cost a fork+exec per tick (and up to a 2s stall on a busy system).
+        needle = exe_name.lower().encode()
+        return {pid for pid, cmdline in _proc_cmdlines().items() if needle in cmdline}
     exe = shutil.which("pgrep")
     if not exe:
         return set()
@@ -320,6 +463,8 @@ def exe_pids(exe_name: str) -> set[int]:
 
 _click_sound_player = None
 _click_sound_output = None
+#: When play_click_sound() last ran: the feedback click stays out of its way.
+_pda_played_at = 0.0
 
 
 def play_click_sound() -> None:
@@ -328,7 +473,8 @@ def play_click_sound() -> None:
     A missing asset or a broken audio backend must never block or crash
     a game launch - any failure here is silently swallowed.
     """
-    global _click_sound_player, _click_sound_output
+    global _click_sound_player, _click_sound_output, _pda_played_at
+    _pda_played_at = time.monotonic()
     try:
         from PySide6.QtCore import QUrl
         from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
@@ -346,13 +492,51 @@ def play_click_sound() -> None:
             if not path.is_file():
                 return
             _click_sound_output = QAudioOutput()
-            _click_sound_output.setVolume(0.5)
+            _click_sound_output.setVolume(0.35)
             _click_sound_player = QMediaPlayer()
             _click_sound_player.setAudioOutput(_click_sound_output)
             _click_sound_player.setSource(QUrl.fromLocalFile(str(path)))
         _click_sound_player.stop()
         _click_sound_player.play()
     except Exception:  # noqa: BLE001, S110 - a broken sound must never block a launch
+        pass
+
+
+_feedback_sound = None
+
+
+def play_feedback_sound() -> None:
+    """The short click for buttons, tabs and the tray menu, best-effort.
+
+    Never on top of the PDA sound: played a moment later, once every
+    handler of the same click has run, and skipped if one of them played
+    play_click_sound(). That covers buttons that only sometimes launch
+    (Multiplayer's), which no fixed list of PDA buttons could.
+    """
+    QTimer.singleShot(0, _play_feedback_now)
+
+
+def _play_feedback_now() -> None:
+    # QSoundEffect rather than play_click_sound()'s QMediaPlayer: it keeps
+    # the WAV decoded in memory, so a click plays at once, as fast as clicks come.
+    global _feedback_sound
+    if time.monotonic() - _pda_played_at < 0.3 or not gui_settings.click_sounds_enabled():
+        return
+    try:
+        from PySide6.QtCore import QUrl
+        from PySide6.QtMultimedia import QSoundEffect
+
+        from ..config import project_root
+
+        if _feedback_sound is None:
+            path = project_root() / "commander_gui" / "assets" / "click.wav"
+            if not path.is_file():
+                return
+            _feedback_sound = QSoundEffect()
+            _feedback_sound.setVolume(0.35)
+            _feedback_sound.setSource(QUrl.fromLocalFile(str(path)))
+        _feedback_sound.play()
+    except Exception:  # noqa: BLE001, S110 - a broken sound must never break a click
         pass
 
 
@@ -388,6 +572,21 @@ def gamma_installed(path: str, mo2_profile: str = GAMMA_PROFILE) -> bool:
     return _find_profile_dir(base / "profiles", mo2_profile) is not None
 
 
+
+def use_stock_mo2_profile_if_missing(settings, profile) -> None:
+    """Point ``profile`` back at "G.A.M.M.A" when its MO2 profile is gone.
+
+    ``full-install`` writes GAMMA's profile under the saved MO2 profile
+    name. A custom one picked before GAMMA was removed would get the stock
+    mod list and leave no G.A.M.M.A profile, so a fresh install goes back
+    to the stock name.
+    """
+    if profile.mo2_profile != GAMMA_PROFILE and not gamma_installed(
+        profile.gamma, profile.mo2_profile
+    ):
+        profile.mo2_profile = GAMMA_PROFILE
+        settings.save()
+
 def count_active_mods(
     gamma_dir: str, mo2_profile: str = GAMMA_PROFILE
 ) -> tuple[int, int] | None:
@@ -403,11 +602,31 @@ def count_active_mods(
     profile_dir = _find_profile_dir(base / "profiles", mo2_profile)
     if profile_dir is None:
         return None
+    modlist = profile_dir / "modlist.txt"
+    mods_dir = base / "mods"
+    # The top bar asks on every page switch and every few seconds; reparse
+    # only when modlist.txt or the mods folder (a mod added, removed or
+    # renamed) changed since the last count.
     try:
-        lines = read_lines(profile_dir / "modlist.txt")
+        list_stat = modlist.stat()
+        dir_mtime = mods_dir.stat().st_mtime_ns
+    except OSError:
+        return None
+    key = (list_stat.st_mtime_ns, list_stat.st_size, dir_mtime)
+    cached = _mod_count_cache.get(str(modlist))
+    if cached is not None and cached[0] == key:
+        return cached[1]
+    try:
+        lines = read_lines(modlist)
     except (OSError, ValueError):
         return None
-    return count_mods(lines, mods_dir=base / "mods")
+    counts = count_mods(lines, mods_dir=mods_dir)
+    _mod_count_cache[str(modlist)] = (key, counts)
+    return counts
+
+
+#: modlist.txt path -> (its stamp, counts); one entry per profile.
+_mod_count_cache: dict[str, tuple[tuple[int, int, int], tuple[int, int]]] = {}
 
 
 class NoWheelComboBox(QComboBox):
@@ -426,6 +645,20 @@ class NoWheelComboBox(QComboBox):
         event.ignore()
 
 
+class PlainSpinBox(QSpinBox):
+    """A QSpinBox with no arrow buttons that ignores the mouse wheel.
+
+    Same reasoning as NoWheelComboBox: values change only when typed.
+    """
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setButtonSymbols(QSpinBox.ButtonSymbols.NoButtons)
+
+    def wheelEvent(self, event) -> None:
+        event.ignore()
+
+
 def display_state(installed: bool, operation: str | None, key: str) -> bool | str:
     """Resolve a target's displayed install state.
 
@@ -437,8 +670,37 @@ def display_state(installed: bool, operation: str | None, key: str) -> bool | st
     return installed
 
 
+class StatusDot(QLabel):
+    """A round status dot in the label's text colour (QSS ``color`` works).
+
+    Painted instead of an enlarged "●" glyph, which sits off the middle of
+    the text beside it; a layout centres this exactly.
+    """
+
+    def sizeHint(self) -> QSize:
+        d = round(self.fontMetrics().height() * 0.7)
+        return QSize(d, d)
+
+    def minimumSizeHint(self) -> QSize:
+        return self.sizeHint()
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(self.palette().color(self.foregroundRole()))
+        d = min(self.width(), self.height())
+        painter.drawEllipse(
+            (self.width() - d) // 2, (self.height() - d) // 2, d, d
+        )
+
+
 class InstallStatusRow(QWidget):
     """A coloured dot + status (Installed / Not installed / Unknown) for a target."""
+
+    #: (state, status text) after every change; state is "ok", "missing",
+    #: "busy", "warn" or "pending". The Install page's step track follows it.
+    changed = Signal(str, str)
 
     def __init__(
         self,
@@ -453,16 +715,20 @@ class InstallStatusRow(QWidget):
         row = QHBoxLayout(self)
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(6)
-        self._dot = QLabel(tr("●"))
-        self._dot.setFixedWidth(24)
+        self._dot = StatusDot()
         self._status = QLabel(tr("Unknown"))
         self._detail = QLabel(detail)
         self._detail.setObjectName("info")
         self._detail.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse
         )
-        row.addWidget(self._dot)
-        row.addWidget(self._status)
+        if name:
+            row.addWidget(self._dot)
+            row.addWidget(self._status)
+        else:
+            # A card-header badge: text first, dot at the card's edge.
+            row.addWidget(self._status)
+            row.addWidget(self._dot)
         # Fixed-width status and name columns, so a card's rows line up
         # into columns whatever their text: every state word fits the first,
         # every row name the second. Measured in _sync_column_widths(), once
@@ -482,6 +748,10 @@ class InstallStatusRow(QWidget):
         self.set_state(ok, detail)
 
     def _sync_column_widths(self) -> None:
+        if self._name_lbl is None:
+            # A card-header badge (make_header_row): no columns to line up,
+            # and a fixed width would leave a gap before the card's edge.
+            return
         self._status.ensurePolished()
         metrics = self._status.fontMetrics()
         self._status.setFixedWidth(
@@ -522,8 +792,9 @@ class InstallStatusRow(QWidget):
             color = STATUS_GREY.name()
             text = pending_text if pending_text is not None else self._pending_text
         self._status.setText(text)
-        self._dot.setStyleSheet(f"color: {color}; font-size: 18px;")
+        self._dot.setStyleSheet(f"color: {color};")
         self._status.setStyleSheet(f"color: {color};")
+        self.changed.emit({True: "ok", False: "missing"}.get(ok, "pending"), text)
 
     def set_installing(self, detail: str = "") -> None:
         """Show the transient orange state used while an install is running."""
@@ -531,8 +802,9 @@ class InstallStatusRow(QWidget):
         self._detail.setText(detail)
         self._detail.setVisible(bool(detail))
         self._status.setText(tr("Installing"))
-        self._dot.setStyleSheet(f"color: {color}; font-size: 18px;")
+        self._dot.setStyleSheet(f"color: {color};")
         self._status.setStyleSheet(f"color: {color};")
+        self.changed.emit("busy", tr("Installing"))
 
     def set_incomplete(self, detail: str = "") -> None:
         """Show the amber "incomplete" state - present on disk, but the last
@@ -545,8 +817,9 @@ class InstallStatusRow(QWidget):
         self._detail.setText(detail)
         self._detail.setVisible(bool(detail))
         self._status.setText(tr("Incomplete"))
-        self._dot.setStyleSheet(f"color: {color}; font-size: 18px;")
+        self._dot.setStyleSheet(f"color: {color};")
         self._status.setStyleSheet(f"color: {color};")
+        self.changed.emit("warn", tr("Incomplete"))
 
     def set_status_tooltip(self, text: str) -> None:
         """Show the same status details when hovering any part of the row."""
@@ -878,6 +1151,8 @@ class BackgroundTask(QObject):
             self._thread = None
             self._worker = None
         self._abandoned = False
+        # A restart must not begin already cancelled (StreamTask does the same).
+        self._cancel_event.clear()
         self._thread = QThread(self)
         self._worker = _Worker(self._fn, *self._args, **self._kwargs)
         self._worker.moveToThread(self._thread)
@@ -971,14 +1246,14 @@ def activate_profile(window, parent: QWidget, name: str, on_done=None) -> Backgr
     def _finish(result) -> None:
         rc, out, err = result
         if not cli_ok(rc, out, err):
-            _report(tr("Failed"), (out + "\n" + err).strip() or "config use failed")
+            _report(tr("Couldn't switch profile"), (out + "\n" + err).strip() or tr("The profile couldn't be activated."))
             if on_done is not None:
                 on_done(False)
             return
         window.refresh_settings()
         active_now = window.settings.active_profile
         if active_now is None or active_now.profile_name != name:
-            _report(tr("Failed"), tr("Profile '{name}' could not be activated.", name=name))
+            _report(tr("Couldn't switch profile"), tr("The profile '{name}' couldn't be activated. Check that its folders still exist on the Profiles page.", name=name))
             if on_done is not None:
                 on_done(False)
             return
@@ -986,7 +1261,7 @@ def activate_profile(window, parent: QWidget, name: str, on_done=None) -> Backgr
             on_done(True)
 
     def _error(msg: str) -> None:
-        _report(tr("Error"), msg)
+        _report(tr("Couldn't switch profile"), msg)
         if on_done is not None:
             on_done(False)
 
@@ -1166,10 +1441,10 @@ def install_hover_grow_text(
     button: QPushButton,
     color_token: str,
     *,
-    scale: float = 1.12,
-    duration: int = 150,
+    scale: float = 1.04,
+    duration: int = 90,
 ) -> None:
-    """Grow a button's label text on hover, purely decorative.
+    """Grow a button's label text slightly on hover, purely decorative.
 
     Used for the Dashboard's "Play GAMMA" and Play page's "Launch Game"
     buttons - matches the same hover-grow treatment already applied to the
@@ -1196,20 +1471,29 @@ def install_hover_grow_text(
     overlay.setAlignment(Qt.AlignmentFlag.AlignCenter)
     overlay.setGeometry(button.rect())
 
+    # Polish first: before that, font() is the app default, not the
+    # button's QSS font (the hero's 17px bold).
+    button.ensurePolished()
     base_font = QFont(button.font())
     state = {"scale": 1.0}
 
     def apply_scale(value: float) -> None:
         state["scale"] = value
-        font = QFont(base_font)
+        # The font goes in the stylesheet: the app's `* { font-size }` rule
+        # would override a plain setFont().
         pixel_size = base_font.pixelSize()
         if pixel_size > 0:
-            font.setPixelSize(max(1, round(pixel_size * value)))
+            size = f"{max(1, round(pixel_size * value))}px"
         else:
-            font.setPointSizeF(max(1.0, base_font.pointSizeF() * value))
-        overlay.setFont(font)
-        color = active_theme_tokens().get(color_token, "#ffffff")
-        overlay.setStyleSheet(f"background: transparent; border: none; color: {color};")
+            size = f"{max(1.0, base_font.pointSizeF() * value):.1f}pt"
+        weight = "bold" if base_font.bold() else "normal"
+        tokens = active_theme_tokens()
+        # The overlay hides the button's own :disabled text colour.
+        color = tokens.get(color_token if button.isEnabled() else "text_disabled", "#ffffff")
+        overlay.setStyleSheet(
+            f"background: transparent; border: none; color: {color};"
+            f" font-size: {size}; font-weight: {weight};"
+        )
 
     apply_scale(1.0)
 
@@ -1219,6 +1503,9 @@ def install_hover_grow_text(
 
     def start(target: float) -> None:
         anim.stop()
+        if not gui_settings.animations_enabled():
+            apply_scale(1.0)
+            return
         anim.setDuration(duration)
         anim.setStartValue(state["scale"])
         anim.setEndValue(target)
@@ -1226,10 +1513,14 @@ def install_hover_grow_text(
 
     class _HoverGrowFilter(QObject):
         def eventFilter(self, _obj: QObject, event) -> bool:
-            if event.type() == QEvent.Type.Enter:
+            if event.type() == QEvent.Type.Enter and button.isEnabled():
                 start(scale)
             elif event.type() == QEvent.Type.Leave:
                 start(1.0)
+            elif event.type() == QEvent.Type.EnabledChange:
+                if not button.isEnabled():
+                    start(1.0)
+                apply_scale(state["scale"])
             elif event.type() == QEvent.Type.Resize:
                 overlay.setGeometry(button.rect())
             return False
@@ -1261,16 +1552,94 @@ def set_hover_grow_text(button: QPushButton, text: str) -> None:
         button.setText(text)
 
 
+class CenteredFlowLayout(QLayout):
+    """Lays widgets out left to right and wraps them onto a new line when
+    the width runs out, each line centred - for a row of status pills that
+    must never make the page wider than the window."""
+
+    def __init__(self, parent=None, spacing: int = 8) -> None:
+        super().__init__(parent)
+        self._items: list = []
+        self._spacing = spacing
+
+    def addItem(self, item) -> None:
+        self._items.append(item)
+
+    def count(self) -> int:
+        return len(self._items)
+
+    def itemAt(self, index: int):
+        return self._items[index] if 0 <= index < len(self._items) else None
+
+    def takeAt(self, index: int):
+        return self._items.pop(index) if 0 <= index < len(self._items) else None
+
+    def expandingDirections(self):
+        return Qt.Orientation(0)
+
+    def hasHeightForWidth(self) -> bool:
+        return True
+
+    def heightForWidth(self, width: int) -> int:
+        return self._arrange(QRect(0, 0, width, 0), move=False)
+
+    def setGeometry(self, rect) -> None:
+        super().setGeometry(rect)
+        self._arrange(rect, move=True)
+
+    def sizeHint(self) -> QSize:
+        return self.minimumSize()
+
+    def minimumSize(self) -> QSize:
+        size = QSize()
+        for item in self._items:
+            size = size.expandedTo(item.minimumSize())
+        margins = self.contentsMargins()
+        return size + QSize(margins.left() + margins.right(), margins.top() + margins.bottom())
+
+    def _arrange(self, rect, *, move: bool) -> int:
+        """Place the items in ``rect`` (when ``move``); return the height."""
+        visible = [item for item in self._items if not item.isEmpty()]
+        lines: list[list] = [[]]
+        used = 0
+        for item in visible:
+            width = item.sizeHint().width()
+            if lines[-1] and used + self._spacing + width > rect.width():
+                lines.append([])
+                used = 0
+            used += width if not lines[-1] else self._spacing + width
+            lines[-1].append(item)
+        y = rect.y()
+        for line in lines:
+            if not line:
+                continue
+            widths = [item.sizeHint().width() for item in line]
+            height = max(item.sizeHint().height() for item in line)
+            x = rect.x() + max(0, (rect.width() - sum(widths) - self._spacing * (len(line) - 1)) // 2)
+            for item, width in zip(line, widths):
+                if move:
+                    item.setGeometry(QRect(QPoint(x, y), QSize(width, height)))
+                x += width + self._spacing
+            y += height + self._spacing
+        return max(0, y - rect.y() - self._spacing)
+
+
 def clear_layout(layout) -> None:
     """Remove and delete every item (widgets and nested layouts) in a layout.
 
     Deleting a sub-layout via ``takeAt`` alone leaks the widgets inside it, which
     then keep their old geometry and render on top of freshly added rows.
+
+    Widgets are hidden before ``deleteLater``: one added to a layout moments
+    ago still has a queued show pending, and inside a modal dialog's event
+    loop that show runs before the deferred delete - the widget appeared,
+    out of any layout, at Qt's default 640x480 in its parent's corner.
     """
     while layout.count():
         item = layout.takeAt(0)
         widget = item.widget()
         if widget is not None:
+            widget.hide()
             widget.deleteLater()
             continue
         child = item.layout()
@@ -1323,20 +1692,6 @@ def assistant_token(text: str = "ASSISTANT") -> str:
     )
 
 
-def _kv_row(label: str, value: str) -> QHBoxLayout:
-    """Key-value row: dim label on the left, selectable value on the right."""
-    row = QHBoxLayout()
-    key = QLabel(label)
-    key.setObjectName("dim")
-    key.setAlignment(Qt.AlignmentFlag.AlignTop)
-    val = QLabel(value)
-    val.setWordWrap(True)
-    val.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-    row.addWidget(key, 0, Qt.AlignmentFlag.AlignTop)
-    row.addWidget(val, 1)
-    return row
-
-
 #: Re-exported so UI code keeps a single, obvious import site for sizes.
 human_size = format_size
 
@@ -1370,11 +1725,11 @@ def populate_runner_combo(
     """
     combo.blockSignals(True)
     combo.clear()
-    combo.addItem(tr("Auto-detect (latest GE-Proton)"), "auto")
+    combo.addItem(tr("Auto-detect (installed Proton-GE)"), "auto")
     if protons:
         combo.insertSeparator(combo.count())
         for label, path in protons:
-            combo.addItem(tr("{label} (Installed)", label=label), f"umup:{path}")
+            combo.addItem(tr("{label} (Installed)", label=label.removesuffix("-x86_64")), f"umup:{path}")
     chosen = saved
     if not chosen or combo.findData(chosen) < 0:
         chosen = fallback
@@ -1392,7 +1747,7 @@ def paused_dependency_status() -> tuple[dict[str, bool], str]:
     the live check pauses and everything reads as installed until it closes.
     """
     paused = {verb: True for verb in WINETRICKS_VERBS}
-    paused.update(wine=True, protontricks=True, umu=True)
+    paused.update(wine=True, umu=True)
     total = len(paused)
     return paused, tr(
         "{total}/{total} dependencies installed (paused - game running)", total=total
@@ -1402,8 +1757,8 @@ def paused_dependency_status() -> tuple[dict[str, bool], str]:
 def winetricks_tooltip(status: dict[str, bool]) -> str:
     """Rich-text bullet list of tool availability and per-verb winetricks state."""
     rows: list[str] = []
-    # Tools section (wine, protontricks) — only shown when present in status.
-    tool_keys = [("wine", "Wine"), ("protontricks", "Protontricks"), ("umu", "umu-run")]
+    # Tools section (wine, umu-run) — only shown when present in status.
+    tool_keys = [("wine", "Wine"), ("umu", "umu-run")]
     tool_items = [
         (label, status.get(key, False)) for key, label in tool_keys if key in status
     ]
@@ -1513,6 +1868,19 @@ def crash_dump_names(anomaly_path: str | Path) -> set[str]:
         return set()
 
 
+def open_web_links(browser) -> None:
+    """Make a QTextBrowser open only http(s) links, through open_url.
+
+    Its HTML comes from the release feed: a ``file:``, ``smb:`` or custom
+    scheme link in it must never reach the desktop's opener.
+    """
+    browser.setOpenExternalLinks(False)
+    browser.setOpenLinks(False)
+    browser.anchorClicked.connect(
+        lambda url: open_url(url.toString()) if url.scheme() in ("http", "https") else None
+    )
+
+
 def open_url(url: str) -> bool:
     """Open a web link in the default browser. True if an opener started.
 
@@ -1523,6 +1891,8 @@ def open_url(url: str) -> bool:
     output. Also given a clean environment, so an AppImage's own library
     paths never reach the browser.
     """
+    if not url.lower().startswith(("http://", "https://")):
+        return False  # also keeps a "-option" from reaching xdg-open
     if sys.platform.startswith("linux"):
         for opener in ("xdg-open", "gio"):
             exe = shutil.which(opener)
@@ -1530,7 +1900,7 @@ def open_url(url: str) -> bool:
                 continue
             command = [exe, url] if opener == "xdg-open" else [exe, "open", url]
             try:
-                subprocess.Popen(
+                spawn_reaped(
                     command,
                     env=child_environment(),
                     stdin=subprocess.DEVNULL,
@@ -1593,17 +1963,64 @@ def open_in_file_manager(path: str | Path) -> bool:
     if command is None:
         return False
     try:
-        subprocess.Popen(
+        # Like open_url(): the AppImage's Python and SSL paths point into a
+        # mount that goes away when COMMANDER quits.
+        spawn_reaped(
             command,
+            env=child_environment(),
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            start_new_session=True,
         )
         return True
     except OSError:
         return False
 
 
-def notify_desktop(title: str, message: str) -> None:
+@functools.cache
+def _notify_send_has_actions(exe: str) -> bool:
+    """notify-send 0.7.9 and older (Ubuntu 22.04) reject --action outright."""
+    try:
+        result = subprocess.run(
+            [exe, "--help"],
+            env=child_environment(),
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return "--action" in result.stdout
+
+
+def _notify_icon() -> str:
+    from ..steam_shortcuts import ICON_DEST, bundled_icon
+
+    for icon in (ICON_DEST, bundled_icon()):
+        if icon.is_file():
+            return str(icon)
+    return DESKTOP_ID
+
+
+def _raise_main_window() -> None:
+    for widget in QApplication.topLevelWidgets():
+        if isinstance(widget, QMainWindow):
+            if hasattr(widget, "show_from_tray"):
+                widget.show_from_tray()
+            else:
+                widget.showNormal()
+                widget.raise_()
+                widget.activateWindow()
+            return
+
+
+def notify_desktop(
+    title: str,
+    message: str,
+    actions: Sequence[tuple[str, Callable[[], None]]] = (),
+) -> None:
     """Best-effort desktop notification for a long task finishing.
 
     GAMMA installs/updates can run for a long time - if the user alt-tabs
@@ -1613,18 +2030,64 @@ def notify_desktop(title: str, message: str) -> None:
     nothing new appears in the tray. Silently does nothing if it isn't
     available - a missing notification must never affect the operation
     that just completed.
+
+    Clicking the notification brings COMMANDER to the front; each of
+    ``actions`` is a (label, callback) button that does the same first.
+    The desktop draws the card itself - its colours follow the system theme.
     """
     exe = shutil.which("notify-send")
     if exe is None:
         return
-    try:
-        subprocess.Popen(
-            [exe, "--app-name=STALKER COMMANDER", title, message],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-    except OSError:
-        pass
+    command = [
+        exe,
+        "--app-name=STALKER COMMANDER",
+        f"--icon={_notify_icon()}",
+        # Groups COMMANDER's notifications under its app entry, where
+        # Plasma and GNOME let the user mute them.
+        f"--hint=string:desktop-entry:{DESKTOP_ID}",
+    ]
+    if not _notify_send_has_actions(exe):
+        try:
+            spawn_reaped(
+                [*command, title, message],
+                # The host's libraries, not the AppImage's bundled ones.
+                env=child_environment(),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except OSError:
+            pass
+        return
+    callbacks = {"default": lambda: None}
+    command.append(f"--action=default={tr('Open COMMANDER')}")
+    for index, (label, callback) in enumerate(actions):
+        callbacks[f"a{index}"] = callback
+        command.append(f"--action=a{index}={label}")
+    # notify-send waits for a click and prints the chosen action's name;
+    # QProcess hands that back on the GUI thread.
+    process = QProcess(QApplication.instance())
+    environment = QProcessEnvironment()
+    for key, value in child_environment().items():
+        environment.insert(key, value)
+    process.setProcessEnvironment(environment)
+
+    def finished(*_args) -> None:
+        try:
+            chosen = bytes(process.readAllStandardOutput()).decode(errors="replace").strip()
+            process.deleteLater()
+        except RuntimeError:  # COMMANDER is quitting and Qt already freed it
+            return
+        callback = callbacks.get(chosen)
+        if callback is not None:
+            # ponytail: no Wayland activation token, so KWin may only flash an
+            # already-open window's taskbar entry; pass --activation-token-fd if that bites.
+            _raise_main_window()
+            callback()
+
+    process.finished.connect(finished)
+    # Still waiting for a click at quit: stopped, not destroyed mid-run.
+    QApplication.instance().aboutToQuit.connect(process.kill)
+    process.start(command[0], [*command[1:], title, message])
 
 
 class ProgressTable(QTableWidget):
@@ -1632,7 +2095,7 @@ class ProgressTable(QTableWidget):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(0, 3, parent)
-        self.setHorizontalHeaderLabels(["Addon", "Operation", "Percent"])
+        self.setHorizontalHeaderLabels([tr("Addon"), tr("Operation"), tr("Percent")])
         self.verticalHeader().setVisible(False)
         self.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -1681,14 +2144,14 @@ class ProgressTable(QTableWidget):
             self._rows[event.name] = row
             self.setItem(row, 0, QTableWidgetItem(event.name))
             self.setItem(row, 1, QTableWidgetItem(event.operation))
-            self.setItem(row, 2, QTableWidgetItem(f"{event.percent:.1%}"))
+            self.setItem(row, 2, QTableWidgetItem(event.amount))
         else:
             op = self.item(row, 1)
             pct = self.item(row, 2)
             if op is None or pct is None:
                 return
             op.setText(event.operation)
-            pct.setText(f"{event.percent:.1%}")
+            pct.setText(event.amount)
             self._rows.move_to_end(event.name)
 
         if event.operation == "Skipped" or event.percent >= 1.0:
@@ -1826,20 +2289,22 @@ def aggregate_progress_value(
 ) -> int:
     """Return overall progress using the CLI counter and current item fraction.
 
-    Once a known-heavy git-cloned repo (see ``_HEAVY_ARCHIVE_NAMES``) has
-    reported progress, its collective share of the bar is fixed at
-    ``_HEAVY_ARCHIVE_SHARE`` instead of the flat ``1/total`` every other
-    item gets - otherwise those 3 items, which dominate real install time,
-    would only ever move the bar by a fraction of a percent each.
+    A caller that passes ``heavy_progress`` (a GAMMA install) gets the
+    known-heavy git-cloned repos (see ``_HEAVY_ARCHIVE_NAMES``) a fixed
+    ``_HEAVY_ARCHIVE_SHARE`` of the bar from the first line, instead of the
+    flat ``1/total`` every other item gets - otherwise those 3 items, which
+    dominate real install time, would only ever move the bar by a fraction
+    of a percent each. Reserved up front, not once a heavy repo reports: a
+    resume reports hundreds of Skipped mods first and would pin the bar at
+    ~98% before the repos even start.
     """
     if total <= 0:
         return 0
     current = max(0.0, min(1.0, percent))
-    heavy_progress = {} if heavy_progress is None else heavy_progress
     key = name.strip().lower()
-    if key in _HEAVY_ARCHIVE_NAMES:
+    if heavy_progress is not None and key in _HEAVY_ARCHIVE_NAMES:
         heavy_progress[key] = _heavy_item_phase_value(operation, current)
-    if not heavy_progress:
+    if heavy_progress is None:
         completed_before_current = max(0, complete - 1)
         fraction = (completed_before_current + current) / total
         return max(0, min(100, round(fraction * 100)))
@@ -1895,27 +2360,25 @@ class ProgressArea(QWidget):
         show_log: bool = True,
         stage_progress: bool = False,
         log_max_height: int | None = None,
-        auto_expand_log: bool = True,
         bar_follows_log: bool = False,
         toggle_row_extra: QWidget | None = None,
+        show_status: bool = True,
     ) -> None:
         super().__init__(parent)
         self.show_table = show_table
+        #: False when the bar's own text already says what is happening, so
+        #: the line under it would only repeat it.
+        self._show_status = show_status
         self.show_log = show_log
         #: An extra widget (e.g. a secondary action button) placed to the
         #: left of "Show Console" on its own row, instead of the page
         #: giving it a separate row of its own - lets a page fold a
         #: secondary action onto the console toggle's row to stay compact.
         self._toggle_row_extra = toggle_row_extra
-        #: Whether on_started() auto-expands the collapsed log/table pane
-        #: (see _show_log()) - the right default for a page where seeing
-        #: live output matters (a full install), not for a page where
-        #: the console should stay tucked away unless the user asks.
-        self._auto_expand_log = auto_expand_log
         #: Whether the progress bar and idle status line are tied to the
         #: log/table's own collapsed state - both hidden while the
         #: console is collapsed, shown alongside it (see
-        #: _toggle_log()/_toggle_table()/_show_log()). False everywhere
+        #: _toggle_log()/_toggle_table()). False everywhere
         #: else: the bar is normally the one thing worth seeing at a
         #: glance without opening the console at all.
         self._bar_follows_log = bar_follows_log
@@ -1931,19 +2394,13 @@ class ProgressArea(QWidget):
         self.bar = QProgressBar(self)
         self.bar.setTextVisible(True)
         self.bar.setFormat(self._bar_idle_format)
+        self.bar.valueChanged.connect(self._mark_bar_full)
 
         self.table = ProgressTable(self) if show_table else None
 
         self.status_label = QLabel(self._status_idle)
         self.status_label.setObjectName("info")
-
-        self.heavy_notice_label: QLabel | None = None
-        if show_table:
-            self.heavy_notice_label = QLabel()
-            self.heavy_notice_label.setObjectName("info")
-            self.heavy_notice_label.setStyleSheet(f"color: {WARN.name()};")
-            self.heavy_notice_label.setWordWrap(True)
-            self.heavy_notice_label.hide()
+        self.status_label.setVisible(show_status)
 
         self.log = OutputPane(self) if show_log else None
         self.log_toggle: QPushButton | None = None
@@ -1988,6 +2445,8 @@ class ProgressArea(QWidget):
         self.cancel_button.setText(tr("Cancel"))
 
         status_row = QHBoxLayout()
+        # Set explicitly: a nested layout inherits the outer layout's 0.
+        status_row.setSpacing(8)
         status_row.addWidget(self.bar, 1)
         status_row.addWidget(self.pause_button)
         status_row.addWidget(self.cancel_button)
@@ -2001,12 +2460,8 @@ class ProgressArea(QWidget):
         if show_table:
             # Tight, matching the log-toggle gap below - pulls the addon
             # table (Addon/Operation/Percent) up right under the bar and
-            # status text instead of floating two full 8px gaps down
-            # (heavy_notice_label is empty/hidden most of the time, so
-            # those gaps were pure dead space above the table).
-            layout.addSpacing(2)
-            layout.addWidget(self.heavy_notice_label)
-            layout.addSpacing(2)
+            # status text.
+            layout.addSpacing(4)
             layout.addWidget(self.table, 3)
             if self.log is not None:
                 # Tighter than the other gaps - pulls the Show Console
@@ -2030,6 +2485,21 @@ class ProgressArea(QWidget):
             else:
                 layout.addStretch(1)
         self.reset()
+
+    def _mark_bar_full(self, value: int) -> None:
+        """A full bar's text sits on the accent fill, so it takes the
+        accent's text colour (QProgressBar[full="true"] in the theme)."""
+        full = self.bar.maximum() > 0 and value >= self.bar.maximum()
+        if self.bar.property("full") != full:
+            self.bar.setProperty("full", full)
+            self.bar.style().unpolish(self.bar)
+            self.bar.style().polish(self.bar)
+
+    def set_bar_level(self, level: str) -> None:
+        if self.bar.property("level") != level:
+            self.bar.setProperty("level", level)
+            self.bar.style().unpolish(self.bar)
+            self.bar.style().polish(self.bar)
 
     def _log_toggle_row(self) -> QHBoxLayout:
         row = QHBoxLayout()
@@ -2071,40 +2541,21 @@ class ProgressArea(QWidget):
             self.bar.setVisible(self.table.isVisible())
             self.status_label.setVisible(self.table.isVisible())
 
-    def _show_log(self) -> None:
-        """Expand the log/table pane, e.g. when a run starts - collapsed by default."""
-        if (
-            self.log is not None
-            and self.log_toggle is not None
-            and not self.log.isVisible()
-        ):
-            self.log.show()
-            self.log_toggle.setText(tr("Hide Console"))
-        if (
-            self.table is not None
-            and self.table_toggle is not None
-            and not self.table.isVisible()
-        ):
-            self.table.show()
-            self.table_toggle.setText(tr("Hide Console"))
-        if self._bar_follows_log:
-            self.bar.show()
-            self.status_label.show()
-
     def reset(self) -> None:
         self.bar.setRange(0, 1)
         self.bar.setValue(0)
         self.bar.setFormat(self._bar_idle_format)
         self.bar.setStyleSheet("")
+        self.set_bar_level("")
         self._max_bar_value = 0
         self._heavy_progress = {}
         self._last_status_update = 0.0
         self._paused = False
         if self.table is not None:
             self.table.reset()
-        if self.heavy_notice_label is not None:
-            self.heavy_notice_label.hide()
         self.status_label.setText(self._status_idle)
+        if not self._bar_follows_log and self._show_status:
+            self.status_label.show()
         if self.log is not None:
             self.log.clear()
         self.pause_button.hide()
@@ -2149,8 +2600,19 @@ class ProgressArea(QWidget):
         if self.log is not None:
             self.log.append_line(clean)
         event = parse_progress_line(clean)
+        if event is not None and event.offline_unpack and not self.stage_progress:
+            # Before the install proper: its [1/1] must not count as the
+            # whole install done (the bar never goes back down).
+            pct = round(event.percent * 100)
+            self.bar.setRange(0, 100)
+            self.bar.setValue(pct)
+            self.bar.setFormat(tr("Unpacking the offline archive {pct}%", pct=pct))
+            return
         if event is not None:
-            self.bar.setStyleSheet("")
+            # Clearing an already-empty sheet still re-styles the bar, and
+            # this runs for every progress line.
+            if self.bar.styleSheet():
+                self.bar.setStyleSheet("")
             if self.stage_progress:
                 if event.operation == "Download":
                     # The bar must mirror the true download percentage; no
@@ -2158,7 +2620,8 @@ class ProgressArea(QWidget):
                     pct = max(0, min(100, round(event.percent * 100)))
                     self.bar.setRange(0, 100)
                     self.bar.setValue(pct)
-                    self.bar.setFormat(f"{pct}%")
+                    # Size unknown: the bytes so far are all there is.
+                    self.bar.setFormat(event.size or f"{pct}%")
                     self.status_label.setText("")
                 elif event.operation == "Skipped":
                     self.bar.setRange(0, 1)
@@ -2173,7 +2636,7 @@ class ProgressArea(QWidget):
                     self.bar.setRange(0, 100)
                     self.bar.setValue(pct)
                     self.bar.setFormat(f"{pct}%")
-                    self.status_label.setText(tr("{name} - {operation}...", name=event.name, operation=event.operation))
+                    self.status_label.setText(tr("{name} - {operation}", name=event.name, operation=event.operation))
             else:
                 # Dropped, not queued: with several archives downloading at
                 # once the raw line rate can flip this label several times a
@@ -2183,35 +2646,46 @@ class ProgressArea(QWidget):
                 now = time.monotonic()
                 if now - self._last_status_update >= _STATUS_LABEL_THROTTLE_S:
                     self._last_status_update = now
+                    # Table-less (Update apply): just the count - the
+                    # current archive's name and percent flipped between
+                    # archives as they took turns.
+                    done = tr("{done}/{total} done", done=event.complete, total=event.total)
                     self.status_label.setText(
-                        f"{event.name} — {event.operation} — {event.percent:.0%}"
-                        f"  ·  {event.complete}/{event.total} done"
+                        done
+                        if self.table is None
+                        else f"{event.name} — {event.operation} — {event.size or format(event.percent, '.0%')}  ·  {done}"
                     )
                 if self.table is None:
+                    # One overall bar across every archive (e.g. Update
+                    # apply), not the current archive's own percent - that
+                    # jumped back and forth as archives took turns.
+                    # Download/Extract fold into one per-archive fraction
+                    # so Extract doesn't restart the archive's share at 0.
+                    # Flat 1/total weighting: the heavy-repo split below
+                    # assumes a full install's 3 heavy repos.
+                    done = max(0, event.complete - 1)
+                    item = _heavy_item_phase_value(event.operation, event.percent)
+                    value = round(min(1.0, (done + item) / max(1, event.total)) * 100)
+                    self._max_bar_value = max(self._max_bar_value, value)
                     self.bar.setRange(0, 100)
-                    self.bar.setValue(round(event.percent * 100))
+                    self.bar.setValue(self._max_bar_value)
                     self.bar.setFormat(self._bar_percent_format)
             if self.table is not None:
                 self.table.upsert(event)
-            # The CLI counter is authoritative for overall progress. Include
-            # the current archive's fraction so a large download does not look
-            # stalled until that archive finishes.
-            value = aggregate_progress_value(
-                event.complete,
-                event.total,
-                event.percent,
-                name=event.name,
-                heavy_progress=self._heavy_progress,
-                operation=event.operation,
-            )
-            self._max_bar_value = max(self._max_bar_value, value)
-            if self.table is not None:
+                # The CLI counter is authoritative for overall progress.
+                # Include the current archive's fraction so a large download
+                # does not look stalled until that archive finishes.
+                value = aggregate_progress_value(
+                    event.complete,
+                    event.total,
+                    event.percent,
+                    name=event.name,
+                    heavy_progress=self._heavy_progress,
+                    operation=event.operation,
+                )
+                self._max_bar_value = max(self._max_bar_value, value)
                 self.bar.setRange(0, 100)
                 self.bar.setValue(self._max_bar_value)
-                self.bar.setFormat(self._bar_percent_format)
-            elif event.operation == "Download":
-                self.bar.setRange(0, 100)
-                self.bar.setValue(round(event.percent * 100))
                 self.bar.setFormat(self._bar_percent_format)
             if self.table is not None:
                 heavy_not_done = sum(
@@ -2232,22 +2706,9 @@ class ProgressArea(QWidget):
                     # 100%/Skipped, long before the run is anywhere near
                     # its end.
                     self.table.finish_stale_by_concurrency(_HEAVY_ARCHIVE_NAMES)
-                if self.heavy_notice_label is not None:
-                    heavy_active = any(
-                        p < 1.0 for p in self._heavy_progress.values()
-                    )
-                    if heavy_active:
-                        self.heavy_notice_label.setText(
-                            tr(
-                                "A large repository is downloading in the background - other addons may pause until it finishes. This can take a while."
-                            )
-                        )
-                        self.heavy_notice_label.show()
-                    else:
-                        self.heavy_notice_label.hide()
 
     def status_message(self, text: str) -> None:
-        self.status_label.setText(text)
+        self.status_label.setText(notice(text))
 
     def on_started(self) -> None:
         self.cancel_button.show()
@@ -2258,11 +2719,11 @@ class ProgressArea(QWidget):
         self.pause_button.setText(tr("Pause"))
         self._paused = False
         self.bar.setStyleSheet("")
+        self.set_bar_level("")
         self.bar.setRange(0, 1)
         self.bar.setValue(0)
-        self.bar.setFormat(tr("Starting..."))
-        if self._auto_expand_log:
-            self._show_log()
+        # The console stays collapsed until the user opens it.
+        self.bar.setFormat(tr("Starting"))
 
     def on_finished(self, rc: int, output: str) -> None:
         self.cancel_button.hide()
@@ -2287,8 +2748,6 @@ class ProgressArea(QWidget):
         # the background" can no longer be true, regardless of whether the
         # last progress line happened to trigger the per-line hide check
         # in on_line() above.
-        if self.heavy_notice_label is not None:
-            self.heavy_notice_label.hide()
 
     def on_cancelled(self) -> None:
         """Reset the bar/buttons to an idle Cancelled state (keeps the log)."""
@@ -2300,25 +2759,24 @@ class ProgressArea(QWidget):
         self.bar.setRange(0, 1)
         self.bar.setValue(0)
         self.bar.setFormat(tr("Cancelled"))
-        if self.heavy_notice_label is not None:
-            self.heavy_notice_label.hide()
 
-    def set_success_state(self, text: str = "Verified successfully") -> None:
-        """Show a successful completed state using the install-bar styling."""
-        from ..themes import active_theme_tokens
+    def set_success_state(
+        self, text: str = "Verified successfully", level: str = ""
+    ) -> None:
+        """Show a successful completed state using the install-bar styling.
 
+        ``level`` picks a QProgressBar[level=...] chunk colour from the theme
+        (e.g. "attention"); empty keeps the normal accent gradient."""
         self.cancel_button.hide()
         self.pause_button.hide()
         self._paused = False
         self.bar.setRange(0, 1)
         self.bar.setValue(1)
         self.bar.setFormat(text)
-        tokens = active_theme_tokens()
-        gradient = (
-            f"qlineargradient(x1:0,y1:0,x2:1,y2:0,"
-            f"stop:0 {tokens['hero1']},stop:1 {tokens['accent_strong']})"
-        )
-        self.bar.setStyleSheet(
-            f"QProgressBar::chunk {{ background: {gradient}; border-radius: 4px; }}"
-        )
+        # The theme's own chunk style, not colours baked in now - those
+        # stayed on the old theme until the page was rebuilt.
+        self.bar.setStyleSheet("")
+        self.set_bar_level(level)
+        # The bar already shows the text; a second copy below it is noise.
         self.status_label.setText(text)
+        self.status_label.hide()

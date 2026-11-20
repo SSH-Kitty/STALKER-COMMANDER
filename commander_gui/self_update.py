@@ -13,9 +13,9 @@ Nothing is swapped in unless the download proves itself first:
   used to replace the working AppImage);
 * it must actually be an AppImage (ELF header plus the type-2 AppImage
   magic), not an HTML error page or a truncated stub;
-* when the release carries a ``<AppImage>.sha512sum`` asset (``build-
-  appimage.sh`` writes one next to every build), the file must match it.
-  Older releases without one fall back to the checks above.
+* it must match the release's ``<AppImage>.sha512sum`` asset (``build-
+  appimage.sh`` writes one next to every build); a release without one is
+  refused.
 
 A checksum published in the same release protects against corruption, not
 against someone who controls the release itself; that needs a signing key
@@ -36,6 +36,7 @@ import urllib.request
 from collections.abc import Callable
 from pathlib import Path
 
+from . import atomic
 from .config import child_environment
 from .network import urlopen_with_retry as urlopen
 from .proton_installer import SHA512_RE, sha512_file
@@ -108,7 +109,9 @@ def commander_update_asset_url(tag: str) -> str:
     # plain version-like tag, never "/" or ".." that could point elsewhere.
     if not re.fullmatch(r"v?[0-9A-Za-z][0-9A-Za-z._-]{0,63}", tag) or ".." in tag:
         raise CommanderSelfUpdateError(f"Unexpected release tag: {tag!r}")
-    version = tag.removeprefix("v")
+    # build-appimage.sh names the file from the lowercase __version__, while
+    # the release tag may be cased "v1.4.0-Unstable2".
+    version = tag.removeprefix("v").lower()
     filename = f"STALKER-GAMMA-COMMANDER-{version}-x86_64.AppImage"
     return f"{_COMMANDER_REPO}/releases/download/{tag}/{filename}"
 
@@ -127,9 +130,18 @@ def download_commander_update(
     exist (a 404), ``CommanderSelfUpdateError`` for every other failure.
     """
     url = commander_update_asset_url(tag)
+    # Asked for first: a release without a checksum is refused anyway, and
+    # that should not cost the user the whole download.
+    expected = _published_sha512(url)
+    if expected is None:
+        raise CommanderUpdateAssetNotFoundError(
+            f"The update has no published checksum ({url}) - nothing was changed."
+        )
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     try:
-        with urlopen(req, timeout=600) as resp:
+        # Per-read stall limit, not a whole-download limit: 600 s left Cancel
+        # stuck on "Stopping" for up to ten minutes when GitHub stalled.
+        with urlopen(req, timeout=60) as resp:
             header_value = resp.headers.get("Content-Length")
             try:
                 total = int(header_value) if header_value is not None else None
@@ -154,6 +166,7 @@ def download_commander_update(
                 raise CommanderSelfUpdateError(
                     "Not enough free disk space to download the update"
                 )
+            atomic.remove_stale(running_path.parent, f".{running_path.name}.*.update")
             try:
                 fd, tmp_name = tempfile.mkstemp(
                     dir=running_path.parent,
@@ -208,8 +221,7 @@ def download_commander_update(
                 " - nothing was changed. Try again."
             )
         verify_appimage_file(tmp_path)
-        expected = _published_sha512(url)
-        if expected is not None and sha512_file(tmp_path) != expected:
+        if sha512_file(tmp_path) != expected:
             raise CommanderSelfUpdateError(
                 "The update does not match its published checksum - nothing was changed."
             )
@@ -265,7 +277,7 @@ def download_and_install_commander_update(
     cancel_event: threading.Event | None = None,
     progress_cb: Callable[[int, int], None] | None = None,
 ) -> Path:
-    """Download and install *tag* over the running AppImage. Returns its path."""
+    """Download *tag* over the running AppImage. Returns its path."""
     running_path = commander_appimage_path()
     if running_path is None:
         raise CommanderSelfUpdateError(
@@ -274,6 +286,9 @@ def download_and_install_commander_update(
     downloaded = download_commander_update(
         tag, running_path, cancel_event=cancel_event, progress_cb=progress_cb
     )
+    if cancel_event is not None and cancel_event.is_set():
+        downloaded.unlink(missing_ok=True)
+        raise CommanderSelfUpdateError("Update cancelled")
     install_commander_update(downloaded, running_path)
     return running_path
 

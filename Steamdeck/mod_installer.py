@@ -17,26 +17,53 @@ released, through the Mods screen's guarded writer.
 from __future__ import annotations
 
 import shutil
+import uuid
+import zipfile
 from collections.abc import Callable
 from pathlib import Path
 
 from PySide6.QtCore import QObject, Qt, QTimer
 from PySide6.QtWidgets import QLineEdit, QScroller, QVBoxLayout, QWidget
 
-from commander_gui.fomod import apply_options, parse_config
+from commander_gui import modded_exes
+from commander_gui.coop import looks_like_xrrazom
+from commander_gui.fomod import apply_options, find_installer
 from commander_gui.i18n import tr
 from commander_gui.integrity import invalidate_baseline
+from commander_gui.launcher import select_mo2_profile
 from commander_gui.mod_install import (
     ModInstallError,
+    _list_archive_paths,
     default_mod_name,
+    drop_romeo_prefix,
     extract_archive,
+    find_archiver,
     make_staging_dir,
     move_payload,
     sanitize_name,
     write_basic_meta_ini,
 )
 from commander_gui.modlist import add_custom_mod, install_conflict, read_lines
-from commander_gui.ui.common import BackgroundTask, StreamTask, mo2_running
+from commander_gui.romeo import (
+    EXES_NEEDED,
+    KEPT_MCM,
+    MCM_MOD,
+    find_romeo,
+    is_romeo_profile,
+    mcm_changed,
+    old_mods,
+    remove_old_mods,
+    space_needed,
+    unpacked_size,
+)
+from commander_gui.romeo import install as install_romeo
+from commander_gui.ui.common import (
+    BackgroundTask,
+    StreamTask,
+    gamma_installed,
+    mo2_running,
+    notice,
+)
 
 from . import gamepad as pad
 from .folder_picker import candidate_roots, list_subfolders
@@ -54,30 +81,20 @@ def _is_hidden(path: Path) -> bool:
     return path.name.startswith(".")
 
 
-def list_archives(directory: Path) -> list[Path]:
-    """Mod archives directly in ``directory``, sorted by name."""
+def list_archives(directory: Path, suffixes: tuple[str, ...] = ARCHIVE_SUFFIXES) -> list[Path]:
+    """Files with one of ``suffixes`` (mod archives by default) directly in
+    ``directory``, sorted by name."""
     try:
         return sorted(
             (
                 p
                 for p in directory.iterdir()
-                if p.is_file() and not p.is_symlink() and p.suffix.lower() in ARCHIVE_SUFFIXES
+                if p.is_file() and not p.is_symlink() and p.suffix.lower() in suffixes
             ),
             key=lambda p: p.name.lower(),
         )
     except OSError:
         return []
-
-
-def find_fomod(staging: Path) -> tuple[Path, Path] | None:
-    """``(ModuleConfig.xml, archive root)`` for an extracted FOMOD, else None."""
-    config = staging / "fomod" / "ModuleConfig.xml"
-    if config.is_file():
-        return config, staging
-    candidates = list(staging.glob("*/fomod/ModuleConfig.xml"))
-    if len(candidates) == 1:
-        return candidates[0], candidates[0].parent.parent
-    return None
 
 
 class DeckArchivePicker(QWidget):
@@ -89,8 +106,13 @@ class DeckArchivePicker(QWidget):
     folder holds dozens of them and none is where a mod archive lands.
     """
 
-    def __init__(self, start: Path, on_archive: Callable[[Path], None]) -> None:
+    def __init__(
+        self, start: Path, on_archive: Callable[[Path], None],
+        suffixes: tuple[str, ...] = ARCHIVE_SUFFIXES, empty: str | None = None,
+    ) -> None:
         super().__init__()
+        self._suffixes = suffixes
+        self._empty = empty
         self._current = start if start.is_dir() else Path.home()
         #: Where browsing began (or "Other places" jumped to): B climbs back
         #: up to here, then closes.
@@ -116,14 +138,14 @@ class DeckArchivePicker(QWidget):
         if self._current.parent != self._current:
             options.append((tr(".. (up)"), _UP))
         folders = list_subfolders(self._current)
-        archives = list_archives(self._current)
+        archives = list_archives(self._current, self._suffixes)
         if not self._show_hidden:
             folders = [f for f in folders if not _is_hidden(f)]
             archives = [a for a in archives if not _is_hidden(a)]
         options += [("▸  " + f.name, f) for f in folders]
         options += [(a.name, a) for a in archives]
         if not archives and len(options) <= 1:
-            options.append((tr("No mod archives here"), None))
+            options.append((self._empty or tr("No mod archives here"), None))
         self.picker.set_options(options, select)
         if select is None:
             self.jump_to_top()
@@ -188,6 +210,20 @@ class DeckArchivePicker(QWidget):
             self._on_archive(path)
 
 
+def pick_file(window, title: str, start: Path, suffixes: tuple[str, ...], on_file: Callable[[Path], None]) -> None:
+    """A file browser overlay for one kind of file (``suffixes``)."""
+
+    def _chosen(path: Path) -> None:
+        window.dismiss_overlay()
+        on_file(path)
+
+    body = DeckArchivePicker(start, _chosen, suffixes, tr("No matching files here"))
+    overlay = DeckOverlay(title, body, [(tr("Cancel"), window.dismiss_overlay, "normal")], panel_width=1100)
+    overlay.default_button = body.picker.list
+    overlay.back_handler = body.back
+    window.show_overlay(overlay)
+
+
 class DeckModInstaller(QObject):
     """One install at a time, started from the Mods screen."""
 
@@ -202,6 +238,9 @@ class DeckModInstaller(QObject):
         self._archive: Path | None = None
         self._progress_overlay = None
         self._progress_hidden = False
+        #: Reinstall/update of a listed mod: (folder, moved-aside copy or
+        #: None, message when done). Its modlist entry is left as it is.
+        self._reinstall: tuple[Path, Path | None, str] | None = None
 
     # -- 1. pick ----------------------------------------------------------------
     def start(self) -> None:
@@ -276,6 +315,8 @@ class DeckModInstaller(QObject):
 
     # -- 2. name ----------------------------------------------------------------
     def _chosen(self, archive: Path) -> None:
+        if self._offer_romeo(archive) or self._refuse_xrrazom(archive):
+            return
         try:
             name = default_mod_name(archive)
         except ModInstallError as exc:
@@ -326,6 +367,10 @@ class DeckModInstaller(QObject):
         self.window.show_overlay(overlay)
 
     def _confirm_target(self, name: str) -> None:
+        # "xx-" is kept only on a ROMEO profile, where it marks ROMEO's mods.
+        profile = self.screen.profile()
+        if profile is None or not is_romeo_profile(Path(profile.gamma), profile.mo2_profile):
+            name = drop_romeo_prefix(name)
         try:
             safe = sanitize_name(name)
         except ModInstallError as exc:
@@ -379,6 +424,51 @@ class DeckModInstaller(QObject):
             return
         self._extract(safe)
 
+    # -- reinstall / update --------------------------------------------------------
+    def reinstall(self, archive: Path, name: str, done_message: str) -> None:
+        """Replace listed mod ``name``'s files with ``archive``'s.
+
+        The desktop's Reinstall from Cache / Update from Archive: the old
+        folder is moved aside first and put back if the install fails or is
+        cancelled; the modlist entry (place, on/off, category) never changes.
+        """
+        reason = self._blocked()
+        if reason:
+            self.window.notify(reason, 6000)
+            return
+        mods_dir = Path(self.screen.profile().gamma) / "mods"
+        if mods_dir.is_symlink():
+            self.window.notify(tr("The GAMMA mods directory cannot be a symlink."), 6000)
+            return
+        destination = mods_dir / name
+        backup = None
+        if destination.exists() or destination.is_symlink():
+            # Same folder, so a rename: instant even for a big mod.
+            backup = destination.with_name(f".{name}.reinstall-backup-{uuid.uuid4().hex}")
+            try:
+                destination.rename(backup)
+            except OSError as exc:
+                self.window.notify(tr("Couldn't reinstall the mod") + ": " + str(exc), 8000)
+                return
+        self._reinstall = (destination, backup, done_message)
+        self._archive = archive
+        self._extract(name)
+
+    def _undo_reinstall(self) -> None:
+        """Put a moved-aside mod folder back after a failed reinstall."""
+        pending, self._reinstall = self._reinstall, None
+        if pending is None or pending[1] is None:
+            return
+        destination, backup, _message = pending
+        try:
+            if destination.exists() and not destination.is_symlink():
+                shutil.rmtree(destination)
+            backup.rename(destination)
+        except OSError as exc:
+            self.window.notify(
+                tr("The original mod folder couldn't be put back:\n{error}", error=str(exc)), 8000
+            )
+
     # -- 3. extract / FOMOD -------------------------------------------------------
     def _show_progress(self, text: str) -> None:
         if self._progress_hidden:
@@ -392,7 +482,7 @@ class DeckModInstaller(QObject):
         self._status = deck_label(text, role="body", wrap=True)
         layout.addWidget(self._status)
         overlay = DeckOverlay(
-            tr("Installing {name}...", name=self._name),
+            tr("Installing {name}", name=self._name),
             body,
             [(tr("Cancel"), self._cancel, "normal")],
             panel_width=900,
@@ -422,7 +512,7 @@ class DeckModInstaller(QObject):
     def _set_status(self, text: str) -> None:
         if self._status is not None:
             try:
-                self._status.setText(text)
+                self._status.setText(notice(text))
             except RuntimeError:  # the overlay is already gone
                 self._status = None
 
@@ -435,7 +525,7 @@ class DeckModInstaller(QObject):
         self.window.set_install_busy(True, "mod_install")
         self._staging_root = make_staging_dir(self.screen.profile().gamma)
         staging = self._staging_root / "archive"
-        self._show_progress(tr("Extracting {name}...", name=archive.name))
+        self._show_progress(tr("Extracting {name}", name=archive.name))
         task: StreamTask | None = None
 
         def worker(report):
@@ -444,7 +534,7 @@ class DeckModInstaller(QObject):
                 staging,
                 task.cancel_event,
                 lambda percent, text: report(
-                    tr("Extracting {name}...", name=archive.name)
+                    tr("Extracting {name}", name=archive.name)
                     + (f" {percent}%" if percent is not None else "")
                 ),
             )
@@ -459,16 +549,16 @@ class DeckModInstaller(QObject):
 
     def _extracted(self, staging: Path) -> None:
         self._task = None
-        fomod = find_fomod(staging)
-        if fomod is None:
-            self._finalize(staging, None)
-            return
-        config_path, root = fomod
+        archive_name = self._archive.name if self._archive is not None else ""
         try:
-            config = parse_config(config_path)
+            installer = find_installer(staging, archive_name)
         except ModInstallError as exc:
             self._fail(str(exc))
             return
+        if installer is None:
+            self._finalize(staging, None)
+            return
+        config, root = installer
         from .fomod_panel import show_fomod
 
         # The progress overlay gives way to the installer, and comes back
@@ -491,7 +581,8 @@ class DeckModInstaller(QObject):
         destination = Path(profile.gamma) / "mods" / self._name
         selected = self._staging_root / "selected"
         archive_name = self._archive.name if self._archive is not None else ""
-        self._show_progress(tr("Installing {name}...", name=self._name))
+        old = self._reinstall[1] if self._reinstall is not None else None
+        self._show_progress(tr("Installing {name}", name=self._name))
 
         def worker():
             payload = source
@@ -501,6 +592,8 @@ class DeckModInstaller(QObject):
                 payload = selected
             move_payload(payload, destination, task.cancel_event)
             write_basic_meta_ini(destination, archive_name)
+            if old is not None:
+                shutil.rmtree(old, ignore_errors=True)
             return str(destination)
 
         task = BackgroundTask(worker, parent=self)
@@ -513,12 +606,36 @@ class DeckModInstaller(QObject):
         self._task = None
         self._cleanup()
         self._close_progress()
+        if self._reinstall is not None:
+            message = self._reinstall[2]
+            self._reinstall = None
+            try:
+                invalidate_baseline(self.screen.profile().gamma)
+            except (OSError, AttributeError):
+                pass
+            self.screen.refresh()
+            self.screen.reveal_mod(destination.name)
+            self.window.announce_finished(tr("Mod reinstalled"), message)
+            return
         path = self.screen._path
         try:
             lines = read_lines(path)
             new_lines = add_custom_mod(lines, destination.name, enabled=False)
             write_lines(self.window, path, new_lines, snapshot=True)
-        except (OSError, ValueError, ModlistWriteBlocked) as exc:
+        except ModlistWriteBlocked as exc:
+            # The mod itself installed fine; only the list edit was refused
+            # (MO2 opened meanwhile). Keep it: MO2 lists new folders itself.
+            self.window.notify(
+                tr(
+                    "Installed '{name}', but the modlist was not changed: {reason}",
+                    name=destination.name,
+                    reason=str(exc),
+                ),
+                8000,
+            )
+            self.screen.refresh()
+            return
+        except (OSError, ValueError) as exc:
             shutil.rmtree(destination, ignore_errors=True)
             self.window.notify(tr("Mod installation failed") + ": " + str(exc), 8000)
             self.screen.refresh()
@@ -538,6 +655,225 @@ class DeckModInstaller(QObject):
             8000,
         )
 
+    # -- archives that are more than a mod ----------------------------------------------
+    def _refuse_xrrazom(self, archive: Path) -> bool:
+        """xrRazom Co-op's engine goes in the Anomaly folder, so only the
+        Multiplayer screen installs it. True if refused. Zips only, the one
+        format that screen takes: their listing is instant."""
+        if archive.suffix.lower() != ".zip":
+            return False
+        try:
+            with zipfile.ZipFile(archive) as opened:
+                names = opened.namelist()
+        except (OSError, zipfile.BadZipFile):
+            return False  # extraction reports the real problem
+        if not looks_like_xrrazom(names):
+            return False
+
+        def _open() -> None:
+            self.window.dismiss_overlay()
+            self.window.set_page("multiplayer")
+
+        self.window.confirm(
+            tr("Install xrRAZOM from the Multiplayer page"),
+            tr("This is xrRAZOM Co-op. It can't be installed as a mod, because the Multiplayer page also sets up the game files co-op needs."),
+            _open,
+            confirm_text=tr("Open Multiplayer"),
+        )
+        return True
+
+    def _offer_romeo(self, archive: Path) -> bool:
+        """CLIKRΔD's ROMEO repack: ~170 mods, an MO2 profile and Anomaly
+        files, installed the way its guide says (the desktop Mod Manager's
+        _install_romeo). True if the archive was ROMEO."""
+        try:
+            archiver = find_archiver()
+            found = find_romeo(_list_archive_paths(archiver, archive))
+        except ModInstallError:
+            return False  # extraction reports the real problem
+        if found is None:
+            return False
+        wrapper, mo2_profile = found
+        profile = self.screen.profile()
+        if profile is None or not str(profile.anomaly).strip() or not gamma_installed(profile.gamma):
+            self.window.notify(tr("ROMEO goes on top of GAMMA. Install GAMMA for this profile, then install ROMEO."), 8000)
+            return True
+        gamma, anomaly = Path(profile.gamma), Path(profile.anomaly)
+        update = (gamma / "profiles" / mo2_profile).is_dir()
+        need = unpacked_size(archiver, archive)
+        free = shutil.disk_usage(gamma).free
+        remove_first = False
+        if need:
+            need, remove_first = space_needed(gamma, need, free, update)
+        if need and need > free:
+            self.window.notify(
+                tr(
+                    "ROMEO needs {need} GB free on the GAMMA folder's drive, but only {free} GB is free.",
+                    need=round(need / 1e9), free=round(free / 1e9),
+                ),
+                8000,
+            )
+            return True
+        if not modded_exes.at_least(anomaly, EXES_NEEDED):
+            # Players click through the requirements note, so this blocks.
+            def _open_updates() -> None:
+                self.window.dismiss_overlay()
+                self.window.set_page("update")
+
+            self.window.confirm(
+                tr("Update the modded exes first"),
+                tr("ROMEO needs modded exes from {version} or newer, and this Anomaly folder has older ones. Update them on the Updates page, then install ROMEO again.", version=EXES_NEEDED),
+                _open_updates,
+                confirm_text=tr("Open updates"),
+            )
+            return True
+        requirements = tr("ROMEO needs GAMMA 0.9.5 and modded exes from 2026.9.12 or newer. Unpacking takes a while.")
+
+        def _go(keep_mcm: bool) -> None:
+            self.window.dismiss_overlay()
+            self._install_romeo(archive, wrapper, mo2_profile, gamma, anomaly, keep_mcm, update, remove_first)
+
+        if not update:
+            self.window.confirm(
+                tr("Install ROMEO?"),
+                tr("This is CLIKRΔD's ROMEO repack. COMMANDER adds its mods and its own Mod Organizer profile to GAMMA. Your G.A.M.M.A mod list isn't changed.")
+                + "\n\n" + tr("Both profiles share the Anomaly folder, so as ROMEO's guide asks, GAMMA's Atmos weather files and the shader cache are removed there. A GAMMA update puts the Atmos files back for G.A.M.M.A.")
+                + "\n\n" + requirements,
+                lambda: _go(False),
+                confirm_text=tr("Install ROMEO"),
+            )
+            return True
+
+        def _confirm_update(keep_mcm: bool) -> None:
+            self.window.dismiss_overlay(refocus=False)
+            message = tr("COMMANDER removes the {count} old xx- mods, as ROMEO's guide says, then installs the new version.", count=len(old_mods(gamma)))
+            if remove_first:
+                message += "\n\n" + tr("There isn't room for the old and new versions at once, so the old mods go before unpacking. If the update stops part way, run it again.")
+            if keep_mcm:
+                message += "\n\n" + tr("Your MCM settings are kept as '{name}', turned on in place of ROMEO's.", name=KEPT_MCM)
+            self.window.confirm(
+                tr("Update ROMEO?"), message + "\n\n" + requirements,
+                lambda: _go(keep_mcm), confirm_text=tr("Update ROMEO"),
+            )
+
+        changed = mcm_changed(gamma, mo2_profile)
+        if changed is None and (gamma / "mods" / MCM_MOD).is_dir():
+            # Installed by hand: no record of ROMEO's own settings to compare
+            # with, so ask. Cancel never silently drops the player's settings.
+            self.window.show_overlay(
+                DeckOverlay(
+                    tr("Keep your MCM settings?"),
+                    deck_label(
+                        tr("Updating replaces ROMEO's MCM settings. If you changed any MCM settings, COMMANDER can keep yours and turn ROMEO's new ones off."),
+                        role="body", wrap=True,
+                    ),
+                    [
+                        (tr("Keep mine"), lambda: _confirm_update(True), "primary"),
+                        (tr("Use ROMEO's new ones"), lambda: _confirm_update(False), "normal"),
+                        (tr("Cancel"), self.window.dismiss_overlay, "normal"),
+                    ],
+                    panel_width=1000,
+                )
+            )
+        else:
+            _confirm_update(bool(changed))
+        return True
+
+    def _install_romeo(
+        self, archive: Path, wrapper: str, mo2_profile: str, gamma: Path, anomaly: Path,
+        keep_mcm: bool, update: bool, remove_first: bool = False,
+    ) -> None:
+        reason = self._blocked()
+        if reason:
+            self.window.notify(reason, 6000)
+            return
+        self._archive = archive
+        self._name = mo2_profile
+        self._progress_hidden = False
+        self.window.set_install_busy(True, "mod_install")
+        self._staging_root = make_staging_dir(gamma)
+        staging = self._staging_root / "archive"
+        self._show_progress(tr("Extracting {name}", name=archive.name))
+        task: StreamTask | None = None
+
+        def worker(report):
+            if remove_first:
+                report(tr("Removing the old xx- mods"))
+                remove_old_mods(gamma, keep_mcm)
+            extract_archive(
+                archive, staging, task.cancel_event,
+                lambda percent, text: report(
+                    tr("Extracting {name}", name=archive.name) + (f" {percent}%" if percent is not None else "")
+                ),
+            )
+            install_romeo(
+                staging, wrapper, mo2_profile, gamma, anomaly, task.cancel_event,
+                lambda done, total: report(tr("Installing ROMEO mods {done}/{total}", done=done, total=total)),
+                keep_mcm and not remove_first,
+            )
+            return mo2_profile
+
+        task = StreamTask(worker, parent=self)
+        task.line.connect(self._set_status)
+        task.result.connect(lambda name: self._romeo_installed(str(name), update))
+        task.error.connect(self._fail)
+        self._task = task
+        task.start()
+
+    def _romeo_installed(self, name: str, update: bool) -> None:
+        self._task = None
+        self._cleanup()
+        self._close_progress()
+        try:
+            invalidate_baseline(self.screen.profile().gamma)
+        except (OSError, AttributeError):
+            pass
+        if update:
+            self.window.announce_finished(
+                tr("ROMEO updated"),
+                tr("The new version of ROMEO is installed.") + "\n\n"
+                + tr("Your previous mod list is saved as modlist.txt.before-update in the ROMEO profile folder."),
+            )
+            return
+        checklist = "\n\n".join((
+            tr("Two things to do once in the game:"),
+            "•  " + tr("Start a new save. ROMEO doesn't work with old saves."),
+            "•  " + tr("Open the console (~) and run: cfg_load atmos_neutral"),
+        ))
+        profile = self.screen.profile()
+        if profile is None or profile.mo2_profile == name:
+            self.window.show_overlay(DeckOverlay(
+                tr("Finish setting up ROMEO in the game"), deck_label(checklist, role="body", wrap=True),
+                [(tr("OK"), self.window.dismiss_overlay, "primary")], panel_width=1000,
+            ))
+            return
+
+        def _switch() -> None:
+            self.window.dismiss_overlay()
+            rc, out = select_mo2_profile(profile.gamma, name)
+            if rc != 0:
+                self.window.notify(tr("Couldn't change the MO2 profile") + ": " + out.strip(), 8000)
+                return
+            profile.mo2_profile = name
+            try:
+                self.window.settings.save()
+            except OSError as exc:
+                self.window.notify(tr("Could not write settings.json:\n{exc}", exc=exc), 8000)
+            self.screen.refresh()
+            self.window.update_mod_counter()
+
+        self.window.show_overlay(DeckOverlay(
+            tr("Switch to ROMEO?"),
+            deck_label(
+                tr("ROMEO is installed as the Mod Organizer profile '{name}'. Switch this COMMANDER profile to it now?", name=name)
+                + "\n\n" + tr("You can switch back to G.A.M.M.A on the Dashboard at any time.")
+                + "\n\n" + checklist,
+                role="body", wrap=True,
+            ),
+            [(tr("Switch to ROMEO"), _switch, "primary"), (tr("Not now"), self.window.dismiss_overlay, "normal")],
+            panel_width=1000,
+        ))
+
     # -- ending early --------------------------------------------------------------
     def _cancel(self) -> None:
         if self._task is not None and hasattr(self._task, "cancel"):
@@ -545,6 +881,7 @@ class DeckModInstaller(QObject):
 
     def _fail(self, message: str) -> None:
         self._task = None
+        self._undo_reinstall()
         self._cleanup()
         self._close_progress()
         self.window.notify(tr("Mod installation failed") + ": " + message, 8000)

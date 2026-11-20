@@ -1,4 +1,5 @@
 import os
+import shutil
 import tempfile
 import unittest
 import zipfile
@@ -123,10 +124,33 @@ class GameBackupTests(unittest.TestCase):
             create_backup("p", self.anomaly, self.gamma)
         self.assertEqual(list_backups("p"), [])
 
-    def test_backup_before_wipe_skips_saves_for_a_gamma_reset(self) -> None:
+    def test_saves_in_the_gamma_folder_survive_a_reset(self) -> None:
+        # MO2 can write saves into overwrite or a profile's local saves; a
+        # Fresh Reset deleted those for good because only Anomaly's folder
+        # was backed up (a player lost 60 hours this way).
+        overwrite = self.gamma / "overwrite" / "appdata" / "savedgames"
+        overwrite.mkdir(parents=True)
+        (overwrite / "latest.scop").write_bytes(b"newest")
+        (overwrite / "two.scop").write_bytes(b"save-two-newer")
+        os.utime(overwrite / "two.scop", (2e9, 2e9))
+        local = self.gamma / "profiles" / "G.A.M.M.A" / "saves"
+        local.mkdir(parents=True)
+        (local / "local.scop").write_bytes(b"local")
+        profile = SimpleNamespace(profile_name="p", anomaly=str(self.anomaly), gamma=str(self.gamma))
+        info = backup_before_wipe(profile, {"Anomaly", "GAMMA"}, "fresh-reset", lambda _l: None)
+        self.assertEqual(info.saves, 4)
+        shutil.rmtree(self.anomaly / "appdata")
+        shutil.rmtree(self.gamma)
+        restore_backup(info, self.anomaly, self.gamma)
+        saves = self.anomaly / "appdata" / "savedgames"
+        self.assertEqual((saves / "latest.scop").read_bytes(), b"newest")
+        self.assertEqual((saves / "local.scop").read_bytes(), b"local")
+        self.assertEqual((saves / "two.scop").read_bytes(), b"save-two-newer")
+
+    def test_backup_before_wipe_includes_saves_for_a_gamma_reset(self) -> None:
         profile = SimpleNamespace(profile_name="p", anomaly=str(self.anomaly), gamma=str(self.gamma))
         info = backup_before_wipe(profile, {"GAMMA"}, "gamma-reset", lambda _l: None)
-        self.assertEqual(info.saves, 0)
+        self.assertEqual(info.saves, 2)
         self.assertTrue(info.mcm)
         info = backup_before_wipe(profile, {"Anomaly", "GAMMA"}, "fresh-reset", lambda _l: None)
         self.assertEqual(info.saves, 2)
@@ -180,6 +204,10 @@ class ProtonBuildTests(unittest.TestCase):
         for target in (
             patch("commander_gui.launcher.find_extra_protons", return_value=found),
             patch("commander_gui.proton_installer.steam_compat_tool_names", return_value=set()),
+            patch(
+                "commander_gui.gui_settings.gui_settings_path",
+                return_value=Path(self._tmp.name) / "gui-settings.json",
+            ),
         ):
             target.start()
             self.addCleanup(target.stop)
@@ -192,6 +220,23 @@ class ProtonBuildTests(unittest.TestCase):
         self.assertTrue(builds[0].in_use and builds[0].newest)
         self.assertFalse(builds[1].in_use)
         self.assertGreaterEqual(build_size(builds[1].path), 1000)
+
+    def test_auto_stays_on_its_build_when_a_newer_one_is_installed(self) -> None:
+        from commander_gui.launcher import _pick_umu_proton
+
+        newest = self.builds["GE-Proton11-5-x86_64"]
+        self.assertEqual(_pick_umu_proton(), str(newest.resolve()))
+        # A newer build gets installed: Auto keeps the pin.
+        newer = self.tools / "GE-Proton12-1"
+        newer.mkdir()
+        (newer / "toolmanifest.vdf").write_text("")
+        found = [(n, str((b / "proton").resolve())) for n, b in self.builds.items()]
+        found.append(("GE-Proton12-1", str(newer / "proton")))
+        with patch("commander_gui.launcher.find_extra_protons", return_value=found):
+            self.assertEqual(_pick_umu_proton(), str(newest.resolve()))
+            # Once the pinned build is gone it moves on to the newest left.
+            found.pop(1)
+            self.assertEqual(_pick_umu_proton(), str(newer))
 
     def test_removes_an_unused_build_but_never_the_one_in_use(self) -> None:
         from commander_gui.proton_installer import remove_build
@@ -323,6 +368,44 @@ class BackupReviewFixTests(unittest.TestCase):
         self.mcm.write_text("changed later")
         self.assertIsNone(apply_pending_settings_restore(profile))
         self.assertEqual(self.mcm.read_text(), "changed later")
+
+    def test_restoring_the_oldest_restore_backup_does_not_prune_it(self) -> None:
+        from commander_gui.game_backup import create_backup_of_files
+
+        folder = game_backup.profile_backup_dir("p")
+        user_ltx = self.anomaly / "appdata" / "user.ltx"
+        original = user_ltx.read_text()
+        files = [("user.ltx", user_ltx)]
+        for index in range(5):
+            with patch("commander_gui.game_backup.time.time", return_value=2e9 + index):
+                create_backup_of_files("p", files, lambda _l: None, folder=folder)
+        oldest = list_backups("p")[-1]
+        user_ltx.write_text("changed\n")
+        restore_backup(oldest, self.anomaly, self.gamma)
+        self.assertTrue(oldest.path.exists())
+        self.assertEqual(user_ltx.read_text(), original)
+
+    def test_failed_pending_settings_restore_stays_pending(self) -> None:
+        from commander_gui import gui_settings
+        from commander_gui.game_backup import (
+            apply_pending_settings_restore,
+            mark_settings_restore,
+        )
+
+        profile = SimpleNamespace(
+            profile_name="p", anomaly=str(self.anomaly), gamma=str(self.gamma)
+        )
+        info = backup_before_wipe(profile, {"GAMMA"}, "gamma-reset", lambda _l: None)
+        mark_settings_restore("p", info, user_ltx=True, mcm=True)
+        with patch(
+            "commander_gui.game_backup.restore_backup", side_effect=OSError("disk full")
+        ):
+            self.assertIn("disk full", apply_pending_settings_restore(profile))
+        pending = gui_settings.load_gui_settings().get(game_backup._PENDING_KEY) or {}
+        self.assertIn("p", pending)
+        self.assertIn("Restored", apply_pending_settings_restore(profile))
+        pending = gui_settings.load_gui_settings().get(game_backup._PENDING_KEY) or {}
+        self.assertNotIn("p", pending)
 
     def test_mcm_only_restore_leaves_user_ltx(self) -> None:
         info = create_backup("p", self.anomaly, self.gamma, saves=False)

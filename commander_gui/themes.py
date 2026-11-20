@@ -8,8 +8,11 @@ colors so dialogs, menus and scrollbars match the active theme.
 
 from __future__ import annotations
 
+import os
 import re
 import string
+import time
+from pathlib import Path
 
 from PySide6.QtGui import QColor, QPalette
 
@@ -18,7 +21,7 @@ THEME_INFO: list[tuple[str, str, str, tuple[str, str, str]]] = [
     (
         "gamma",
         "GAMMA",
-        "The default look: deep green-black with a radiation-green glow.",
+        "The original look: deep green-black with a radiation-green glow.",
         ("#0d130c", "#9fe96f", "#e2ead8"),
     ),
     (
@@ -28,22 +31,10 @@ THEME_INFO: list[tuple[str, str, str, tuple[str, str, str]]] = [
         ("#000000", "#9fe96f", "#e0e0e0"),
     ),
     (
-        "dusk",
-        "Dusk",
-        "Warm charcoal and amber with orange sunset accents.",
-        ("#140d06", "#ff9f45", "#f0e2cc"),
-    ),
-    (
         "midnight",
         "Midnight",
         "Cool slate blues and greys with a teal accent.",
         ("#0b1016", "#6fd3a8", "#dbe6f0"),
-    ),
-    (
-        "terminal",
-        "Terminal",
-        "Retro CRT: pure black with neon green phosphor text.",
-        ("#000000", "#33ff66", "#33cc55"),
     ),
     (
         "reactor",
@@ -51,15 +42,31 @@ THEME_INFO: list[tuple[str, str, str, tuple[str, str, str]]] = [
         "Deep black with a glowing reactor-coolant teal accent.",
         ("#010a0a", "#006868", "#cdeaea"),
     ),
+    (
+        "redforest",
+        "Red Forest (Live)",
+        "Autumn in the Zone: the forester's tower in the Red Forest, following the clock through dawn, day, dusk and night.",
+        ("#efe4d6", "#b5521f", "#2a1e18"),
+    ),
+    (
+        "winter",
+        "Winter (Live)",
+        "Frosty and snowbound: an abandoned village that follows the clock through dawn, day, dusk and night.",
+        ("#dfe5ea", "#3a6d37", "#1b252d"),
+    ),
 ]
 
 _ACTIVE: str = "gamma"
 
 
 def set_active_theme(name: str) -> None:
-    global _ACTIVE
+    global _ACTIVE, _LIVE_TIME
     if name in THEMES:
         _ACTIVE = name
+    # Re-read with the theme, so every window that restyles picks up a new lock.
+    from . import gui_settings
+
+    _LIVE_TIME = gui_settings.load_gui_settings().get("live_time", "")
 
 
 def active_theme() -> str:
@@ -67,7 +74,26 @@ def active_theme() -> str:
 
 
 def active_theme_tokens() -> dict[str, str]:
-    return THEMES[_ACTIVE]
+    return THEMES[resolve_theme(_ACTIVE)]
+
+
+def token_color(name: str, fallback: str) -> QColor:
+    """A live theme token as a QColor, ``rgba(r, g, b, a)`` ones included.
+
+    QColor() reads hex but not CSS rgba(), which Winter's see-through
+    surfaces (card, chip, btn) use - it came out invalid, i.e. black.
+    """
+    return parse_color(active_theme_tokens().get(name, fallback), fallback)
+
+
+def parse_color(value: str, fallback: str) -> QColor:
+    """``value`` as a QColor, CSS ``rgba(r, g, b, a)`` included (see token_color)."""
+    match = re.fullmatch(r"\s*rgba\(([^)]*)\)\s*", value)
+    if match:
+        color = QColor(*(int(part) for part in match.group(1).split(",")))
+    else:
+        color = QColor(value)
+    return color if color.isValid() else QColor(fallback)
 
 
 _FALLBACK_FONT = '"Exo 2", "DejaVu Sans", "Noto Sans", sans-serif'
@@ -81,10 +107,19 @@ _FONT_FAMILY_MAP: dict[str, str] = {
 }
 
 
+_ROOT = Path(__file__).resolve().parent.parent
+
+
 def build_stylesheet(
     name: str, font_size: int | None = None, font_family: str | None = None
 ) -> str:
-    tokens = THEMES.get(name) or THEMES["gamma"]
+    tokens = {
+        # Same defaults as common.py's WARN / OK_GREEN / STATUS_GREY.
+        "status_ok": "#7dc963",
+        "status_warn": "#d9a04c",
+        "status_grey": "#7f8f78",
+        **(THEMES.get(resolve_theme(name)) or THEMES["gamma"]),
+    }
     if font_size is None:
         font_size = int(tokens["font_size"].rstrip("px"))
     qss = _TEMPLATE.safe_substitute(tokens)
@@ -97,11 +132,32 @@ def build_stylesheet(
     qss = qss.replace("%FONT_SIZE%", f"{font_size}px")
     resolved_family = _FONT_FAMILY_MAP.get(font_family or "Exo 2", _FALLBACK_FONT)
     qss = qss.replace("%FONT_FAMILY%", resolved_family)
-    return qss
+    qss = qss.replace("%COMBO_ARROW%", _combo_arrow(tokens["text_dim"]))
+    return qss.replace("%SLIDER_HANDLE%", (_ROOT / "cli" / "stalker-gamma.png").as_posix())
+
+
+def _combo_arrow(color: str) -> str:
+    # QSS only takes image files, so write one chevron per theme colour.
+    hex_color = parse_color(color, "#888888").name()
+    # The user's own cache, not the shared /tmp: there another account could
+    # plant the file (or a symlink) first.
+    folder = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache") / "stalker-gamma-commander"
+    path = folder / f"combo-arrow-{hex_color[1:]}.svg"
+    if not path.is_file():
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="6" viewBox="0 0 10 6">'
+                f'<path d="M1 1l4 4 4-4" fill="none" stroke="{hex_color}" stroke-width="1.6" '
+                'stroke-linecap="round" stroke-linejoin="round"/></svg>'
+            )
+        except OSError:
+            return ""  # no arrow, Qt draws its own
+    return path.as_posix()
 
 
 def build_palette(name: str) -> QPalette:
-    tokens = THEMES.get(name) or THEMES["gamma"]
+    tokens = THEMES.get(resolve_theme(name)) or THEMES["gamma"]
     palette = QPalette()
     palette.setColor(QPalette.ColorRole.Window, QColor(tokens["pal_window"]))
     palette.setColor(QPalette.ColorRole.WindowText, QColor(tokens["pal_window_text"]))
@@ -132,6 +188,36 @@ QWidget {
 QScrollArea {
     background: transparent;
     border: none;
+}
+/* Slim rounded scrollbars: no arrows, clear track, thumb lights up on hover. */
+QScrollBar:vertical {
+    background: transparent;
+    width: 10px;
+    margin: 2px;
+}
+QScrollBar:horizontal {
+    background: transparent;
+    height: 10px;
+    margin: 2px;
+}
+QScrollBar::handle {
+    background: $border_strong;
+    border-radius: 3px;
+}
+QScrollBar::handle:vertical { min-height: 32px; }
+QScrollBar::handle:horizontal { min-width: 32px; }
+QScrollBar::handle:hover,
+QScrollBar::handle:pressed {
+    background: $accent_strong;
+}
+QScrollBar::add-line, QScrollBar::sub-line {
+    width: 0;
+    height: 0;
+    border: none;
+    background: none;
+}
+QScrollBar::add-page, QScrollBar::sub-page {
+    background: none;
 }
 QScrollArea > QWidget#qt_scrollarea_viewport,
 QWidget#pageContent {
@@ -182,6 +268,23 @@ QWidget#panelTransparent {
 }
 #navtabs[settingsMode="true"]::tab:hover {
     color: $accent_strong;
+}
+/* The top bar's overflow button: looks like a tab, opens the tabs that
+   didn't fit. Underlined like a selected tab while one of them is open. */
+#navMore {
+    background: transparent;
+    color: $text_nav;
+    padding: 12px 10px;
+    border: none;
+    border-bottom: 2px solid transparent;
+    border-radius: 0;
+}
+#navMore:hover {
+    color: $accent_strong;
+}
+#navMore[active="true"] {
+    color: $accent_strong;
+    border-bottom: 2px solid $accent_strong;
 }
 #titleStrip, #topbarRow {
     background: transparent;
@@ -252,7 +355,7 @@ QPushButton#winClose:pressed {
     background: transparent;
 }
 #systemCheckCard {
-    background: transparent;
+    background-color: $card;
     border: 1px solid $border_strong;
     border-radius: 12px;
 }
@@ -272,33 +375,171 @@ QPushButton#winClose:pressed {
     margin-top: 4px;
     margin-bottom: 2px;
 }
+/* Verify Integrity: same frames as #statTile/#chip, status colours from
+   the theme (accent = pass, warn = worth a look, danger = broken, neutral
+   text = info). */
+/* Plain dot + text, like the other cards' "Installed" status. */
+#verifyPill {
+    background: transparent;
+    border: none;
+    padding: 0;
+    color: $text_info;
+}
+/* Fixed green, same as InstallStatusRow's OK_GREEN "Installed". A snapshot
+   run is a pass too: everything but mod file edits was checked. */
+#verifyPill[level="healthy"],
+#verifyPill[level="snapshot"] { color: $status_ok; }
+#verifyPill[level="running"] { color: $accent_strong; }
+#verifyPill[level="attention"] { color: $warn; }
+#verifyPill[level="failed"] { color: $danger_text; }
+#verifyTile {
+    background: transparent;
+    border: none;
+    min-height: 76px;
+}
+#verifyTileTitle {
+    color: $text_info;
+    font-size: 13px;
+    font-weight: bold;
+}
+#verifyTileValue {
+    color: $text_bright;
+    font-size: 22px;
+    font-weight: bold;
+}
+#verifyTileValue[state="idle"] { color: $text_dim; font-weight: normal; }
+#verifyTileValue[state="ok"] { color: $accent_strong; }
+#verifyTileValue[state="warn"] { color: $warn; }
+#verifyTileValue[state="info"] { color: $text_bright; }
+#verifyTileValue[state="problem"] { color: $danger_border; }
+#verifyTileCaption {
+    color: $text_dim;
+    font-size: 12px;
+}
+#verifyFinding {
+    background-color: $input;
+    border: 1px solid $border;
+    border-left: 3px solid $border_strong;
+    border-radius: 8px;
+}
+#verifyFinding[level="ok"] { border-left-color: $accent_strong; }
+#verifyFinding[level="info"] { border-left-color: $text_info; }
+#verifyFinding[level="warn"] { border-left-color: $warn; }
+#verifyFinding[level="problem"] { border-left-color: $danger_border; }
+#verifyFindingIcon {
+    font-size: 14px;
+    font-weight: bold;
+    color: $text_info;
+}
+#verifyFindingIcon[level="ok"] { color: $accent_strong; }
+#verifyFindingIcon[level="warn"] { color: $warn; }
+#verifyFindingIcon[level="problem"] { color: $danger_border; }
+#verifyFindingTitle {
+    color: $text_bright;
+    font-weight: bold;
+}
+#verifyFindingDetail {
+    color: $text_info;
+    font-size: 12px;
+}
+#verifyFindingItems {
+    color: $text_mono;
+    background-color: $mono;
+    border: 1px solid $border;
+    border-radius: 5px;
+    padding: 6px 8px;
+    font-family: monospace;
+    font-size: 12px;
+}
 #installPage QLabel#section3 {
     color: $accent_section;
     font-size: 13px;
     font-weight: bold;
     letter-spacing: 0.5px;
 }
-#installPage QGroupBox {
+#installPage QGroupBox, #updatePage QGroupBox {
     margin-top: 12px;
     padding-top: 10px;
     background-color: transparent;
 }
+#installPage QGroupBox {
+    border: none;
+}
 #installPage QGroupBox::title {
+    left: 0;
+    padding: 0;
+}
+#installPage QGroupBox::title, #updatePage QGroupBox::title {
     font-size: 13px;
     font-weight: bold;
 }
 #installPage QLineEdit {
     min-height: 30px;
 }
-#installPage QCheckBox {
+#installPage QLineEdit#pathEdit:hover, #playPage QLineEdit#pathEdit:hover {
+    border-color: $focus;
+}
+#installPage QLineEdit#pathEdit:disabled, #playPage QLineEdit#pathEdit:disabled {
+    color: $text_disabled;
+}
+#installPage QCheckBox, #updatePage QCheckBox {
     padding: 3px 0;
 }
 #installPage QFrame#installDivider,
+#playPage QFrame#installDivider,
 #updatePage QFrame#installDivider {
     background-color: $border;
 }
+/* Install card's step track: the picked step is marked by its accent name
+   and the rounded underline _WizardStep paints, like the main nav bar. */
+#installPage QPushButton#wizardStep {
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    padding: 0;
+    text-align: left;
+}
+/* Hover: the Dashboard's Installation status rows' soft tile. */
+#installPage QPushButton#wizardStep:hover {
+    background-color: $input;
+    border-color: $border;
+}
+#installPage QLabel#wizardStepName {
+    background: transparent;
+    color: $text;
+    font-weight: bold;
+}
+#installPage QLabel#wizardStepName[selected="true"] {
+    color: $accent_strong;
+}
+#installPage QLabel#wizardStepStatus {
+    background: transparent;
+    color: $text_dim;
+    font-size: 12px;
+}
+#installPage QLabel#wizardStepStatus[state="ok"] { color: $status_ok; }
+#installPage QLabel#wizardStepStatus[state="busy"],
+#installPage QLabel#wizardStepStatus[state="warn"] { color: $warn; }
+#installPage QLabel#wizardStepStatus[state="bad"] { color: $danger_text; }
+/* Install page's Automatic / Manual choice: a whole half of the card is
+   the click target, with the step track's soft hover tile. */
+#installPage QFrame#installChoice {
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 10px;
+}
+#installPage QFrame#installChoice[hover="true"] {
+    background-color: $input;
+    border-color: $border_strong;
+}
+#installPage QLabel#installChoiceTag {
+    color: $accent_strong;
+}
+QFrame#rowDivider {
+    background-color: $border;
+}
 QLabel#section3 {
-    color: #7dc963;
+    color: $accent_section;
 }
 #statusReady, #statusNotReady, #statusOptional, #statusChecking {
     font-size: 11px;
@@ -363,12 +604,64 @@ QPushButton#iconButton::menu-indicator {
 #achievementNameLocked {
     color: $text_dim;
 }
-QListWidget#achievementList::item {
+QListWidget#achievementList::item, QListWidget#helpTopics::item {
     border-left: 3px solid transparent;
 }
-QListWidget#achievementList::item:selected {
+QListWidget#achievementList::item:selected, QListWidget#helpTopics::item:selected {
     background-color: $btn_hover;
     border-left: 3px solid $accent_strong;
+}
+QListWidget#helpTopics {
+    background-color: $card;
+    border: 1px solid $border;
+    border-radius: 8px;
+    padding: 4px;
+}
+QListWidget#helpTopics::item {
+    padding: 8px 10px;
+    color: $text;
+}
+QListWidget#helpTopics::item:selected {
+    color: $text_bright;
+}
+#helpTerm {
+    font-weight: bold;
+    color: $text_bright;
+}
+QPushButton#docSection {
+    background: transparent;
+    border: none;
+    padding: 0;
+    text-align: left;
+    font-size: 15px;
+    font-weight: bold;
+    color: $accent_section;
+}
+QPushButton#docSection:hover {
+    color: $accent_strong;
+}
+QScrollArea#crumbs, QScrollArea#crumbs > QWidget > QWidget {
+    background: transparent;
+}
+QWidget#sideRow {
+    background: transparent;
+}
+QListWidget#fileList::item {
+    padding: 5px 6px;
+}
+QPushButton#crumb {
+    background: transparent;
+    border: none;
+    padding: 4px 6px;
+    min-width: 0;
+    color: $text_dim;
+}
+QPushButton#crumb:hover {
+    color: $accent_strong;
+}
+QPushButton#crumb[current="true"] {
+    color: $text_bright;
+    font-weight: bold;
 }
 QProgressBar#storageMeter, QProgressBar#storageMeterLow {
     border: none;
@@ -409,6 +702,11 @@ QProgressBar#achievementMeter::chunk {
 #warn {
     color: $warn;
 }
+/* common.tint(): a status colour set from code that follows the theme. */
+*[tint="ok"], #statValue[tint="ok"] { color: $status_ok; }
+*[tint="warn"], #statValue[tint="warn"] { color: $status_warn; }
+*[tint="grey"], #statValue[tint="grey"] { color: $status_grey; }
+*[tint="accent"], #statValue[tint="accent"] { color: $accent_strong; }
 #mono {
     font-family: "DejaVu Sans Mono", monospace;
     font-size: 12px;
@@ -502,6 +800,19 @@ QPushButton#secondary {
     color: $text_btn_hover;
     font-size: 14px;
 }
+/* A secondary button sitting beside a primary one (Undo last update):
+   the primary's height and font, keeping the secondary colours. */
+QPushButton#secondary[besidePrimary="true"] {
+    padding-top: 0;
+    padding-bottom: 0;
+    font-size: %FONT_SIZE%;
+    font-weight: bold;
+}
+/* A small secondary button in a card's footer (Choose DLL). */
+QPushButton#secondary[compact="true"] {
+    padding: 6px 14px;
+    font-size: 13px;
+}
 QPushButton#secondary:hover {
     background-color: $btn_hover;
     border-color: $secondary_hover_border;
@@ -545,23 +856,60 @@ QPushButton#consoleToggle:disabled {
     background-color: $btn_disabled;
     border-color: $btn_disabled;
 }
-QPushButton#releaseNotesToggle {
-    background-color: $card;
-    border: 1px solid $border;
-    border-radius: 6px;
-    padding: 3px 8px;
-    text-align: left;
+/* Multiplayer settings tabs: the main nav bar's look, an accent
+   underline on the picked tab, resting on the divider below. */
+QPushButton#subTab {
+    background: transparent;
+    border: none;
+    border-bottom: 2px solid transparent;
+    border-radius: 0;
+    padding: 0 14px;
+    color: $text_nav;
+    font-weight: 600;
+}
+QPushButton#subTab:hover {
     color: $text_bright;
-    font-weight: bold;
-    font-size: 12px;
+    border-bottom-color: $border_strong;
 }
-QPushButton#releaseNotesToggle:hover {
-    background-color: $btn_hover;
-    border-color: $border_strong;
-}
-QPushButton#releaseNotesToggle:checked {
+QPushButton#subTab:checked {
     color: $accent_strong;
+    border-bottom-color: $accent_strong;
+}
+QPushButton#subTab:disabled {
+    color: $text_disabled;
+    border-bottom-color: transparent;
+}
+/* Multiplayer page tabs: the Dashboard's pill buttons, latched when picked. */
+QPushButton#segment {
+    background: transparent;
+    border: 1px solid $border;
+    border-radius: 17px;
+    padding: 0 16px;
+    color: $text;
+    font-weight: 600;
+}
+QPushButton#segment:hover {
+    background-color: $btn_hover;
     border-color: $accent_strong;
+    color: $accent_strong;
+}
+QPushButton#segment:checked {
+    background-color: $chip;
+    border-color: $accent_strong;
+    color: $accent_strong;
+}
+QPushButton#segment:disabled {
+    background: transparent;
+    border-color: $border;
+    border-style: dashed;
+    color: $text_disabled;
+}
+/* Locked while picked (frame generation mid-game): still shows the pick. */
+QPushButton#segment:checked:disabled {
+    background-color: $chip;
+    border-color: $border_strong;
+    border-style: solid;
+    color: $text;
 }
 QPushButton#tertiary {
     background: transparent;
@@ -576,6 +924,38 @@ QPushButton#tertiary:disabled {
 }
 QPushButton#tertiary:hover {
     color: $text_tertiary_hover;
+}
+/* Settings rows: the setting's name over a dim line, and a compact
+   action on the right that lights up in the accent on hover. */
+QLabel#settingTitle {
+    color: $text_bright;
+    font-weight: 600;
+}
+QPushButton#settingAction, QPushButton#settingDanger {
+    background-color: $btn;
+    border: 1px solid $border_secondary;
+    border-radius: 6px;
+    padding: 5px 16px;
+    color: $text_btn_hover;
+    font-weight: 600;
+}
+QPushButton#settingAction:hover, QPushButton#settingAction:checked {
+    background-color: $chip;
+    border-color: $accent_strong;
+    color: $accent_strong;
+}
+QPushButton#settingDanger:hover {
+    background-color: $danger_bg;
+    border-color: $danger_border;
+    color: $danger_text;
+}
+QPushButton#settingAction:pressed, QPushButton#settingDanger:pressed {
+    background-color: $btn_pressed;
+}
+QPushButton#settingAction:disabled, QPushButton#settingDanger:disabled {
+    color: $text_disabled;
+    background-color: $btn_disabled;
+    border-color: $btn_disabled;
 }
 #chip {
     background-color: $chip;
@@ -615,6 +995,22 @@ QLineEdit, QSpinBox, QComboBox {
 QLineEdit:focus, QSpinBox:focus, QComboBox:focus {
     border-color: $focus;
 }
+QComboBox {
+    padding-right: 26px;
+}
+/* Borderless chevron instead of the native boxed arrow. */
+QComboBox::drop-down {
+    subcontrol-origin: padding;
+    subcontrol-position: center right;
+    width: 24px;
+    border: none;
+    background: transparent;
+}
+QComboBox::down-arrow {
+    image: url("%COMBO_ARROW%");
+    width: 10px;
+    height: 6px;
+}
 QComboBox QAbstractItemView {
     background-color: $card;
     border: 1px solid $border_input;
@@ -624,6 +1020,39 @@ QComboBox::separator {
     height: 1px;
     background: $border_input;
     margin: 4px 8px;
+}
+/* Rounded like the pop-ups: context_menu.polish_menu makes the window
+   see-through so the corners really are round. */
+QMenu {
+    background-color: $card;
+    color: $text;
+    border: 1px solid $border_strong;
+    border-radius: 10px;
+    padding: 6px;
+}
+QMenu::item {
+    background: transparent;
+    padding: 7px 28px 7px 10px;
+    border-radius: 6px;
+    border-left: 3px solid transparent;
+}
+QMenu::item:selected {
+    background-color: $btn_hover;
+    color: $text_bright;
+    border-left: 3px solid $accent_strong;
+}
+QMenu::item:disabled {
+    color: $text_disabled;
+    background: transparent;
+    border-left: 3px solid transparent;
+}
+QMenu::icon {
+    padding-left: 8px;
+}
+QMenu::separator {
+    height: 1px;
+    background: $border;
+    margin: 5px 10px;
 }
 QProgressBar {
     background-color: $input;
@@ -639,6 +1068,11 @@ QProgressBar::chunk {
     );
     border-radius: 4px;
 }
+QProgressBar[full="true"] {
+    color: $accent_text;
+}
+/* Verify Integrity results that aren't a pass (see set_success_state). */
+QProgressBar[level="attention"]::chunk { background: $warn; }
 QProgressBar::text {
     color: $text_btn;
     background: rgba(0, 0, 0, 0.55);
@@ -671,10 +1105,37 @@ QFrame#profileCard[selected="true"] {
 QFrame#profileCard[active="true"] {
     border: 2px solid $accent;
 }
+/* Dashboard Installation status rows: plain until hovered, then a
+   soft tile shows the row can be clicked. */
+QFrame#componentRow {
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 6px;
+}
+QFrame#componentRow:hover {
+    background-color: $input;
+    border-color: $border;
+}
 QFrame#statTile {
     background-color: $input;
     border: 1px solid $border;
     border-radius: 8px;
+}
+/* Install page: the running install's bar and addon table in one
+   panel; the table sits flat inside it, not as a box in a box. */
+QFrame#installProgress {
+    background-color: $input;
+    border: 1px solid $border;
+    border-radius: 8px;
+}
+QFrame#installProgress QTableWidget {
+    background: transparent;
+    border: none;
+    border-top: 1px solid $border;
+    border-radius: 0px;
+}
+QFrame#installProgress QHeaderView::section {
+    background: transparent;
 }
 #statValue[state="bad"] {
     color: $text_dim;
@@ -698,6 +1159,10 @@ QPlainTextEdit#noteEdit {
 QPlainTextEdit#noteEdit:focus {
     border-color: $focus;
 }
+/* Tall enough for the whole handle: a shorter slider clips it into an oval. */
+QSlider:horizontal {
+    min-height: 22px;
+}
 QSlider::groove:horizontal {
     height: 6px;
     background-color: $input;
@@ -708,18 +1173,19 @@ QSlider::sub-page:horizontal {
     background-color: $accent_strong;
     border-radius: 3px;
 }
+/* The COMMANDER logo, 18px across and centred on the 6px groove. */
 QSlider::handle:horizontal {
-    background-color: $text_bright;
-    border: 2px solid $accent_strong;
-    width: 12px;
+    image: url("%SLIDER_HANDLE%");
+    width: 18px;
+    height: 18px;
     margin: -6px 0;
-    border-radius: 8px;
+}
+/* -50..50 sliders: no fill, so the handle in the middle reads as "unchanged". */
+QSlider[signed="true"]::sub-page:horizontal {
+    background: transparent;
 }
 QSlider::sub-page:horizontal:disabled {
     background-color: $border_input;
-}
-QSlider::handle:horizontal:disabled {
-    border-color: $border_input;
 }
 QTableWidget, QListWidget {
     background-color: $input;
@@ -815,7 +1281,7 @@ QPushButton#discordButton:hover {
     border: 1px solid #5865F2;
 }
 QPushButton#githubLink, QPushButton#discordLink {
-    color: $link;
+    color: $text;
     padding: 0 2px 0 8px;
     border: none;
     background: transparent;
@@ -823,6 +1289,20 @@ QPushButton#githubLink, QPushButton#discordLink {
 QPushButton#githubLink:hover, QPushButton#discordLink:hover {
     color: $link_hover;
     background: transparent;
+}
+/* Status bar version: plain text that copies debug info, with the
+   Installation status rows' hover tile. */
+QPushButton#statusVersion {
+    font-size: 12px;
+    padding: 1px 6px;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 4px;
+    color: $text;
+}
+QPushButton#statusVersion:hover, QPushButton#statusVersion:pressed {
+    background-color: $input;
+    border-color: $border;
 }
 QPushButton#commanderUpdateStatus {
     padding: 0 4px;
@@ -833,11 +1313,42 @@ QPushButton#commanderUpdateStatus {
 QPushButton#commanderUpdateStatus:disabled {
     background: transparent;
 }
-QMessageBox, QFileDialog {
+QFrame#updateBanner {
+    background-color: $card;
+    border: none;
+    border-top: 1px solid $border;
+    border-bottom: 2px solid $accent_strong;
+}
+QLabel#updateBannerText {
+    color: $accent;
+    font-weight: bold;
+    background: transparent;
+}
+QPushButton#updateBannerClose {
+    background: transparent;
+    border: none;
+    padding: 0;
+    min-width: 0;
+    font-size: 15px;
+    color: $text_dim;
+}
+QPushButton#updateBannerClose:hover {
+    color: $text_bright;
+}
+QMessageBox, QFileDialog, QDialog#messageDialog, QDialog#popupWindow {
     background-color: $card;
 }
+QDialog#messageDialog, QDialog#popupWindow {
+    border: 1px solid $border_strong;
+}
+/* Themed fully: left to the desktop, the background came from the
+   system theme and could clash with the theme's text color. */
 QToolTip {
-    color: $text_info;
+    background-color: $card;
+    color: $text;
+    border: 1px solid $border;
+    border-radius: 4px;
+    padding: 4px 6px;
 }
 QRadioButton {
     background: transparent;
@@ -896,6 +1407,7 @@ THEMES: dict[str, dict[str, str]] = {
         "storage_a": "#8fe45c",
         "storage_b": "#3f7f2c",
         "storage_c": "#9aa596",
+        "storage_d": "#a3ad5c",
         "accent_text": "#0c130a",
         "warn_text": "#0c130a",
         "accent_section": "#a8d66f",
@@ -980,6 +1492,7 @@ THEMES: dict[str, dict[str, str]] = {
         "storage_a": "#5ec99b",
         "storage_b": "#2d6e57",
         "storage_c": "#8aa0b2",
+        "storage_d": "#8fae7a",
         "accent_text": "#0b1511",
         "warn_text": "#0b1511",
         "accent_section": "#7fceab",
@@ -1031,90 +1544,6 @@ THEMES: dict[str, dict[str, str]] = {
         "pal_highlight": "#3f9d7a",
         "pal_highlighted_text": "#0b1511",
     },
-    "terminal": {
-        "font_size": "13px",
-        "bg": "#000000",
-        "page": "rgba(0, 0, 0, 190)",
-        "topbar": "rgba(0, 0, 0, 245)",
-        "card": "#060b06",
-        "input": "#000000",
-        "mono": "#000000",
-        "btn": "#0a120a",
-        "btn_hover": "#122212",
-        "btn_pressed": "#060c06",
-        "btn_disabled": "#080c08",
-        "chip": "#071007",
-        "border": "#123912",
-        "border_strong": "#1c4f1c",
-        "border_input": "#123012",
-        "border_secondary": "#1c4a1c",
-        "gridline": "#0c240c",
-        "text": "#33cc55",
-        "text_bright": "#66ff88",
-        "text_btn": "#3ddc5a",
-        "text_btn_hover": "#5cf27a",
-        "text_nav": "#1f7a33",
-        "text_info": "#2fa847",
-        "text_dim": "#1f7a33",
-        "text_mono": "#33cc55",
-        "text_disabled": "#1a5c28",
-        "text_tertiary_hover": "#3ddc5a",
-        "accent": "#33ff66",
-        "accent_strong": "#2ee75c",
-        "storage_a": "#2ee75c",
-        "storage_b": "#12692a",
-        "storage_c": "#9aa59c",
-        "accent_text": "#001a05",
-        "warn_text": "#001a05",
-        "accent_section": "#33dd55",
-        "primary": "#1f8a3a",
-        "primary_hover": "#26a346",
-        "primary_disabled_bg": "#0f3318",
-        "primary_disabled_border": "#185c26",
-        "primary_disabled_text": "#2a8a42",
-        "hero1": "#16a13a",
-        "hero2": "#26c94e",
-        "hero_hover1": "#1bb844",
-        "hero_hover2": "#30dd5a",
-        "hero_border": "#33ff66",
-        "hero_text": "#001a05",
-        "secondary_hover_border": "#26c94e",
-        "selection": "#1f8a3a",
-        "selection_text": "#001a05",
-        "focus": "#2ee75c",
-        "chip_ok": "#33ff66",
-        "chip_ok_border": "#1c6b2e",
-        "checking_bg": "#112817",
-        "warn": "#cc9933",
-        "danger_bg": "#5a1f1c",
-        "danger_border": "#a0443f",
-        "danger_text": "#ffd9d4",
-        "danger_hover": "#9a3a34",
-        "danger_disabled_bg": "#241211",
-        "danger_disabled_border": "#40201e",
-        "danger_disabled_text": "#7a504d",
-        "link": "#66ff88",
-        "link_hover": "#aaffcc",
-        "back_base_a": "#020702",
-        "back_base_b": "#000000",
-        "back_glow1_rgb": "33, 255, 102",
-        "back_glow1_a": "45",
-        "back_glow1b_rgb": "16, 120, 50",
-        "back_glow1b_a": "25",
-        "back_glow1c_rgb": "8, 55, 24",
-        "back_glow1c_a": "12",
-        "back_glow2_rgb": "12, 90, 30",
-        "back_glow2_a": "35",
-        "pal_window": "#000000",
-        "pal_window_text": "#33cc55",
-        "pal_base": "#000000",
-        "pal_alternate": "#060b06",
-        "pal_text": "#33cc55",
-        "pal_button": "#0a120a",
-        "pal_button_text": "#3ddc5a",
-        "pal_highlight": "#1f8a3a",
-        "pal_highlighted_text": "#001a05",
-    },
     "black": {
         "font_size": "13px",
         "bg": "#000000",
@@ -1148,6 +1577,7 @@ THEMES: dict[str, dict[str, str]] = {
         "storage_a": "#8fe45c",
         "storage_b": "#3f7f2c",
         "storage_c": "#8a8a8a",
+        "storage_d": "#a3ad5c",
         "accent_text": "#0c130a",
         "warn_text": "#0c130a",
         "accent_section": "#a8d66f",
@@ -1199,90 +1629,6 @@ THEMES: dict[str, dict[str, str]] = {
         "pal_highlight": "#5fb548",
         "pal_highlighted_text": "#0c130a",
     },
-    "dusk": {
-        "font_size": "13px",
-        "bg": "#140d06",
-        "page": "rgba(20, 13, 6, 180)",
-        "topbar": "rgba(16, 10, 4, 240)",
-        "card": "#1d140a",
-        "input": "#120b04",
-        "mono": "#0d0703",
-        "btn": "#2a1c10",
-        "btn_hover": "#3a2817",
-        "btn_pressed": "#1d1309",
-        "btn_disabled": "#1c1208",
-        "chip": "#221608",
-        "border": "#3a2a18",
-        "border_strong": "#4f3a20",
-        "border_input": "#3a2a18",
-        "border_secondary": "#57401f",
-        "gridline": "#2a1d10",
-        "text": "#f0e2cc",
-        "text_bright": "#faf0e0",
-        "text_btn": "#f5e8d4",
-        "text_btn_hover": "#ffe9c4",
-        "text_nav": "#b09778",
-        "text_info": "#c2a885",
-        "text_dim": "#9c8261",
-        "text_mono": "#e8d4b8",
-        "text_disabled": "#7a6245",
-        "text_tertiary_hover": "#e8c9a0",
-        "accent": "#ff9f45",
-        "accent_strong": "#ff8f2e",
-        "storage_a": "#ff8f2e",
-        "storage_b": "#8a4a14",
-        "storage_c": "#d9c7a6",
-        "accent_text": "#2a1600",
-        "warn_text": "#2a1600",
-        "accent_section": "#f0a75f",
-        "primary": "#c8721e",
-        "primary_hover": "#dd8530",
-        "primary_disabled_bg": "#4a2e12",
-        "primary_disabled_border": "#6b4518",
-        "primary_disabled_text": "#a8804f",
-        "hero1": "#d97a1e",
-        "hero2": "#ff9f45",
-        "hero_hover1": "#ea8a2c",
-        "hero_hover2": "#ffb061",
-        "hero_border": "#ffb061",
-        "hero_text": "#2a1600",
-        "secondary_hover_border": "#ff9f45",
-        "selection": "#c8721e",
-        "selection_text": "#2a1600",
-        "focus": "#ff8f2e",
-        "chip_ok": "#ff9f45",
-        "chip_ok_border": "#7a4f1c",
-        "checking_bg": "#2e261d",
-        "warn": "#e0a24a",
-        "danger_bg": "#6e2a1e",
-        "danger_border": "#b04f3d",
-        "danger_text": "#ffe0d4",
-        "danger_hover": "#b04a36",
-        "danger_disabled_bg": "#2d1610",
-        "danger_disabled_border": "#4d2919",
-        "danger_disabled_text": "#7a5a48",
-        "link": "#ffe9c4",
-        "link_hover": "#ffffff",
-        "back_base_a": "#201408",
-        "back_base_b": "#0d0703",
-        "back_glow1_rgb": "255, 159, 69",
-        "back_glow1_a": "55",
-        "back_glow1b_rgb": "150, 80, 30",
-        "back_glow1b_a": "32",
-        "back_glow1c_rgb": "70, 38, 14",
-        "back_glow1c_a": "14",
-        "back_glow2_rgb": "160, 90, 40",
-        "back_glow2_a": "45",
-        "pal_window": "#140d06",
-        "pal_window_text": "#f0e2cc",
-        "pal_base": "#120b04",
-        "pal_alternate": "#1d140a",
-        "pal_text": "#f0e2cc",
-        "pal_button": "#2a1c10",
-        "pal_button_text": "#f5e8d4",
-        "pal_highlight": "#c8721e",
-        "pal_highlighted_text": "#2a1600",
-    },
     "reactor": {
         "font_size": "13px",
         "bg": "#010a0a",
@@ -1316,6 +1662,7 @@ THEMES: dict[str, dict[str, str]] = {
         "storage_a": "#00a3a3",
         "storage_b": "#035e5e",
         "storage_c": "#8fb3b3",
+        "storage_d": "#6fae8f",
         "accent_text": "#eafcfc",
         "warn_text": "#001515",
         "accent_section": "#3aabab",
@@ -1367,4 +1714,477 @@ THEMES: dict[str, dict[str, str]] = {
         "pal_highlight": "#047777",
         "pal_highlighted_text": "#eafcfc",
     },
+    "winter": {
+        "font_size": "13px",
+        "bg": "#dfe5ea",
+        "page": "rgba(225, 232, 238, 40)",
+        "topbar": "rgba(214, 222, 229, 205)",
+        "card": "rgba(218, 226, 233, 185)",
+        "input": "rgba(212, 220, 228, 185)",
+        "mono": "#dbe2e8",
+        "btn": "rgba(228, 234, 240, 140)",
+        "btn_hover": "rgba(236, 241, 245, 200)",
+        "btn_pressed": "rgba(206, 215, 223, 220)",
+        "btn_disabled": "rgba(210, 217, 224, 120)",
+        "chip": "rgba(226, 232, 238, 150)",
+        "border": "#b3bec7",
+        "border_strong": "#98a5b0",
+        "border_input": "#a8b4bd",
+        "border_secondary": "#9db29b",
+        "gridline": "#c4ccd3",
+        "text": "#1b252d",
+        "text_bright": "#0f171d",
+        "text_btn": "#1b252d",
+        "text_btn_hover": "#0f171d",
+        "text_nav": "#4f5d68",
+        "text_info": "#3e4b55",
+        "text_dim": "#46535d",
+        "text_mono": "#26323a",
+        "text_disabled": "#97a2aa",
+        "text_tertiary_hover": "#2f6a2c",
+        "accent": "#3a6d37",
+        "accent_strong": "#2f6d2b",
+        "storage_a": "#62945a",
+        "storage_b": "#3a6d37",
+        "storage_c": "#8f9ba5",
+        "storage_d": "#9f9a63",
+        "accent_text": "#ffffff",
+        "warn_text": "#1b1206",
+        "accent_section": "#3a6d37",
+        "primary": "#3f7a3a",
+        "primary_hover": "#4c8c45",
+        "primary_disabled_bg": "#c9d3cb",
+        "primary_disabled_border": "#b6c3b8",
+        "primary_disabled_text": "#7f8c82",
+        "hero1": "#3a6d37",
+        "hero2": "#62945a",
+        "hero_hover1": "#427c3e",
+        "hero_hover2": "#6fa266",
+        "hero_border": "#2f5f2c",
+        "hero_text": "#ffffff",
+        "secondary_hover_border": "#4c8c45",
+        "selection": "#3f7a3a",
+        "selection_text": "#ffffff",
+        "focus": "#3f7a3a",
+        "chip_ok": "#2f6d2b",
+        "chip_ok_border": "#9fc49a",
+        "checking_bg": "#d7dee4",
+        "warn": "#a86a12",
+        "danger_bg": "#b84a40",
+        "danger_border": "#9a3a32",
+        "danger_text": "#ffffff",
+        "danger_hover": "#c9574c",
+        "danger_disabled_bg": "#e3cfcc",
+        "danger_disabled_border": "#d1b5b1",
+        "danger_disabled_text": "#9a7f7b",
+        "link": "#2f6d2b",
+        "link_hover": "#1f4f1c",
+        # The fixed status colours (ui/common.py) are too pale on white.
+        "status_ok": "#2f7a2a",
+        "status_warn": "#9a5f0c",
+        "status_red": "#b2362f",
+        "status_grey": "#5f6b74",
+        "status_item": "#1b252d",
+        "status_light": "#3a4650",
+        # Painted over the gradient: a pre-blurred courtyard of panel blocks
+        # (the cards read as frosted glass over it) with falling snow on top.
+        # The edge trees sway (ui/redforest.py), slower than Red Forest's.
+        "back_image": "winter/backdrop.jpg",
+        "back_trees": "winter/day",
+        "back_sway_s": "7",
+        "back_snow": "1",
+        "back_lights": "1",  # fairy lights around the wordmark
+        "back_base_a": "#e3e9ee",
+        "back_base_b": "#c3ccd4",
+        "back_glow1_rgb": "255, 255, 255",
+        "back_glow1_a": "60",
+        "back_glow1b_rgb": "240, 244, 248",
+        "back_glow1b_a": "40",
+        "back_glow1c_rgb": "220, 228, 234",
+        "back_glow1c_a": "20",
+        "back_glow2_rgb": "200, 210, 218",
+        "back_glow2_a": "40",
+        "pal_window": "#dfe5ea",
+        "pal_window_text": "#1b252d",
+        "pal_base": "#dde4ea",
+        "pal_alternate": "#d4dce3",
+        "pal_text": "#1b252d",
+        "pal_button": "#e0e6eb",
+        "pal_button_text": "#1b252d",
+        "pal_highlight": "#3f7a3a",
+        "pal_highlighted_text": "#ffffff",
+    },
 }
+
+# Winter follows the time of day. Dawn keeps the light day colours over a
+# warmer scene; dusk and night switch to dark frosted glass so the cards stay
+# readable over the dark scenes.
+THEMES["winter_dawn"] = {
+    **THEMES["winter"],
+    "back_image": "winter/dawn.jpg",
+    "back_trees": "winter/dawn",
+    "back_base_a": "#ecdcd6",
+    "back_base_b": "#c9c3cc",
+}
+THEMES["winter_night"] = {
+    "font_size": "13px",
+    "bg": "#11161b",
+    "page": "rgba(14, 19, 24, 40)",
+    "topbar": "rgba(14, 19, 24, 215)",
+    "card": "rgba(22, 29, 36, 210)",
+    "input": "rgba(10, 14, 18, 190)",
+    "mono": "#0e1317",
+    "btn": "rgba(44, 54, 64, 160)",
+    "btn_hover": "rgba(58, 70, 82, 210)",
+    "btn_pressed": "rgba(28, 36, 44, 220)",
+    "btn_disabled": "rgba(30, 38, 46, 120)",
+    "chip": "rgba(36, 46, 56, 170)",
+    "border": "#2e3a44",
+    "border_strong": "#3e4c58",
+    "border_input": "#36444f",
+    "border_secondary": "#3f5a3c",
+    "gridline": "#232d36",
+    "text": "#dde5ea",
+    "text_bright": "#f2f6f8",
+    "text_btn": "#dde5ea",
+    "text_btn_hover": "#ffffff",
+    "text_nav": "#95a2ac",
+    "text_info": "#9aa8b2",
+    "text_dim": "#8a97a1",
+    "text_mono": "#c9d3da",
+    "text_disabled": "#56626c",
+    "text_tertiary_hover": "#a6dc8a",
+    "accent": "#8fcf72",
+    "accent_strong": "#9fe07f",
+    "storage_a": "#8fcf72",
+    "storage_b": "#4f8a45",
+    "storage_c": "#7d8a94",
+    "storage_d": "#b3ac6e",
+    "accent_text": "#0f1a0c",
+    "warn_text": "#1b1206",
+    "accent_section": "#8fcf72",
+    "primary": "#4f8a45",
+    "primary_hover": "#5e9c53",
+    "primary_disabled_bg": "#26302a",
+    "primary_disabled_border": "#34403a",
+    "primary_disabled_text": "#6c7a70",
+    "hero1": "#3f7a3a",
+    "hero2": "#62945a",
+    "hero_hover1": "#4a8a44",
+    "hero_hover2": "#72a868",
+    "hero_border": "#7fbf6a",
+    "hero_text": "#ffffff",
+    "secondary_hover_border": "#5e9c53",
+    "selection": "#4f8a45",
+    "selection_text": "#ffffff",
+    "focus": "#8fcf72",
+    "chip_ok": "#8fcf72",
+    "chip_ok_border": "#3f5a3c",
+    "checking_bg": "#1c252d",
+    "warn": "#d9a04c",
+    "danger_bg": "#7a322b",
+    "danger_border": "#b0554f",
+    "danger_text": "#ffe6dd",
+    "danger_hover": "#9c3e35",
+    "danger_disabled_bg": "#2c1e1c",
+    "danger_disabled_border": "#4d3330",
+    "danger_disabled_text": "#7a6460",
+    "link": "#a6dc8a",
+    "link_hover": "#ffffff",
+    "back_image": "winter/night.jpg",
+    "back_trees": "winter/night",
+    "back_sway_s": "7",
+    "back_snow": "1",
+    "back_lights": "1",
+    "back_base_a": "#1a2128",
+    "back_base_b": "#0b0f13",
+    "back_glow1_rgb": "120, 140, 160",
+    "back_glow1_a": "30",
+    "back_glow1b_rgb": "60, 74, 88",
+    "back_glow1b_a": "24",
+    "back_glow1c_rgb": "30, 38, 46",
+    "back_glow1c_a": "12",
+    "back_glow2_rgb": "50, 62, 74",
+    "back_glow2_a": "30",
+    "pal_window": "#11161b",
+    "pal_window_text": "#dde5ea",
+    "pal_base": "#0e1317",
+    "pal_alternate": "#161d24",
+    "pal_text": "#dde5ea",
+    "pal_button": "#232d36",
+    "pal_button_text": "#dde5ea",
+    "pal_highlight": "#4f8a45",
+    "pal_highlighted_text": "#ffffff",
+}
+THEMES["winter_dusk"] = {
+    **THEMES["winter_night"],
+    "bg": "#1a1517",
+    "page": "rgba(26, 20, 22, 40)",
+    "topbar": "rgba(26, 20, 22, 215)",
+    "card": "rgba(36, 28, 30, 210)",
+    "input": "rgba(20, 15, 17, 190)",
+    "mono": "#171214",
+    "border": "#3e3236",
+    "gridline": "#2e2528",
+    "checking_bg": "#2a2124",
+    "back_image": "winter/dusk.jpg",
+    "back_trees": "winter/dusk",
+    "back_base_a": "#3a2c30",
+    "back_base_b": "#16100f",
+    "pal_window": "#1a1517",
+    "pal_base": "#171214",
+    "pal_alternate": "#241c1f",
+    "pal_button": "#33282b",
+}
+
+# Red Forest (Live): the forester's tower in the Zone's Red Forest, on the
+# same clock. Light warm glass by day and dawn, dark glass at dusk and
+# night. Ember orange stands in for the usual green: green is lost
+# among the red and gold leaves. back_trees names the scene's swaying tree layers (see
+# ui/redforest.py), back_redforest drops the leaves and back_fire lights the campfire
+# (dusk and night).
+THEMES["redforest"] = {
+    "font_size": "13px",
+    "bg": "#efe4d6",
+    "page": "rgba(236, 224, 208, 40)",
+    "topbar": "rgba(228, 216, 200, 205)",
+    "card": "rgba(232, 220, 204, 185)",
+    "input": "rgba(226, 213, 196, 185)",
+    "mono": "#e6dacb",
+    "btn": "rgba(240, 230, 218, 140)",
+    "btn_hover": "rgba(246, 238, 228, 200)",
+    "btn_pressed": "rgba(226, 212, 196, 220)",
+    "btn_disabled": "rgba(224, 212, 198, 120)",
+    "chip": "rgba(238, 228, 214, 150)",
+    "border": "#c8b49e",
+    "border_strong": "#b49c84",
+    "border_input": "#bea892",
+    "border_secondary": "#d4a888",
+    "gridline": "#d6c6b4",
+    "text": "#2a1e18",
+    "text_bright": "#1a120d",
+    "text_btn": "#2a1e18",
+    "text_btn_hover": "#1a120d",
+    "text_nav": "#6a5446",
+    "text_info": "#554233",
+    "text_dim": "#5d4c42",
+    "text_mono": "#33261d",
+    "text_disabled": "#ab9a8c",
+    "text_tertiary_hover": "#8a3a12",
+    "accent": "#a8481a",
+    "accent_strong": "#9a3f14",
+    "storage_a": "#d9782e",
+    "storage_b": "#a8481a",
+    "storage_c": "#a8958a",
+    "storage_d": "#9f9a63",
+    "accent_text": "#ffffff",
+    "warn_text": "#1b1206",
+    "accent_section": "#a8481a",
+    "primary": "#b5521f",
+    "primary_hover": "#c8622a",
+    "primary_disabled_bg": "#e0d2c4",
+    "primary_disabled_border": "#cdbba8",
+    "primary_disabled_text": "#8f7f72",
+    "hero1": "#a8481a",
+    "hero2": "#d9782e",
+    "hero_hover1": "#b8521f",
+    "hero_hover2": "#e68a3c",
+    "hero_border": "#8a3a12",
+    "hero_text": "#ffffff",
+    "secondary_hover_border": "#c8622a",
+    "selection": "#b5521f",
+    "selection_text": "#ffffff",
+    "focus": "#b5521f",
+    "chip_ok": "#9a3f14",
+    "chip_ok_border": "#e0b090",
+    "checking_bg": "#eadccc",
+    "warn": "#a86a12",
+    "danger_bg": "#b84a40",
+    "danger_border": "#9a3a32",
+    "danger_text": "#ffffff",
+    "danger_hover": "#c9574c",
+    "danger_disabled_bg": "#ecd6cf",
+    "danger_disabled_border": "#dcbdb4",
+    "danger_disabled_text": "#9a7f7b",
+    "link": "#9a3f14",
+    "link_hover": "#6a2a08",
+    "status_ok": "#2f7a2a",
+    "status_warn": "#9a5f0c",
+    "status_red": "#b2362f",
+    "status_grey": "#6f6258",
+    "status_item": "#2a1e18",
+    "status_light": "#4a3a30",
+    "back_image": "redforest/day.jpg",
+    "back_base_a": "#f0e4d6",
+    "back_base_b": "#d6bba0",
+    "back_glow1_rgb": "255, 248, 238",
+    "back_glow1_a": "60",
+    "back_glow1b_rgb": "246, 236, 224",
+    "back_glow1b_a": "40",
+    "back_glow1c_rgb": "232, 218, 202",
+    "back_glow1c_a": "20",
+    "back_glow2_rgb": "214, 196, 176",
+    "back_glow2_a": "40",
+    "pal_window": "#efe4d6",
+    "pal_window_text": "#2a1e18",
+    "pal_base": "#ebe0d2",
+    "pal_alternate": "#e0d3c3",
+    "pal_text": "#2a1e18",
+    "pal_button": "#e8dccd",
+    "pal_button_text": "#2a1e18",
+    "pal_highlight": "#b5521f",
+    "pal_highlighted_text": "#ffffff",
+    "back_trees": "redforest/day",
+    "back_redforest": "1",
+    "back_leaf_alpha": "230",
+}
+THEMES["redforest_dawn"] = {
+    **THEMES["redforest"],
+    "back_base_a": "#f2dccf",
+    "back_base_b": "#d9b9a8",
+    "back_image": "redforest/dawn.jpg",
+    "back_trees": "redforest/dawn",
+}
+THEMES["redforest_night"] = {
+    "font_size": "13px",
+    "bg": "#11161b",
+    "page": "rgba(14, 19, 24, 40)",
+    "topbar": "rgba(14, 19, 24, 215)",
+    "card": "rgba(22, 29, 36, 210)",
+    "input": "rgba(10, 14, 18, 190)",
+    "mono": "#0e1317",
+    "btn": "rgba(44, 54, 64, 160)",
+    "btn_hover": "rgba(58, 70, 82, 210)",
+    "btn_pressed": "rgba(28, 36, 44, 220)",
+    "btn_disabled": "rgba(30, 38, 46, 120)",
+    "chip": "rgba(36, 46, 56, 170)",
+    "border": "#2e3a44",
+    "border_strong": "#3e4c58",
+    "border_input": "#36444f",
+    "border_secondary": "#5a4028",
+    "gridline": "#232d36",
+    "text": "#dde5ea",
+    "text_bright": "#f2f6f8",
+    "text_btn": "#dde5ea",
+    "text_btn_hover": "#ffffff",
+    "text_nav": "#95a2ac",
+    "text_info": "#9aa8b2",
+    "text_dim": "#8a97a1",
+    "text_mono": "#c9d3da",
+    "text_disabled": "#56626c",
+    "text_tertiary_hover": "#ffc078",
+    "accent": "#f0a24a",
+    "accent_strong": "#ffb35c",
+    "storage_a": "#f0a24a",
+    "storage_b": "#b8642a",
+    "storage_c": "#7d8a94",
+    "storage_d": "#b3ac6e",
+    "accent_text": "#1e1206",
+    "warn_text": "#1b1206",
+    "accent_section": "#f0a24a",
+    "primary": "#c46a24",
+    "primary_hover": "#d97c30",
+    "primary_disabled_bg": "#2e2620",
+    "primary_disabled_border": "#3e3228",
+    "primary_disabled_text": "#7a6c60",
+    "hero1": "#b85a1c",
+    "hero2": "#e08a36",
+    "hero_hover1": "#c8682a",
+    "hero_hover2": "#ee9a46",
+    "hero_border": "#f0a24a",
+    "hero_text": "#ffffff",
+    "secondary_hover_border": "#d97c30",
+    "selection": "#c46a24",
+    "selection_text": "#ffffff",
+    "focus": "#f0a24a",
+    "chip_ok": "#f0a24a",
+    "chip_ok_border": "#5a4028",
+    "checking_bg": "#1c252d",
+    "warn": "#d9a04c",
+    "danger_bg": "#7a322b",
+    "danger_border": "#b0554f",
+    "danger_text": "#ffe6dd",
+    "danger_hover": "#9c3e35",
+    "danger_disabled_bg": "#2c1e1c",
+    "danger_disabled_border": "#4d3330",
+    "danger_disabled_text": "#7a6460",
+    "link": "#ffb35c",
+    "link_hover": "#ffffff",
+    "back_image": "redforest/night.jpg",
+    "back_base_a": "#1a2230",
+    "back_base_b": "#0b0f18",
+    "back_glow1_rgb": "120, 140, 160",
+    "back_glow1_a": "30",
+    "back_glow1b_rgb": "60, 74, 88",
+    "back_glow1b_a": "24",
+    "back_glow1c_rgb": "30, 38, 46",
+    "back_glow1c_a": "12",
+    "back_glow2_rgb": "50, 62, 74",
+    "back_glow2_a": "30",
+    "pal_window": "#11161b",
+    "pal_window_text": "#dde5ea",
+    "pal_base": "#0e1317",
+    "pal_alternate": "#161d24",
+    "pal_text": "#dde5ea",
+    "pal_button": "#232d36",
+    "pal_button_text": "#dde5ea",
+    "pal_highlight": "#c46a24",
+    "pal_highlighted_text": "#ffffff",
+    "back_trees": "redforest/night",
+    "back_redforest": "1",
+    "back_fire": "1",
+    "back_leaf_alpha": "120",
+}
+THEMES["redforest_dusk"] = {
+    **THEMES["redforest_night"],
+    "bg": "#1a1517",
+    "page": "rgba(26, 20, 22, 40)",
+    "topbar": "rgba(26, 20, 22, 215)",
+    "card": "rgba(36, 28, 30, 210)",
+    "input": "rgba(20, 15, 17, 190)",
+    "mono": "#171214",
+    "border": "#3e3236",
+    "gridline": "#2e2528",
+    "checking_bg": "#2a2124",
+    "back_base_a": "#4a3448",
+    "back_base_b": "#1c1218",
+    "pal_window": "#1a1517",
+    "pal_base": "#171214",
+    "pal_alternate": "#241c1f",
+    "pal_button": "#33282b",
+    "back_image": "redforest/dusk.jpg",
+    "back_trees": "redforest/dusk",
+    "back_leaf_alpha": "160",
+}
+
+#: Live themes: (first hour, phase) in order; the last phase runs past midnight.
+_PHASES = {
+    "winter": ((6, "winter_dawn"), (8, "winter"), (17, "winter_dusk"), (19, "winter_night")),
+    "redforest": ((6, "redforest_dawn"), (8, "redforest"), (17, "redforest_dusk"), (19, "redforest_night")),
+}
+LIVE_THEMES = tuple(_PHASES)
+
+
+#: Times of day a Live theme can be locked to, in _PHASES order.
+LIVE_TIMES = ("dawn", "day", "dusk", "night")
+#: Settings choices for the lock: (saved value, untranslated label).
+LIVE_TIME_CHOICES = (
+    ("", "Follow the clock"),
+    ("dawn", "Always dawn"),
+    ("day", "Always day"),
+    ("dusk", "Always dusk"),
+    ("night", "Always night"),
+)
+#: The locked time of day; "" follows the clock (see set_active_theme).
+_LIVE_TIME = ""
+
+
+def resolve_theme(name: str, hour: int | None = None) -> str:
+    """The palette to paint: a Live theme's for the locked time or current hour, any other as is."""
+    phases = _PHASES.get(name)
+    if phases is None:
+        return name
+    if hour is None and _LIVE_TIME in LIVE_TIMES:
+        return phases[LIVE_TIMES.index(_LIVE_TIME)][1]
+    hour = time.localtime().tm_hour if hour is None else hour
+    return next((key for start, key in reversed(phases) if hour >= start), phases[-1][1])

@@ -4,7 +4,8 @@ Three things a player cannot get back from a reinstall live inside the
 install folders, so a Fresh Reset, GAMMA Reset or Full Uninstall deletes
 them along with everything else:
 
-* saves - ``<anomaly>/appdata/savedgames``;
+* saves - ``<anomaly>/appdata/savedgames``, and under MO2 also
+  ``<gamma>/overwrite/appdata/savedgames`` and ``<gamma>/profiles/*/saves``;
 * game options, controls and keybinds - ``<anomaly>/appdata/user.ltx``;
 * MCM (Mod Configuration Menu) settings - ``axr_options.ltx``, which MO2
   keeps inside GAMMA's "MCM values" mod (or a renamed copy of it) and, when
@@ -34,6 +35,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
+from .i18n import tr
+
 #: Why a backup was made. ``manual`` backups are never pruned; the others
 #: are made automatically and only the newest few are kept.
 REASON_LABELS = {
@@ -45,6 +48,7 @@ REASON_LABELS = {
     "update": "Before GAMMA update",
     "repair": "Before Verify & Repair",
     "reinstall": "Before GAMMA reinstall",
+    "anomaly-reinstall": "Before Anomaly reinstall",
 }
 #: Automatic backups kept per profile *and per reason* (manual ones are
 #: never removed). Per reason, so frequent settings-only backups (before
@@ -141,11 +145,28 @@ def collect(
     """The ``(name in the zip, file on disk)`` pairs a backup would hold."""
     files: list[tuple[str, Path]] = []
     if saves:
-        folder = saves_dir(anomaly)
-        if folder.is_dir():
-            for item in sorted(folder.rglob("*")):
-                if item.is_file() and not item.is_symlink():
-                    files.append(("saves/" + item.relative_to(folder).as_posix(), item))
+        # Under MO2 a save can also land in the GAMMA folder: overwrite (a
+        # save MO2's virtual file system created) or a profile's local saves.
+        # A reset wipes those too, so all of them go in, newest copy of a
+        # name winning; a restore puts them all in Anomaly's folder.
+        folders = [saves_dir(anomaly)]
+        if str(gamma).strip():  # Path("") is the working directory
+            root = Path(gamma).expanduser()
+            folders += [
+                *sorted((root / "profiles").glob("*/saves")),
+                root / "overwrite" / "appdata" / "savedgames",
+            ]
+        newest: dict[str, Path] = {}
+        for folder in folders:
+            if not folder.is_dir():
+                continue
+            for item in folder.rglob("*"):
+                if not item.is_file() or item.is_symlink():
+                    continue
+                name = "saves/" + item.relative_to(folder).as_posix()
+                if name not in newest or item.stat().st_mtime > newest[name].stat().st_mtime:
+                    newest[name] = item
+        files.extend(sorted(newest.items()))
     if settings:
         ltx = user_ltx_path(anomaly)
         if ltx.is_file():
@@ -184,7 +205,7 @@ def _write_zip(
             for index, (name, path) in enumerate(files, 1):
                 archive.write(path, name)
                 if index % 50 == 0 or index == len(files):
-                    report(f"Backed up {index}/{len(files)} files...")
+                    report(tr("Backed up {done}/{total} files", done=index, total=len(files)))
         os.replace(tmp, dest)
     except BaseException:
         Path(tmp).unlink(missing_ok=True)
@@ -212,7 +233,7 @@ def create_backup(
     except OSError as exc:
         raise BackupError(f"Could not read the files to back up: {exc}") from exc
     if not files:
-        report("No saves, user.ltx or MCM settings found - nothing to back up.")
+        report(tr("No saves, user.ltx or MCM settings found - nothing to back up."))
         return None
     created = time.time()
     label = clean_name(name)
@@ -237,12 +258,12 @@ def create_backup(
     while dest.exists():
         suffix += 1
         dest = folder / f"{stamp}-{tag}-{suffix}.zip"
-    report(f"Backing up {len(files)} files to {dest} ...")
+    report(tr("Backing up {count} files to {path}", count=len(files), path=dest))
     try:
         _write_zip(dest, files, manifest, report)
     except OSError as exc:
         raise BackupError(f"Could not write the backup: {exc}") from exc
-    report("Backup complete.")
+    report(tr("Backup complete."))
     if reason != "manual":
         prune_automatic(profile_name)
     info = read_info(dest)
@@ -299,12 +320,17 @@ def list_backups(profile_name: str) -> list[BackupInfo]:
     return _backups_in(profile_backup_dir(profile_name))
 
 
-def _prune_folder(folder: Path, keep: int = KEEP_AUTOMATIC) -> list[Path]:
-    """Keep the newest *keep* automatic backups of each reason in *folder*."""
+def _prune_folder(
+    folder: Path, keep: int = KEEP_AUTOMATIC, *, protect: Path | None = None
+) -> list[Path]:
+    """Keep the newest *keep* automatic backups of each reason in *folder*.
+
+    *protect* is never removed: the backup a restore is about to read.
+    """
     removed: list[Path] = []
     by_reason: dict[str, list[BackupInfo]] = {}
     for info in _backups_in(folder):  # newest first
-        if info.reason != "manual":
+        if info.reason != "manual" and info.path != protect:
             by_reason.setdefault(info.reason, []).append(info)
     for infos in by_reason.values():
         for info in infos[keep:]:
@@ -433,8 +459,10 @@ def restore_backup(
             )
             replaced.append((label, dest))
     if replaced:
-        report(f"Keeping a copy of the {len(replaced)} files this restore replaces...")
-        create_backup_of_files(info.profile, replaced, report, folder=info.path.parent)
+        report(tr("Keeping a copy of the {count} files this restore replaces", count=len(replaced)))
+        create_backup_of_files(
+            info.profile, replaced, report, folder=info.path.parent, protect=info.path
+        )
     written = 0
     with zipfile.ZipFile(info.path) as archive:
         for name, dest in plan:
@@ -448,7 +476,7 @@ def restore_backup(
                 Path(tmp).unlink(missing_ok=True)
                 raise
             written += 1
-    report(f"Restored {written} files.")
+    report(tr("Restored {count} files.", count=written))
     return written
 
 
@@ -458,6 +486,7 @@ def create_backup_of_files(
     report: Report,
     *,
     folder: Path | None = None,
+    protect: Path | None = None,
 ) -> BackupInfo | None:
     """A "before restore" backup of exactly the given files.
 
@@ -485,7 +514,7 @@ def create_backup_of_files(
         _write_zip(dest, files, manifest, report)
     except OSError as exc:
         raise BackupError(f"Could not keep a copy of the current files: {exc}") from exc
-    _prune_folder(folder)
+    _prune_folder(folder, protect=protect)
     return read_info(dest)
 
 
@@ -494,24 +523,54 @@ def backup_before_wipe(
 ) -> BackupInfo | None:
     """The automatic backup that runs before a reset or uninstall.
 
-    Saves and user.ltx are at risk when the Anomaly folder is wiped; MCM
-    settings when the GAMMA folder is. user.ltx is always included - it is
+    Saves are at risk with either folder (MO2 can keep them in GAMMA's
+    overwrite or a profile's local saves), user.ltx when Anomaly is wiped
+    and MCM settings when GAMMA is. user.ltx is always included - it is
     tiny, and a GAMMA reinstall without "preserve" resets it too.
     """
     anomaly_wiped = "Anomaly" in wipe_labels
     gamma_wiped = "GAMMA" in wipe_labels
     if not (anomaly_wiped or gamma_wiped):
         return None
-    report("Backing up saves, user.ltx and MCM settings before deleting anything...")
+    report(tr("Backing up saves, user.ltx and MCM settings before deleting anything"))
     return create_backup(
         profile.profile_name,
         profile.anomaly,
         profile.gamma,
         reason=reason,
-        saves=anomaly_wiped,
+        saves=True,  # a GAMMA-only wipe takes overwrite and MO2 local saves
         settings=True,
         report=report,
     )
+
+
+def prepare_anomaly_reinstall(
+    profile, *, keep_saves: bool, keep_settings: bool, with_gamma: bool
+) -> tuple[str | None, bool]:
+    """Back up, then clear what the user chose not to keep, before Reinstall
+    Anomaly. The Anomaly archive has no saves or user.ltx, so the reinstall
+    itself never touches them; MCM is reset by GAMMA's reinstall afterwards.
+
+    Returns ``(message, ok)``: ``ok`` False means stop - nothing was
+    deleted. A message with ``ok`` True is a failed backup worth showing.
+    """
+    try:
+        create_backup(
+            profile.profile_name, profile.anomaly, profile.gamma, reason="anomaly-reinstall"
+        )
+    except (BackupError, OSError) as exc:
+        if not (keep_saves and keep_settings):
+            return tr("Nothing was deleted, because the backup couldn't be made.\n\n{error}", error=exc), False
+        return tr("Settings backup failed: {error}", error=exc), True
+    try:
+        if not keep_saves:
+            shutil.rmtree(saves_dir(profile.anomaly), ignore_errors=True)
+        if not keep_settings and not with_gamma:
+            # With GAMMA, its reinstall without "preserve" resets these.
+            user_ltx_path(profile.anomaly).unlink(missing_ok=True)
+    except OSError as exc:
+        return str(exc), False
+    return None, True
 
 
 def backup_settings_before(profile, reason: str, report: Report = lambda _line: None) -> str | None:
@@ -570,19 +629,27 @@ def apply_pending_settings_restore(profile) -> str | None:
         return None
     pending = dict(gui_settings.load_gui_settings().get(_PENDING_KEY) or {})
     entry = pending.pop(profile.profile_name, None)
+
+    def drop_entry() -> None:
+        gui_settings.save_gui_settings(**{_PENDING_KEY: pending})
+
     if not isinstance(entry, dict):
+        if entry is not None:
+            drop_entry()
         return None
-    gui_settings.save_gui_settings(**{_PENDING_KEY: pending})
     path = Path(str(entry.get("path", "")))
     root = backups_root().resolve()
     try:
         if root not in path.resolve().parents:
+            drop_entry()
             return None
     except OSError:
+        drop_entry()
         return None
     info = read_info(path)
     if info is None:
-        return f"Could not restore your user.ltx / MCM settings: backup not found ({path})."
+        drop_entry()
+        return tr("Could not restore your user.ltx / MCM settings: backup not found ({path}).", path=path)
     try:
         count = restore_backup(
             info,
@@ -593,9 +660,15 @@ def apply_pending_settings_restore(profile) -> str | None:
             user_ltx=bool(entry.get("user", True)),
             mcm=bool(entry.get("mcm", True)),
         )
-    except (BackupError, OSError, KeyError, zipfile.BadZipFile) as exc:
-        return f"Could not restore your user.ltx / MCM settings: {exc}"
-    return f"Restored your user.ltx / MCM settings from before the reset ({count} file(s))."
+    except (KeyError, zipfile.BadZipFile) as exc:
+        # The backup itself is broken: retrying after the next install can't help.
+        drop_entry()
+        return tr("Could not restore your user.ltx / MCM settings: {exc}", exc=exc)
+    except (BackupError, OSError) as exc:
+        # Kept pending: a disk or permission problem may be gone next time.
+        return tr("Could not restore your user.ltx / MCM settings: {exc}", exc=exc)
+    drop_entry()
+    return tr("Restored your user.ltx / MCM settings from before the reset ({count} file(s)).", count=count)
 
 
 def describe(info: BackupInfo) -> str:

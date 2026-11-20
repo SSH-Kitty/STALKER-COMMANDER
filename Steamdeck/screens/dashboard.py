@@ -18,6 +18,8 @@ else in Deck Mode reports it.
 from __future__ import annotations
 
 import time
+from datetime import datetime, timezone
+from pathlib import Path
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QHBoxLayout
@@ -25,6 +27,7 @@ from PySide6.QtWidgets import QHBoxLayout
 from commander_gui import gui_settings
 from commander_gui.dependencies import check_all_dependencies
 from commander_gui.i18n import tr
+from commander_gui.self_update import commander_appimage_path
 from commander_gui.ui.common import (
     BackgroundTask,
     anomaly_installed,
@@ -35,12 +38,15 @@ from commander_gui.ui.common import (
     free_space_bytes,
     gamma_installed,
     human_size,
+    notice,
 )
 from commander_gui.ui.install_page import _resume_state_matches
+from commander_gui.ui.update_page import _format_relative_time
 from commander_gui.updates import check_updates, format_version
 
 from .. import gamepad as pad
 from ..profiles import ProfilePanel
+from ..welcome import open_url
 from ..widgets import (
     DeckCard,
     DeckRow,
@@ -53,6 +59,7 @@ from ..widgets import (
     side_by_side,
 )
 from .base import DeckScreen
+from .play import play_label
 
 #: Directory sizes mean walking the whole install tree, which on a Deck's SD
 #: card is slow enough to notice. The desktop Dashboard caches for the same
@@ -63,6 +70,12 @@ _SIZE_CACHE_S = 30.0
 #: tab switch back to the Dashboard used to repeat both; now a result stays
 #: good for this long (an install finishing clears it early).
 _CHECK_CACHE_S = 300.0
+
+
+DECK_GUIDE_URL = (
+    "https://www.reddit.com/r/stalker/comments/1v01f8o/"
+    "guide_the_easiest_fastest_way_to_run_stalker/"
+)
 
 
 class DashboardScreen(DeckScreen):
@@ -127,6 +140,9 @@ class DashboardScreen(DeckScreen):
         row_layout.insertWidget(2, self.updates_status_label)
         self.update_row.activated.connect(lambda: self.window.set_page("update"))
         self.body.addWidget(self.update_row)
+        # When each one last changed, as the desktop Updates card lists it.
+        self.history_label = deck_label("", role="caption")
+        self.body.addWidget(self.history_label)
 
         # Mods | Storage usage
         self.mods_row = DeckRow(tr("Mods"))
@@ -140,6 +156,12 @@ class DashboardScreen(DeckScreen):
         # active one's folders, or start a new one.
         self.profile_panel = ProfilePanel(self.window)
         self.body.addWidget(self.profile_panel)
+
+        # A community guide with Deck-specific tips (moving a PC install
+        # and saves over, 60 FPS settings).
+        self.guide_row = DeckRow(tr("Steam Deck guide"), "Reddit")
+        self.guide_row.activated.connect(lambda: open_url(self.window, DECK_GUIDE_URL))
+        self.body.addWidget(self.guide_row)
         self.body.addStretch(1)
 
     @staticmethod
@@ -156,7 +178,7 @@ class DashboardScreen(DeckScreen):
             return True
         if action == pad.SEARCH:
             self._update_at = self._deps_at = self._sizes_at = 0.0
-            self.window.notify(tr("Checking..."), 1500)
+            self.window.notify(tr("Checking"), 1500)
             self.refresh()
             return True
         return False
@@ -185,6 +207,7 @@ class DashboardScreen(DeckScreen):
                 label.setText("")
             self.updates_status_label.setText("")
             self.update_row.set_value("")
+            self.history_label.setText("")
             self.mods_row.set_value("")
             self.storage_row.set_value("")
             self.footer.setText(
@@ -210,10 +233,27 @@ class DashboardScreen(DeckScreen):
         )
 
         self._render_footer(profile)
+        self._render_history(profile)
         self._sync_captions()
         self._start_dependency_check()
         self._start_update_check(profile)
         self._start_size_check(profile)
+
+    def _render_history(self, profile) -> None:
+        def ago(path) -> str:
+            try:
+                return _format_relative_time(datetime.fromtimestamp(path.stat().st_mtime, timezone.utc))
+            except (OSError, AttributeError):
+                return tr("Unknown")
+
+        version_file = Path(profile.gamma, "version.txt") if profile.gamma else None
+        # The AppImage is swapped whole on a self-update; a source run has no
+        # install step, so its own package stands in.
+        commander_file = commander_appimage_path() or Path(__file__).resolve().parents[2] / "commander_gui" / "__init__.py"
+        self.history_label.setText(
+            f"{tr('GAMMA last updated')}: {ago(version_file)}   ·   "
+            f"{tr('COMMANDER last updated')}: {ago(commander_file)}"
+        )
 
     def _sync_captions(self) -> None:
         # An empty caption still takes a line of layout, which left a blank
@@ -290,11 +330,11 @@ class DashboardScreen(DeckScreen):
                 title, detail, action, target = (
                     tr("Ready to play"),
                     tr("Everything is installed."),
-                    "\u25b6   " + tr("Play GAMMA"),
+                    "\u25b6   " + play_label(profile),
                     "play",
                 )
         self.banner_title.setText(title)
-        self.banner_detail.setText(detail)
+        self.banner_detail.setText(notice(detail))
         self.banner_button.setText(action)
         self.banner_button.setObjectName("deckDanger" if target == "quit" else "deckPrimary")
         repolish(self.banner_button)
@@ -344,7 +384,7 @@ class DashboardScreen(DeckScreen):
             return
         if time.monotonic() - self._deps_at < _CHECK_CACHE_S and self._deps_at:
             return
-        self.deps_row.set_status(tr("Checking..."), "warn")
+        self.deps_row.set_status(tr("Checking"), "warn")
         self._deps_task = BackgroundTask(check_all_dependencies, parent=self)
         self._deps_task.result.connect(self._on_dependencies)
         self._deps_task.error.connect(lambda _m: self._on_dependencies(None))
@@ -380,7 +420,7 @@ class DashboardScreen(DeckScreen):
             return
         if self._update_at and time.monotonic() - self._update_at < _CHECK_CACHE_S:
             return
-        self._set_update_text(tr("Checking..."), "deckBody")
+        self._set_update_text(tr("Checking"), "deckBody")
         self._update_task = BackgroundTask(check_updates, profile, parent=self)
         gen = self._generation
         self._update_task.result.connect(
@@ -437,9 +477,11 @@ class DashboardScreen(DeckScreen):
     def _start_size_check(self, profile) -> None:
         if self._size_task is not None:
             return
-        if time.monotonic() - self._sizes_at < _SIZE_CACHE_S:
+        # 0.0 means never measured; time.monotonic() counts from boot, so
+        # without the first check an autostart right after boot skipped it.
+        if self._sizes_at and time.monotonic() - self._sizes_at < _SIZE_CACHE_S:
             return
-        self.storage_row.set_value(tr("Checking..."))
+        self.storage_row.set_value(tr("Checking"))
         paths = [profile.anomaly, profile.gamma, profile.cache]
 
         def measure() -> tuple[int, int | None]:

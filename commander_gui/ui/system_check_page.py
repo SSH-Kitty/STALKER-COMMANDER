@@ -14,7 +14,6 @@ from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
     QCheckBox,
-    QFileDialog,
     QGridLayout,
     QHBoxLayout,
     QLabel,
@@ -26,7 +25,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .. import gui_settings
+from .. import gui_settings, launch_options, overlays
 from ..cli_runner import cli_binary_path
 from ..dependencies import (
     configured_tool,
@@ -57,6 +56,7 @@ from .common import (
     tr,
     winetricks_tooltip,
 )
+from .file_dialog import FileDialog as QFileDialog
 
 
 def _manual_command(
@@ -66,8 +66,6 @@ def _manual_command(
         return install_command("steam")
     if tool in {"Wine", "Winetricks"}:
         return install_command(tool.lower())
-    if tool == "Protontricks":
-        return install_command("pipx") + " && pipx install protontricks"
     if tool == "Vulkan":
         return vulkan_driver_command(manager, vendors or [])
     if tool == "Vulkan32":
@@ -138,8 +136,6 @@ _TOOL_WHY: dict[str, str] = {
     "through Proton.",
     "Winetricks": "installs the Visual C++/DirectX runtimes Mod Organizer "
     "and the game need.",
-    "Protontricks": "runs Winetricks against a Steam Proton prefix "
-    "specifically.",
     "Vulkan": "confirms your graphics driver supports Vulkan, which DXVK/"
     "vkd3d (DirectX-over-Vulkan) needs to run the game.",
 }
@@ -183,7 +179,7 @@ def _check_tool(
 def _short_proton_name(label: str) -> str:
     """Turn a discovered runner label into a compact, path-free name."""
     ver = label.removeprefix("GE-Proton").removeprefix("Proton ").strip()
-    return f"GE-Proton {ver}" if ver else "GE-Proton Unknown"
+    return f"Proton-GE {ver}" if ver else "Proton-GE Unknown"
 
 
 #: Plain-language names for the Winetricks verb codenames. The codename
@@ -215,9 +211,9 @@ def _winetricks_checks(
     (Dashboard, Install page) gives the per-item breakdown on hover.
 
     ``extra_tools`` is ``(tooltip_key, display_label, installed, manual_command)``
-    for Wine, Protontricks and umu-run - folded into this row's count and
+    for Wine and umu-run - folded into this row's count and
     copy-paste command so it reports the same "X/Y dependencies installed"
-    total as the Dashboard, even though each of the three also has its own
+    total as the Dashboard, even though each of the two also has its own
     row further up this page.
     """
     if not binary:
@@ -241,7 +237,7 @@ def _winetricks_checks(
         tr(_VERB_LABELS.get(verb, verb)) for verb in missing_verbs
     ] + missing_tools
     # Winetricks verbs are idempotent, so that line is always offered; the
-    # Wine/Protontricks/umu-run install commands can need sudo or overwrite
+    # Wine/umu-run install commands can need sudo or overwrite
     # an existing binary, so only add those lines when actually missing.
     commands = [f"{binary} -q {' '.join(WINETRICKS_VERBS)}"]
     commands.extend(cmd for _key, _label, ok, cmd in extra_tools if not ok and cmd)
@@ -358,7 +354,6 @@ def _collect_checks() -> tuple[list[dict[str, str]], bool, dict[str, str]]:
             _check_tool("Wine", "wine", manager),
             _check_tool("umu-run", "umu-run", manager),
             _check_tool("Winetricks", "winetricks", manager),
-            _check_tool("Protontricks", "protontricks", manager),
             _check_tool("Vulkan", "vulkaninfo", manager, vendors),
             _check_vulkan32(manager, vendors),
         ]
@@ -418,23 +413,22 @@ def _collect_checks() -> tuple[list[dict[str, str]], bool, dict[str, str]]:
     # field above (which the runner-fallback loop just downgraded to
     # "optional" for Wine/umu-run when another runner covers for them).
     umu_script = umu_install_command()
-    extra_tools = [
+    umu_found = bool(by_label["umu-run"].get("detected"))
+    # Same scope as check_winetricks_full_status: Wine only counts when
+    # umu-run is missing, otherwise the game runs through Proton instead.
+    extra_tools = [] if umu_found else [
         (
             "wine",
             "Wine",
             bool(by_label["Wine"].get("detected")),
             by_label["Wine"].get("command", ""),
         ),
-        (
-            "protontricks",
-            "Protontricks",
-            bool(by_label["Protontricks"].get("detected")),
-            by_label["Protontricks"].get("command", ""),
-        ),
+    ]
+    extra_tools += [
         (
             "umu",
             "umu-run",
-            bool(by_label["umu-run"].get("detected")),
+            umu_found,
             umu_script[-1] if umu_script else "",
         ),
     ]
@@ -469,16 +463,13 @@ def _collect_checks() -> tuple[list[dict[str, str]], bool, dict[str, str]]:
         {
             "label": "Proton Builds",
             "state": "ready" if ge_builds else "optional",
-            "detail": tr("{count} GE-Proton build(s) detected.", count=len(ge_builds))
+            "detail": tr("{count} Proton-GE build(s) detected.", count=len(ge_builds))
             if ge_builds
-            else tr("No GE-Proton builds detected."),
+            else tr("No Proton-GE builds detected."),
             "command": "",
             "builds": ge_builds,
         }
     )
-    protontricks = by_label["Protontricks"]
-    if protontricks["state"] != "ready":
-        protontricks["state"] = "optional"
     gamemode_found = configured_tool("gamemoderun") or shutil.which("gamemoderun")
     checks.append(
         {
@@ -489,7 +480,8 @@ def _collect_checks() -> tuple[list[dict[str, str]], bool, dict[str, str]]:
             "manager": "" if gamemode_found else (manager or ""),
         }
     )
-    mangohud_found = configured_tool("mangohud") or shutil.which("mangohud")
+    # COMMANDER bundles one, so this only fails in a build without it.
+    mangohud_found = configured_tool("mangohud") or overlays.mangohud_available()
     checks.append(
         {
             "label": "MangoHud",
@@ -499,6 +491,19 @@ def _collect_checks() -> tuple[list[dict[str, str]], bool, dict[str, str]]:
             "manager": "" if mangohud_found else (manager or ""),
         }
     )
+    # Proton only uses NTSync when the kernel module is loaded and the
+    # device is open to the user; otherwise the launch option does nothing.
+    ntsync = launch_options.ntsync_available()
+    loaded = os.path.exists(launch_options.NTSYNC_DEVICE)
+    if ntsync:
+        detail, command = tr("Ready. Turn it on under Launch options on the Play page."), ""
+    elif loaded:
+        detail = tr("The ntsync module is loaded, but you can't open {path}.", path=launch_options.NTSYNC_DEVICE)
+        command = "echo 'KERNEL==\"ntsync\", MODE=\"0666\"' | sudo tee /etc/udev/rules.d/99-ntsync.rules && sudo udevadm trigger"
+    else:
+        detail = tr("Optional. Needs Linux 6.14 or newer with the ntsync module loaded.")
+        command = "echo ntsync | sudo tee /etc/modules-load.d/ntsync.conf && sudo modprobe ntsync"
+    checks.append({"label": "NTSync", "state": "ready" if ntsync else "optional", "detail": detail, "command": command})
     # Cross-reference checks with saved manual overrides — if the user set a
     # custom path that is invalid, downgrade the check to "missing".
     saved_overrides = gui_settings.load_gui_settings().get("tool_overrides") or {}
@@ -520,10 +525,10 @@ def _collect_checks() -> tuple[list[dict[str, str]], bool, dict[str, str]]:
             if dir_path and not Path(dir_path).is_dir():
                 check["state"] = "missing"
                 check["detail"] = tr(
-                    "GE-Proton override path is invalid: {path}", path=dir_path
+                    "Proton-GE override path is invalid: {path}", path=dir_path
                 )
                 check["command"] = ""
-        # File overrides (umu-run, winetricks, protontricks, vulkaninfo)
+        # File overrides (umu-run, winetricks, vulkaninfo)
         if (
             key in saved_overrides
             and saved_overrides[key]
@@ -567,14 +572,13 @@ CHECK_SECTIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "Wine",
             "umu-run",
             "Winetricks",
-            "Protontricks",
             "Vulkan",
             "32-bit Vulkan",
         ),
     ),
     ("Runtime Libraries", ("Runtime libraries",)),
     ("Proton Builds", ("Proton Builds",)),
-    ("Optional Enhancements", ("GameMode", "MangoHud")),
+    ("Optional Enhancements", ("GameMode", "MangoHud", "NTSync")),
 )
 
 
@@ -619,7 +623,7 @@ class SystemCheckPage(QWidget):
         root.setSpacing(16)
         scroll.setWidget(content)
 
-        self.summary = QLabel(tr("Checking system readiness..."))
+        self.summary = QLabel(tr("Checking system readiness"))
         self.summary.setObjectName("accent")
         self.summary.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         root.addWidget(self.summary)
@@ -683,9 +687,8 @@ class SystemCheckPage(QWidget):
             ("steam", "Steam executable", False),
             ("umu-run", "umu-run executable", False),
             ("winetricks", "Winetricks executable", False),
-            ("protontricks", "Protontricks executable", False),
             ("vulkaninfo", "Vulkan info executable", False),
-            ("umu_proton", "GE-Proton build", True),
+            ("umu_proton", "Proton-GE build", True),
         ):
             self._add_override_row(override_layout, key, label, directory)
         root.addWidget(override_card)
@@ -698,7 +701,7 @@ class SystemCheckPage(QWidget):
         """Pre-populate every section with a single CHECKING... placeholder."""
         for title, layout in self._sections.items():
             clear_layout(layout)
-            self._add_row(layout, title, tr("Scanning..."), "checking", "")
+            self._add_row(layout, title, tr("Scanning"), "checking", "")
 
     def showEvent(self, event) -> None:
         """Re-run checks when revisiting the page if the last run is stale."""
@@ -732,11 +735,11 @@ class SystemCheckPage(QWidget):
         self._pending_error = None
         self._refresh_start = time.monotonic()
         self.refresh_button.setEnabled(False)
-        self.refresh_button.setText(tr("Checking..."))
+        self.refresh_button.setText(tr("Checking"))
         self.checking_bar.show()
-        self.summary.setText(tr("Checking system readiness..."))
+        self.summary.setText(tr("Checking system readiness"))
         for lbl in self._status_labels.values():
-            lbl.setText(tr("Checking..."))
+            lbl.setText(tr("Checking"))
             lbl.setObjectName("statusChecking")
             lbl.style().unpolish(lbl)
             lbl.style().polish(lbl)
@@ -757,6 +760,9 @@ class SystemCheckPage(QWidget):
             self._pending_result = result
             self._settling = True
             delay_ms = int((self._min_check_seconds - elapsed) * 1000)
+            if getattr(self, "_pending_timer", None) is not None:
+                self._pending_timer.stop()
+                self._pending_timer.deleteLater()
             self._pending_timer = QTimer(self)
             self._pending_timer.setSingleShot(True)
             self._pending_timer.timeout.connect(self._apply_checks)
@@ -781,7 +787,7 @@ class SystemCheckPage(QWidget):
         _missing = {
             "label": "?",
             "state": "missing",
-            "detail": "Data unavailable.",
+            "detail": tr("Data unavailable."),
             "command": "",
         }
         try:
@@ -865,7 +871,7 @@ class SystemCheckPage(QWidget):
         status_text = {
             "ready": tr("Installed"),
             "optional": tr("Optional"),
-            "checking": tr("Checking..."),
+            "checking": tr("Checking"),
         }.get(state_text, tr("Missing"))
         status_object = {
             "ready": "statusReady",
@@ -934,7 +940,7 @@ class SystemCheckPage(QWidget):
         )
         self._override_checks[key] = automatic
         row.addWidget(automatic)
-        browse = QPushButton(tr("Browse..."))
+        browse = QPushButton(tr("Browse"))
         browse.setObjectName("secondary")
         browse.clicked.connect(
             lambda _checked=False, key=key, edit=edit, directory=directory: (

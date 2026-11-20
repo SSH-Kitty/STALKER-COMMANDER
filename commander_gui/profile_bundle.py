@@ -63,9 +63,15 @@ _BRANCH_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,199}")
 
 
 def _valid_source_url(value: str) -> bool:
-    """An http(s) URL with a host - no file://, no bare paths."""
+    """An https URL with a host - no file://, no bare paths, and plain http
+    only to this machine (a shared bundle's mod sources over http could be
+    swapped on the way)."""
+    from .network import is_loopback_host
+
     parts = urllib.parse.urlsplit(value.strip())
-    return parts.scheme in ("http", "https") and bool(parts.netloc)
+    if not parts.netloc:
+        return False
+    return parts.scheme == "https" or (parts.scheme == "http" and is_loopback_host(parts.hostname))
 
 
 def _valid_branch(value: str) -> bool:
@@ -88,16 +94,6 @@ def _valid_source_value(name: str, value: object) -> bool:
 
 class ProfileBundleError(ValueError):
     """Raised when a bundle cannot be built or read."""
-
-
-def non_default_sources(profile: CliProfile) -> list[tuple[str, str]]:
-    """``(field, value)`` for every download source differing from the default."""
-    default = CliProfile()
-    return [
-        (name, getattr(profile, name))
-        for name in SOURCE_FIELDS
-        if getattr(profile, name) != getattr(default, name)
-    ]
 
 
 def reset_sources(profile: CliProfile) -> None:
@@ -188,7 +184,7 @@ def read_profile_bundle(bundle_path: Path) -> ImportedProfileBundle:
         raise ProfileBundleError(f"Could not read {bundle_path.name}: {exc}") from exc
     try:
         manifest = json.loads(manifest_raw.decode("utf-8", errors="replace"))
-    except (json.JSONDecodeError, UnicodeError) as exc:
+    except (json.JSONDecodeError, UnicodeError, RecursionError) as exc:  # deep nesting
         raise ProfileBundleError(f"{bundle_path.name} is corrupted: {exc}") from exc
     if not isinstance(manifest, dict):
         raise ProfileBundleError(f"{bundle_path.name} is corrupted: no settings found.")

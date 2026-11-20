@@ -3,6 +3,7 @@ import io
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tarfile
@@ -13,7 +14,7 @@ import unittest
 import urllib.request
 from pathlib import Path
 from typing import ClassVar
-from unittest.mock import Mock, call, patch
+from unittest.mock import Mock, patch
 
 from commander_gui import assistant_launcher, autostart, gui_settings, network
 from commander_gui.assistant_launcher import assistant_command, launch_assistant
@@ -48,7 +49,6 @@ from commander_gui.modlist import (
     grouped,
     install_conflict,
     rename_category,
-    rename_mod,
     reorder_to_original,
     set_status_at,
 )
@@ -102,8 +102,8 @@ from commander_gui.ui.utilities_page import (
     _save_moved_profile,
 )
 from commander_gui.updates import (
+    _version_from_patchnotes_or_readme,
     diff_records,
-    latest_version_human,
     local_modpack_records,
     remote_version,
 )
@@ -117,6 +117,21 @@ from commander_gui.winetricks import (
 
 #: The first bytes of a real type-2 AppImage: ELF magic, then "AI\\x02" at 8.
 _FAKE_APPIMAGE_HEADER = b"\x7fELF\x02\x01\x01\x00AI\x02\x00\x00\x00\x00\x00"
+
+class InlineTask:
+    """BackgroundTask stand-in that runs its callable at start()."""
+
+    def __init__(self, fn, *args, parent=None, **kwargs):
+        self._call = lambda: fn(*args, **kwargs)
+        self._slots = []
+        self.result = Mock(connect=self._slots.append)
+        self.error = Mock()
+
+    def start(self):
+        value = self._call()
+        for slot in self._slots:
+            slot(value)
+
 
 class AssistantLauncherTests(unittest.TestCase):
     def test_bundled_assistant_command_uses_payload_python(self):
@@ -638,7 +653,7 @@ class RegressionTests(unittest.TestCase):
         from commander_gui.ui.install_page import _full_install_args
 
         self.assertEqual(
-            _full_install_args(False, False, False, False), ["full-install"]
+            _full_install_args(False, False, False, False, False), ["full-install"]
         )
         self.assertEqual(
             _full_install_args(True, True, True, True),
@@ -648,8 +663,255 @@ class RegressionTests(unittest.TestCase):
                 "--preserve-user-settings",
                 "--preserve-mcm-settings",
                 "--skip-extract-on-hash-match",
+                "--skip-github-downloads",
             ],
         )
+
+    def test_full_install_args_offline_passes_the_archive(self):
+        """CLI 1.41 removed --offline; the archive carries both lists."""
+        from commander_gui.ui.install_page import _full_install_args
+
+        args = _full_install_args(False, False, False, offline_archive="o.tar", anomaly_mirror=True)
+        self.assertEqual(args[-2:], ["--offline-archive-path", "o.tar"])
+        self.assertNotIn("--offline", args)
+        self.assertNotIn("--use-anomaly-mirror", args)
+        self.assertNotIn("--offline-archive-path", _full_install_args(False, False, False))
+
+    def test_offline_checkbox_turns_off_minimal_and_requires_lists(self):
+        """Minimal deletes the cache an offline install depends on."""
+        from PySide6.QtWidgets import QApplication
+
+        from commander_gui.ui.install_page import InstallPage, offline_install_problem
+
+        QApplication.instance() or QApplication([])
+        with tempfile.TemporaryDirectory() as tmp:
+            profile = CliProfile(
+                active=True,
+                profile_name="Test",
+                anomaly=str(Path(tmp) / "anomaly"),
+                gamma=str(Path(tmp) / "gamma"),
+                cache=str(Path(tmp) / "cache"),
+                mo2_profile="G.A.M.M.A",
+            )
+
+            class FakeWindow:
+                settings = CliSettings(profiles=[profile])
+                install_busy = False
+                install_operation = None
+
+                def refresh_settings(self):
+                    pass
+
+                def set_install_busy(self, *a, **kw):
+                    pass
+
+                def statusBar(self):
+                    return Mock()
+
+            page = InstallPage(FakeWindow())
+            # The step track opens on step 1, follows each step's status,
+            # and a running install opens its step.
+            self.assertEqual(page._step, 0)
+            self.assertEqual(page._steps[2].state, "missing")
+            # Every winetricks verb has a row on the Dependencies step.
+            from commander_gui.winetricks import WINETRICKS_VERBS
+
+            self.assertLessEqual(set(WINETRICKS_VERBS), set(page.deps_rows))
+            # Step 1 previews a newly picked Installation directory.
+            self.assertEqual(page.folder_tiles["anomaly"].state, "warn")
+            page.root_card_edit.setText(str(Path(tmp) / "new"))
+            (Path(tmp) / "new" / "anomaly").mkdir(parents=True)
+            page._refresh_folder_tiles(profile)
+            self.assertEqual(page.folder_tiles["anomaly"].state, "ok")
+            self.assertEqual(page.folder_tiles["gamma"].value.text(), "Not created")
+            # The Verify pill's "N min ago" is re-counted from the saved check.
+            from commander_gui.ui import install_page as ip
+
+            saved = {ip._VERIFY_LAST_KEY: {profile.gamma: {"verdict": "snapshot", "time": time.time() - 600}}}
+            page._set_verify_pill("snapshot", "Snapshot saved · just now")
+            with patch.object(ip.gui_settings, "load_gui_settings", return_value=saved):
+                page._refresh_verify_age()
+            self.assertEqual(page.verify_pill.text(), "Snapshot saved · 10 min ago")
+            page.on_install_activity_changed("gamma")
+            self.assertEqual(page._step, 3)
+            # While Anomaly installs, GAMMA's step says so in one line; the
+            # progress panel (table always open) sits on Anomaly's step, or
+            # on the Automatic card while that shows.
+            FakeWindow.install_operation = "anomaly"
+            page._show_step(3)
+            self.assertTrue(page.progress_panel.isHidden())
+            self.assertIn("Anomaly is installing", page.progress_note.text())
+            page._show_step(2)
+            self.assertFalse(page.progress_panel.isHidden())
+            self.assertTrue(page.progress_note.isHidden())
+            self.assertTrue(page.full_progress.table_toggle.isHidden())
+            page._show_view("auto")
+            self.assertIs(page.progress_panel.parentWidget(), page._auto_card)
+            self.assertFalse(page.progress_panel.isHidden())
+            page._show_view("manual", 3)
+            self.assertIs(page.progress_panel.parentWidget(), page._fade_box)
+            FakeWindow.install_operation = None
+            page._show_step(3)
+            # Step 3 names the step 4 options a chained GAMMA install uses.
+            self.assertFalse(page.gamma_chain_note.isHidden())
+            self.assertIn("Auto-retry", page.gamma_chain_note.text())
+            page.checkboxes["minimal"].setChecked(True)
+            page.checkboxes["offline"].setChecked(True)
+            page.offline_edit.setText(str(Path(tmp) / "offline.tar"))
+            self.assertFalse(page.checkboxes["minimal"].isChecked())
+            self.assertFalse(page.checkboxes["minimal"].isEnabled())
+            self.assertNotIn("--minimal", page._build_full_command())
+            self.assertIn("--offline-archive-path", page._build_full_command())
+            self.assertEqual(page.install_button.text(), "Install GAMMA offline")
+            # `anomaly install` can't run offline: no auto-chain, no Anomaly button.
+            auto = page.anomaly_checkboxes["auto_continue_gamma"]
+            self.assertFalse(auto.isChecked())
+            self.assertFalse(auto.isEnabled())
+            self.assertFalse(page.anomaly_button.isEnabled())
+            self.assertFalse(page.anomaly_offline_note.isHidden())
+            page.checkboxes["offline"].setChecked(False)
+            self.assertTrue(page.anomaly_offline_note.isHidden())
+            self.assertIn("Minimal", page.gamma_chain_note.text())
+            self.assertEqual(page.install_button.text(), "Install GAMMA")
+            # The options switched off for offline come back as they were.
+            self.assertTrue(auto.isChecked())
+            self.assertTrue(auto.isEnabled())
+            self.assertTrue(page.checkboxes["auto_retry_large_files"].isChecked())
+            self.assertTrue(page.anomaly_button.isEnabled())
+            page.checkboxes["offline"].setChecked(True)
+
+            archive = Path(tmp) / "offline.tar"
+            self.assertIsNotNone(offline_install_problem(""))
+            # A cache unpacked by hand, archive deleted: points to a normal install.
+            unpacked = Path(tmp) / "unpacked"
+            unpacked.mkdir()
+            (unpacked / "mod.zip").write_bytes(b"x")
+            self.assertIn("Untick Offline", offline_install_problem("", str(unpacked)))
+            self.assertIsNotNone(offline_install_problem(str(archive)))
+            archive.write_bytes(b"x")
+            self.assertIsNone(offline_install_problem(str(archive)))
+
+    def test_automatic_install_chains_dependencies_into_anomaly_and_gamma(self):
+        """Automatic: defaults back on, no dependencies pop-up, and their
+        end starts Anomaly + GAMMA instead of the "installed" pop-up."""
+        from PySide6.QtWidgets import QApplication
+
+        from commander_gui.ui import install_page as ip
+
+        QApplication.instance() or QApplication([])
+        with tempfile.TemporaryDirectory() as tmp:
+            profile = CliProfile(
+                active=True,
+                profile_name="Test",
+                anomaly=str(Path(tmp) / "anomaly"),
+                gamma=str(Path(tmp) / "gamma"),
+                cache=str(Path(tmp) / "cache"),
+                mo2_profile="G.A.M.M.A",
+            )
+
+            class FakeWindow:
+                settings = CliSettings(profiles=[profile])
+                install_busy = False
+                install_operation = None
+
+                def refresh_settings(self):
+                    pass
+
+                def set_install_busy(self, *a, **kw):
+                    pass
+
+                def statusBar(self):
+                    return Mock()
+
+            page = ip.InstallPage(FakeWindow())
+            # Nothing installed: the tab opens on the Automatic / Manual choice.
+            page.show()
+            self.assertFalse(page._chooser_card.isHidden())
+            self.assertTrue(page._wizard_card.isHidden())
+            page.checkboxes["minimal"].setChecked(True)
+            page.auto_root_edit.setText(str(Path(tmp) / "root"))
+            page._wt_installed = False
+            yes = ip.QMessageBox.StandardButton.Yes
+            # Offline without an extracted cache stops before anything is made.
+            page.auto_offline.setChecked(True)
+            with (
+                patch.object(ip, "game_running", return_value=False),
+                patch.object(ip.QMessageBox, "question") as question,
+                patch.object(ip.QMessageBox, "warning") as warning,
+            ):
+                page._start_automatic_install()
+            warning.assert_called_once()
+            question.assert_not_called()
+            self.assertFalse((Path(tmp) / "root").exists())
+            page.auto_offline.setChecked(False)
+            with (
+                patch.object(ip, "game_running", return_value=False),
+                patch.object(ip.QMessageBox, "question", return_value=yes) as question,
+                patch.object(ip.QMessageBox, "information") as info,
+                patch.object(page, "_persist_dirs", return_value=True),
+                patch.object(page, "_start_winetricks") as winetricks,
+                patch.object(page, "start_auto_install", return_value=True) as chain,
+            ):
+                page._start_automatic_install()
+                self.assertEqual(question.call_count, 1)
+                info.assert_not_called()
+                self.assertTrue((Path(tmp) / "root" / "gamma").is_dir())
+                self.assertFalse(page.checkboxes["minimal"].isChecked())
+                winetricks.assert_called_once_with(then_install=True)
+                self.assertTrue(page._auto_active)
+                page._wt_then_install = True
+                page._wt_dialog_done(0)
+                chain.assert_called_once_with(include_anomaly=True)
+                info.assert_not_called()
+                self.assertFalse(page._wt_then_install)
+                # A plain Install Dependencies run still reports its result.
+                page._wt_dialog_done(0)
+                info.assert_called_once()
+                chain.assert_called_once()
+            # Over an installed GAMMA, Automatic would reset Preserve
+            # user.ltx/MCM: it is greyed out and refuses to start.
+            with patch.object(ip, "gamma_installed", return_value=True):
+                page._show_view("chooser")
+                self.assertFalse(page._auto_choice.isEnabled())
+                self.assertEqual(page._auto_choice.tag.text(), "For new installs")
+                with patch.object(page, "_create_install_folders") as folders:
+                    page._start_automatic_install()
+                folders.assert_not_called()
+                # Developer mode unlocks it, and Start install then runs.
+                with (
+                    patch.object(ip.gui_settings, "developer_feature", return_value=True),
+                    patch.object(ip, "game_running", return_value=False),
+                    patch.object(ip.QMessageBox, "question", return_value=yes),
+                    patch.object(page, "_create_install_folders", return_value=False) as folders,
+                ):
+                    page._show_view("chooser")
+                    self.assertTrue(page._auto_choice.isEnabled())
+                    page._start_automatic_install()
+                folders.assert_called_once_with(quiet=True)
+            page._show_view("chooser")
+            self.assertTrue(page._auto_choice.isEnabled())
+
+    def test_offline_archive_is_remembered_only_while_it_exists(self):
+        from commander_gui.ui.install_page import offline_archive
+
+        with tempfile.TemporaryDirectory() as tmp:
+            archive = Path(tmp) / "offline.tar"
+            with patch(
+                "commander_gui.ui.install_page.gui_settings.load_gui_settings",
+                return_value={"offline_archive": str(archive)},
+            ):
+                self.assertEqual(offline_archive(), "")
+                archive.write_bytes(b"x")
+                self.assertEqual(offline_archive(), str(archive))
+
+    def test_offline_unpack_progress_is_not_install_progress(self):
+        """The archive's own [1/1] line must not fill the install bar."""
+        from commander_gui.parsers import parse_progress_line
+
+        unpack = parse_progress_line("[03:10:08] offline.tar | Extract | 100.00% | [1/1]")
+        self.assertTrue(unpack.offline_unpack)
+        addon = parse_progress_line("[03:10:08] Stealth Overhaul | Extract | 100.00% | [1/1]")
+        self.assertFalse(addon.offline_unpack)
 
     def test_repair_install_args_always_preserve_user_content(self):
         """Verify & Repair must never touch user.ltx or MCM settings."""
@@ -717,6 +979,82 @@ class RegressionTests(unittest.TestCase):
         )
         self.assertIsNone(note)
 
+    def test_broken_github_archive_is_replaced_not_reused_forever(self):
+        """A cut-off GitHub download made every resume fail on the same zip:
+        the CLI reuses it without an MD5 check. It must be removed (or swapped
+        for the user's own download) so the next run can succeed."""
+        from commander_gui.ui.install_page import (
+            _broken_archive,
+            _replace_broken_archive,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            downloads = Path(tmp) / "gamma" / "downloads"
+            downloads.mkdir(parents=True)
+            broken = downloads / "Sights-and-Optics-retexture-by-Meowie.zip"
+            url = (
+                "https://github.com/andtheherois/Sights-and-Optics-retexture-by-Meowie"
+                "/releases/download/2.9.1/Sights.Optics-2.9.1.zip"
+            )
+            # Verbatim shape of the real captured failure.
+            output = (
+                "[03:03:26] Stalker Anomaly | Extract | 99.00% | [411/417]\n"
+                "Install failed! Error extracting github record\n"
+                "Name: Sights and Optics Retexture\n"
+                "Archive Name: Sights-and-Optics-retexture-by-Meowie.zip\n"
+                f"Url: {url}\n"
+                f"Download Path: {broken}\n"
+                "Exception Message: Error executing unzip\n"
+                "StdErr:   End-of-central-directory signature not found.  Either this file is not\n"
+                "Exit Code: 9\n"
+            )
+            found = _broken_archive(output)
+            self.assertEqual(found, (str(broken), url))
+            gamma = str(Path(tmp) / "gamma")
+
+            broken.write_bytes(b"cut off")
+            self.assertEqual(_replace_broken_archive(*found, gamma), "deleted")
+            self.assertFalse(broken.exists())
+
+            broken.write_bytes(b"cut off")
+            (downloads / "Sights.Optics-2.9.1.zip").write_bytes(b"good")
+            self.assertEqual(_replace_broken_archive(*found, gamma), "renamed")
+            self.assertEqual(broken.read_bytes(), b"good")
+
+            # Never touch anything outside this profile's downloads folder.
+            outside = Path(tmp) / "other.zip"
+            outside.write_bytes(b"x")
+            self.assertIsNone(_replace_broken_archive(str(outside), url, gamma))
+            self.assertTrue(outside.exists())
+
+        # 7zz's wording for a cut-off .7z saved under a .zip name (FDDA).
+        self.assertIsNotNone(
+            _broken_archive(
+                output.replace(
+                    "StdErr:   End-of-central-directory signature not found.  Either this file is not\n",
+                    "StdErr: ERROR: x.zip\nOpen ERROR: Cannot open the file as [zip] archive\n"
+                    "ERRORS:\nIs not archive\n",
+                )
+            )
+        )
+
+        # CLI 1.41's 7-Zip library, captured from real runs.
+        for stderr in (
+            "Exception Message: 1 item(s) failed to extract from x.zip\n  cache/big.bin: DataError\n",
+            "Exception Message: Cannot open archive as zip, it may be corrupt or truncated: x.zip\n",
+        ):
+            self.assertIsNotNone(
+                _broken_archive(
+                    output.replace("Exception Message: Error executing unzip\n", stderr)
+                    .replace("StdErr:   End-of-central-directory signature not found.  Either this file is not\n", "")
+                )
+            )
+
+        # A failure that isn't a broken archive (full disk) is left alone.
+        self.assertIsNone(
+            _broken_archive(output.replace("End-of-central-directory signature not found", "write error (disk full?)"))
+        )
+
     def test_looks_like_network_failure_matches_real_git_clone_failure(self):
         from commander_gui.ui.install_page import _looks_like_network_failure
 
@@ -745,6 +1083,20 @@ class RegressionTests(unittest.TestCase):
         self.assertIn("GitHub or network", summary)
         self.assertIn("Exit code: 1", detail)
         self.assertIn("SSL error", detail)
+
+    def test_cloudflare_challenge_is_explained_not_called_a_cancel(self):
+        # CLI 1.37 cancels the remaining batch after a challenge, so the
+        # trace also contains OperationCanceledException.
+        from assistant.analyzers.cli_log import _classify
+        from commander_gui.ui.install_page import _install_failure_message
+
+        output = (
+            "Cloudflare challenge detected when retrieving: https://www.moddb.com/x\n"
+            "System.OperationCanceledException: The operation was canceled."
+        )
+        summary, _detail = _install_failure_message(1, output, None)
+        self.assertIn("Cloudflare", summary)
+        self.assertEqual(_classify("error downloading", output.lower()), "cloudflare")
 
     def test_install_failure_message_falls_back_for_unrecognized_failures(self):
         from commander_gui.ui.install_page import _install_failure_message
@@ -782,10 +1134,10 @@ class RegressionTests(unittest.TestCase):
             "LibGit2Sharp.LibGit2SharpException: SSL error: unknown error\n"
         )
         summary, _detail = _install_failure_message(1, ssl_output, "")
-        self.assertIn("always restarts from scratch", summary)
+        self.assertIn("starts again from the beginning", summary)
         # Stalker_GAMMA failing is not gamma_large_files_v2 failing - the
         # rate-limit note must not be misattributed to the wrong repo.
-        self.assertNotIn("GitHub rate limit", summary)
+        self.assertNotIn("GitHub is most likely limiting your downloads", summary)
 
         clone_output = (
             "Install failed! Error downloading from Gamma Large Files Repo\n"
@@ -797,8 +1149,8 @@ class RegressionTests(unittest.TestCase):
             "repository\n"
         )
         summary, _detail = _install_failure_message(1, clone_output, "")
-        self.assertIn("always restarts from scratch", summary)
-        self.assertIn("GitHub rate limit", summary)
+        self.assertIn("starts again from the beginning", summary)
+        self.assertIn("GitHub is most likely limiting your downloads", summary)
 
     def test_looks_like_gamma_large_files_failure_is_repo_specific(self):
         from commander_gui.ui.install_page import (
@@ -1067,7 +1419,7 @@ class RegressionTests(unittest.TestCase):
             "Exception Message: SSL error: unknown error\n"
         )
         summary, _detail = _install_failure_message(1, output, "")
-        self.assertNotIn("always restarts from scratch", summary)
+        self.assertNotIn("starts again from the beginning", summary)
 
     def test_gamma_progress_uses_per_archive_average(self):
         """GAMMA overall bar uses the CLI counter and current item fraction."""
@@ -1078,9 +1430,11 @@ class RegressionTests(unittest.TestCase):
         # The current item contributes fractionally instead of making the bar
         # wait for the archive to finish.
         area.on_line("[00:00:01] Mod A | Download | 50% | [1/10]")
-        self.assertEqual(area.bar.value(), 5)  # 0.5/10 * 100
+        # Ordinary archives share half the bar (the heavy repos hold the
+        # rest): 7 of the 10 items are ordinary.
+        self.assertEqual(area.bar.value(), 4)  # 0.5/7 * 50
         area.on_line("[00:00:02] Mod B | Download | 80% | [2/10]")
-        self.assertEqual(area.bar.value(), 18)  # (1 + 0.8)/10 * 100 = 18
+        self.assertEqual(area.bar.value(), 13)  # (1 + 0.8)/7 * 50
 
     def test_aggregate_progress_value_is_bounded(self):
         self.assertEqual(aggregate_progress_value(1, 10, 0.5), 5)
@@ -1194,6 +1548,18 @@ class RegressionTests(unittest.TestCase):
         )
         self.assertEqual(area.bar.value(), 100)
 
+    def test_gamma_progress_resume_does_not_jump_to_98(self):
+        """A resume reports every finished mod as Skipped before the heavy
+        repos say anything - the bar must keep their half free, not pin at
+        ~98% (it never goes back down)."""
+        from commander_gui.ui.common import ProgressArea
+
+        area = ProgressArea(show_table=True)
+        area.on_line("[00:00:01] Mod A | Skipped | 100% | [566/577]")
+        self.assertEqual(area.bar.value(), 49)
+        area.on_line("[00:00:02] stalker_gamma | Extract | 100% | [567/577]")
+        self.assertEqual(area.bar.value(), 66)
+
     def test_gamma_progress_table_hides_row_stuck_on_a_stale_line(self):
         """Regression test for the reported frozen-addon-row bug.
 
@@ -1240,40 +1606,6 @@ class RegressionTests(unittest.TestCase):
         row = area.table._rows["Mod Z"]
         self.assertFalse(area.table.isRowHidden(row))
 
-    def test_heavy_notice_hides_when_install_finishes_successfully(self):
-        """Regression test: the "large repository downloading in the
-
-        background" banner must not survive past the run's own terminal
-        state - it used to only be hidden by a per-line check that could
-        miss the run's actual last progress line, leaving it stuck
-        visible even after the install had fully completed.
-        """
-        from commander_gui.ui.common import ProgressArea
-
-        area = ProgressArea(show_table=True)
-        area.on_line("[00:00:01] gamma_large_files_v2 | Download | 30% | [1/500]")
-        self.assertFalse(area.heavy_notice_label.isHidden())
-        area.on_finished(0, "Install complete!")
-        self.assertTrue(area.heavy_notice_label.isHidden())
-
-    def test_heavy_notice_hides_when_install_fails(self):
-        from commander_gui.ui.common import ProgressArea
-
-        area = ProgressArea(show_table=True)
-        area.on_line("[00:00:01] gamma_large_files_v2 | Download | 30% | [1/500]")
-        self.assertFalse(area.heavy_notice_label.isHidden())
-        area.on_finished(1, "error: something went wrong")
-        self.assertTrue(area.heavy_notice_label.isHidden())
-
-    def test_heavy_notice_hides_when_install_is_cancelled(self):
-        from commander_gui.ui.common import ProgressArea
-
-        area = ProgressArea(show_table=True)
-        area.on_line("[00:00:01] gamma_large_files_v2 | Download | 30% | [1/500]")
-        self.assertFalse(area.heavy_notice_label.isHidden())
-        area.on_cancelled()
-        self.assertTrue(area.heavy_notice_label.isHidden())
-
     def test_notify_desktop_is_a_noop_without_notify_send(self):
         with patch("commander_gui.ui.common.shutil.which", return_value=None):
             common.notify_desktop("Title", "Message")  # must not raise
@@ -1281,12 +1613,39 @@ class RegressionTests(unittest.TestCase):
     def test_notify_desktop_spawns_notify_send_when_available(self):
         with (
             patch("commander_gui.ui.common.shutil.which", return_value="/usr/bin/notify-send"),
+            patch("commander_gui.ui.common._notify_send_has_actions", return_value=False),
             patch("commander_gui.ui.common.subprocess.Popen") as mock_popen,
         ):
             common.notify_desktop("Title", "Message")
         args = mock_popen.call_args.args[0]
         self.assertIn("Title", args)
         self.assertIn("Message", args)
+        self.assertIn("--hint=string:desktop-entry:stalker-gamma-commander", args)
+        self.assertFalse(any(a.startswith("--action") for a in args))
+
+    def test_notify_desktop_button_raises_window_and_runs_its_action(self):
+        clicked = Mock()
+        with (
+            patch("commander_gui.ui.common.shutil.which", return_value="/usr/bin/notify-send"),
+            patch("commander_gui.ui.common._notify_send_has_actions", return_value=True),
+            patch("commander_gui.ui.common.QProcess") as mock_process,
+            patch("commander_gui.ui.common._raise_main_window") as mock_raise,
+        ):
+            common.notify_desktop("Title", "Message", [("Update now", clicked)])
+            process = mock_process.return_value
+            program, args = process.start.call_args.args
+            self.assertEqual(program, "/usr/bin/notify-send")
+            self.assertIn("--action=a0=Update now", args)
+            self.assertEqual(args[-2:], ["Title", "Message"])
+            finished = process.finished.connect.call_args.args[0]
+            # Dismissed without a click: nothing happens.
+            process.readAllStandardOutput.return_value = b""
+            finished(0)
+            mock_raise.assert_not_called()
+            process.readAllStandardOutput.return_value = b"a0\n"
+            finished(0)
+        mock_raise.assert_called_once()
+        clicked.assert_called_once()
 
     def test_on_full_finished_notifies_only_when_the_window_is_not_active(self):
         """Regression test: a finished/failed GAMMA install must surface a
@@ -1324,7 +1683,11 @@ class RegressionTests(unittest.TestCase):
                 def isActiveWindow(self):
                     return self.active
 
+                def set_page(self, key):
+                    self.pages.append(key)
+
             window = FakeWindow()
+            window.pages = []
             page = InstallPage(window)
 
             with patch("commander_gui.ui.install_page.notify_desktop") as mock_notify:
@@ -1336,6 +1699,8 @@ class RegressionTests(unittest.TestCase):
                 window.active = False
                 page._on_full_finished(0, "Install complete!")
             mock_notify.assert_called_once()
+            # A finished install moves on to the Play page.
+            self.assertEqual(window.pages, ["play", "play"])
 
     def test_gamma_progress_table_evicts_stale_rows_mid_install_by_concurrency(
         self,
@@ -1468,20 +1833,6 @@ class RegressionTests(unittest.TestCase):
         self.assertFalse(area.table.isRowHidden(row))
         self.assertEqual(area.table.item(row, 1).text(), "Interrupted")
 
-    def test_heavy_notice_shows_while_a_heavy_repo_is_active(self):
-        from commander_gui.ui.common import ProgressArea
-
-        area = ProgressArea(show_table=True)
-        self.assertTrue(area.heavy_notice_label.isHidden())
-
-        area.on_line("[00:00:01] stalker_gamma | Download | 0% | [1/5]")
-        self.assertFalse(area.heavy_notice_label.isHidden())
-
-        area.on_line("[00:00:02] gamma_setup | Extract | 100% | [2/5]")
-        area.on_line("[00:00:03] gamma_large_files_v2 | Extract | 100% | [3/5]")
-        area.on_line("[00:00:04] stalker_gamma | Extract | 100% | [4/5]")
-        self.assertTrue(area.heavy_notice_label.isHidden())
-
     def test_status_label_updates_are_throttled(self):
         from commander_gui.ui.common import ProgressArea
 
@@ -1516,9 +1867,10 @@ class RegressionTests(unittest.TestCase):
         import tempfile
         from unittest.mock import MagicMock, patch
 
-        from PySide6.QtWidgets import QApplication, QMessageBox
+        from PySide6.QtWidgets import QApplication
 
         from commander_gui.settings import CliProfile
+        from commander_gui.ui.dialogs import MessageBox as QMessageBox
         from commander_gui.ui.mod_manager_page import ModManagerPage
 
         # Setup minimal profile and temp directory
@@ -1567,7 +1919,7 @@ class RegressionTests(unittest.TestCase):
                 # Verify warning was shown
                 mock_warning.assert_called_once()
                 args = mock_warning.call_args[0]
-                self.assertEqual(args[1], "Mod installation failed")
+                self.assertEqual(args[1], "The mod couldn't be installed")
                 self.assertIn("already in the modlist", args[2])
 
                 # Verify _finish_install was called (which handles staging cleanup)
@@ -1823,8 +2175,9 @@ class RegressionTests(unittest.TestCase):
     def test_reinstall_mod_from_cache_explains_when_no_archive_found(self):
         from unittest.mock import MagicMock
 
-        from PySide6.QtWidgets import QApplication, QMessageBox
+        from PySide6.QtWidgets import QApplication
 
+        from commander_gui.ui.dialogs import MessageBox as QMessageBox
         from commander_gui.ui.mod_manager_page import ModManagerPage
 
         QApplication.instance() or QApplication([])
@@ -1832,6 +2185,7 @@ class RegressionTests(unittest.TestCase):
         page.window = MagicMock()
         page.window.install_busy = False
         page._install_active = False
+        page.profile_combo = MagicMock()
 
         with (
             patch.object(page, "_mo2_running", return_value=False),
@@ -1840,6 +2194,12 @@ class RegressionTests(unittest.TestCase):
             patch.object(page, "_start_mod_install") as mock_start,
         ):
             page._reinstall_mod_from_cache("Some Mod")
+            # The archive lookup runs on a BackgroundTask (real QThread).
+            app = QApplication.instance()
+            deadline = time.monotonic() + 5
+            while not mock_info.called and time.monotonic() < deadline:
+                app.processEvents()
+                time.sleep(0.01)
 
         mock_info.assert_called_once()
         mock_start.assert_not_called()
@@ -1848,9 +2208,10 @@ class RegressionTests(unittest.TestCase):
         import tempfile
         from unittest.mock import MagicMock
 
-        from PySide6.QtWidgets import QApplication, QMessageBox
+        from PySide6.QtWidgets import QApplication
 
         from commander_gui.settings import CliProfile
+        from commander_gui.ui.dialogs import MessageBox as QMessageBox
         from commander_gui.ui.mod_manager_page import ModManagerPage
 
         QApplication.instance() or QApplication([])
@@ -1872,6 +2233,7 @@ class RegressionTests(unittest.TestCase):
             page.window.install_busy = False
             page._install_active = False
             page.window.settings.active_profile = profile
+            page.profile_combo = MagicMock()
 
             with (
                 patch.object(page, "_mo2_running", return_value=False),
@@ -1911,9 +2273,10 @@ class RegressionTests(unittest.TestCase):
         duplicate name and delete the freshly-restored files)."""
         from unittest.mock import MagicMock
 
-        from PySide6.QtWidgets import QApplication, QMessageBox
+        from PySide6.QtWidgets import QApplication
 
         from commander_gui.settings import CliProfile
+        from commander_gui.ui.dialogs import MessageBox as QMessageBox
         from commander_gui.ui.mod_manager_page import ModManagerPage
 
         QApplication.instance() or QApplication([])
@@ -2220,6 +2583,32 @@ class RegressionTests(unittest.TestCase):
         self.assertIn("huge.log", manifest)
         self.assertEqual(stats["files"], 5)
 
+    def test_log_dump_hides_the_home_path_and_login_everywhere(self):
+        import zipfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home = root / "home" / "alice"
+            prefix = home / "pfx"
+            appdata = prefix / "drive_c" / "users" / "alice" / "AppData"
+            appdata.mkdir(parents=True)
+            (appdata / "crashdump.json").write_text(f'{{"path": "{home}/game"}}', encoding="utf-8")
+            with (
+                patch("commander_gui.log_dump.Path.home", return_value=home),
+                patch("commander_gui.log_dump.getpass.getuser", return_value="alice"),
+                patch("commander_gui.log_dump._prefix_candidates", side_effect=lambda r: [appdata / "crashdump.json"]),
+            ):
+                target, _stats = build_log_dump(
+                    root / "out", {"wine-prefix": prefix, "anomaly": home / "missing"}
+                )
+            with zipfile.ZipFile(target) as zf:
+                names = zf.namelist()
+                manifest = zf.read("MANIFEST.txt").decode()
+                crash = zf.read("wine-prefix/drive_c/users/user/AppData/crashdump.json").decode()
+        self.assertNotIn("alice", "".join(names))
+        self.assertNotIn(str(home), manifest)
+        self.assertNotIn(str(home), crash)
+
     def test_log_dump_name_suffixes_on_collision(self):
         from datetime import datetime, timezone
 
@@ -2251,7 +2640,7 @@ class RegressionTests(unittest.TestCase):
             with patch.object(gui_settings, "gui_settings_path", return_value=path):
                 state = gui_settings.load_gui_settings()
             self.assertEqual(state["font_size"], 13)
-            self.assertEqual(state["theme"], "gamma")
+            self.assertEqual(state["theme"], "black")
             self.assertEqual(state["prefixes"], {})
 
     def test_gui_settings_rejects_non_finite_playtime_values(self):
@@ -2385,6 +2774,54 @@ class RegressionTests(unittest.TestCase):
             self.assertEqual(len(backups), 1)
             self.assertIn("oops", backups[0].read_text(encoding="utf-8"))
 
+    def test_load_settings_keeps_a_corrupt_file_it_could_not_back_up(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "settings.json"
+            path.write_text("{bad json", encoding="utf-8")
+            with patch.object(Path, "replace", side_effect=OSError("read-only")):
+                settings = load_settings(path)
+            self.assertEqual(len(settings.profiles), 1)
+            self.assertEqual(path.read_text(encoding="utf-8"), "{bad json")
+
+    def test_atomic_write_text_keeps_non_utf8_bytes_it_read(self):
+        from commander_gui import atomic
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "user.ltx"
+            original = b"name = \xcf\xf0\xe8\xe2\xe5\xf2\nbind jump kSPACE\n"
+            path.write_bytes(original)
+            text = path.read_text(encoding="utf-8", errors="surrogateescape")
+            atomic.write_text(path, text)
+            self.assertEqual(path.read_bytes(), original)
+
+    def test_concurrent_gui_settings_saves_keep_every_change(self):
+        from commander_gui import gui_settings
+
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.dict(os.environ, {"XDG_CONFIG_HOME": tmp}),
+        ):
+            real_load = gui_settings.load_gui_settings
+
+            def slow_load():
+                data = real_load()
+                time.sleep(0.01)  # widen the load-then-write window
+                return data
+
+            with patch.object(gui_settings, "load_gui_settings", side_effect=slow_load):
+                workers = [
+                    threading.Thread(
+                        target=gui_settings.save_gui_settings, kwargs={f"key_{n}": n}
+                    )
+                    for n in range(8)
+                ]
+                for worker in workers:
+                    worker.start()
+                for worker in workers:
+                    worker.join()
+            saved = json.loads(gui_settings.gui_settings_path().read_text())
+            self.assertEqual({k: saved[k] for k in saved if k.startswith("key_")}, {f"key_{n}": n for n in range(8)})
+
     def test_load_settings_repeat_corruption_keeps_earlier_backup(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "settings.json"
@@ -2456,6 +2893,40 @@ class RegressionTests(unittest.TestCase):
             self.assertEqual(
                 (mod_dir / "file.txt").read_text(), "original content"
             )
+
+    def test_quarantine_works_with_a_symlinked_mods_folder(self):
+        from commander_gui.repair import quarantine_mod_and_archive
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp) / "gamma"
+            base.mkdir()
+            real_mods = Path(tmp) / "other-drive" / "mods"
+            (real_mods / "Broken").mkdir(parents=True)
+            (base / "mods").symlink_to(real_mods)
+            result = quarantine_mod_and_archive(base, "Broken")
+            self.assertFalse((real_mods / "Broken").exists())
+            self.assertEqual(len(result.items), 1)
+
+    def test_restore_from_quarantine_replaces_a_partial_reinstall(self):
+        from commander_gui.repair import (
+            ModPackRecord,
+            quarantine_mod_and_archive,
+            restore_from_quarantine,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp) / "gamma"
+            folder = ModPackRecord(1, "Broken Mod", "", "", "", "", "", "").folder_name
+            mod_dir = base / "mods" / folder
+            mod_dir.mkdir(parents=True)
+            (mod_dir / "file.txt").write_text("original content")
+            result = quarantine_mod_and_archive(base, folder)
+            # The cancelled reinstall got as far as recreating the folder.
+            mod_dir.mkdir()
+            (mod_dir / "file.txt").write_text("partial")
+
+            self.assertEqual(restore_from_quarantine(result), [])
+            self.assertEqual((mod_dir / "file.txt").read_text(), "original content")
 
     def test_purge_quarantine_permanently_removes_quarantined_copies(self):
         from commander_gui.repair import (
@@ -2540,6 +3011,108 @@ class RegressionTests(unittest.TestCase):
 
         self.assertEqual(len(codes), 1)
         self.assertNotEqual(codes[0], 0)
+
+    @unittest.skipIf(os.name == "nt", "POSIX process groups")
+    def test_cli_worker_cancel_reaches_a_paused_process(self):
+        import time
+
+        from PySide6.QtWidgets import QApplication
+
+        from commander_gui.cli_runner import CliWorker
+
+        QApplication.instance() or QApplication([])
+        script = (
+            "import signal, sys, time\n"
+            "signal.signal(signal.SIGINT, lambda *a: sys.exit(7))\n"
+            "print('ready', flush=True)\n"
+            "time.sleep(30)\n"
+        )
+        worker = CliWorker()
+        worker.setup([sys.executable, "-c", script])
+        codes: list[int] = []
+        worker.finished.connect(lambda rc, _out: codes.append(rc))
+        runner = threading.Thread(target=worker.run)
+        runner.start()
+        deadline = time.monotonic() + 10
+        while worker._process is None and time.monotonic() < deadline:
+            time.sleep(0.05)
+        time.sleep(0.5)  # let the child install its SIGINT handler
+        worker.pause()
+        worker.cancel()
+        runner.join(10)
+        QApplication.processEvents()
+        # Exit code 7 is the child's own cancel handler; the 3s SIGKILL
+        # fallback would have given a negative code instead.
+        self.assertEqual(codes, [7])
+
+    def test_install_dependencies_says_why_while_the_game_is_open(self):
+        from types import SimpleNamespace
+
+        from commander_gui.ui.install_page import InstallPage
+
+        page = SimpleNamespace(
+            window=SimpleNamespace(install_busy=False),
+            _wt_runner=None,
+            _deps_checking=False,
+        )
+        page._warn_game_open = lambda: InstallPage._warn_game_open(page)
+        page._deps_stopped = lambda: InstallPage._deps_stopped(page)
+        with (
+            patch("commander_gui.ui.install_page.game_running", return_value=True),
+            patch("commander_gui.ui.install_page.QMessageBox.warning") as warned,
+            patch("commander_gui.ui.install_page.BackgroundTask") as task,
+        ):
+            InstallPage._start_winetricks(page)
+        warned.assert_called_once()
+        task.assert_not_called()
+
+    def test_proton_remove_rechecks_the_game_after_the_question(self):
+        from types import SimpleNamespace
+
+        from commander_gui.ui.dialogs import MessageBox
+        from commander_gui.ui.proton_manager import ProtonManagerDialog
+
+        QMessageBoxButtons = MessageBox.StandardButton
+        busy = SimpleNamespace(install_busy=False, set_install_busy=Mock())
+        page = SimpleNamespace(window=busy, _busy=lambda: False)
+        page._can_remove = lambda: ProtonManagerDialog._can_remove(page)
+        build = SimpleNamespace(name="GE-Proton9-1", steam_uses=False)
+        with (
+            # Closed when asked, open by the time "Delete" is clicked.
+            patch("commander_gui.ui.proton_manager.game_running", side_effect=[False, True]),
+            patch(
+                "commander_gui.ui.proton_manager.QMessageBox.question",
+                return_value=QMessageBoxButtons.Yes,
+            ),
+            patch("commander_gui.ui.proton_manager.QMessageBox.information"),
+            patch("commander_gui.ui.proton_manager.BackgroundTask") as task,
+        ):
+            ProtonManagerDialog._confirm_remove(page, [build])
+        busy.set_install_busy.assert_not_called()
+        task.assert_not_called()
+
+    @unittest.skipUnless(Path("/proc/self/cmdline").exists(), "Linux /proc")
+    def test_exe_pids_finds_a_process_by_its_command_line(self):
+        import subprocess
+        import time
+
+        from commander_gui.ui.common import exe_pids
+
+        marker = "Commander-Test-Marker.EXE"
+        child = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(30)", marker.lower()]
+        )
+        try:
+            deadline = time.monotonic() + 5
+            while child.pid not in exe_pids(marker) and time.monotonic() < deadline:
+                time.sleep(0.05)
+            self.assertIn(child.pid, exe_pids(marker))
+            self.assertNotIn(os.getpid(), exe_pids("python"))
+        finally:
+            child.kill()
+            child.wait()
+        time.sleep(0.25)  # past the shared scan's 0.2 s
+        self.assertNotIn(child.pid, exe_pids(marker))
 
     def test_install_archive_honours_cancel_during_the_move_phase(self):
         """Regression test: install_archive dropped its cancel_event before
@@ -2891,11 +3464,7 @@ class RegressionTests(unittest.TestCase):
         self.assertNotIn("secret", redacted)
         self.assertIn("[REDACTED]", redacted)
 
-    @patch("commander_gui.ui.common.shutil.which", return_value="/usr/bin/pgrep")
-    @patch("commander_gui.ui.common.subprocess.run")
-    def test_mo2_running_uses_self_excluding_case_insensitive_pattern(
-        self, run, _which
-    ):
+    def test_mo2_running_uses_self_excluding_case_insensitive_pattern(self):
         """Regression test: a bracket expression on only the first letter
 
         (the previous pattern) does not catch Wine/umu-run reporting the
@@ -2906,12 +3475,17 @@ class RegressionTests(unittest.TestCase):
         session (see commander.log evidence: "wrapper exited" followed by
         no "mo2 handoff detected" line at all, ever, for a real session).
         """
-        common._MO2_RUNNING_CACHE = 0.0
-        run.return_value = Mock(returncode=1)
-        self.assertFalse(common.mo2_running())
-        self.assertEqual(run.call_args.args[0], [
-            "/usr/bin/pgrep", "-if", r"ModOrganizer\.exe"
-        ])
+        child = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(30)", "z:/mo2/modorganizer.exe"]
+        )
+        try:
+            common._MO2_RUNNING_CACHE = 0.0
+            self.assertTrue(common.mo2_running())
+        finally:
+            child.kill()
+            child.wait()
+        # A pattern that no running process matches.
+        self.assertFalse(common.process_running(r"no-such-process-[0-9a-f]{32}"))
 
     def test_diagnostics_redacts_quoted_values_with_spaces(self):
         redacted = _redact(
@@ -3037,6 +3611,25 @@ class RegressionTests(unittest.TestCase):
         page._launch_direct()
 
         page._run.assert_not_called()
+
+    def test_mod_manager_open_mo2_goes_through_play_launch(self):
+        # Its own launch skipped the launch options (UMU_RUNTIME_UPDATE=0
+        # etc.) and the Play page never saw the MO2 it started.
+        from commander_gui.ui.mod_manager_page import ModManagerPage
+
+        page = ModManagerPage.__new__(ModManagerPage)
+        play = Mock()
+        page.window = Mock()
+        play._launching = False
+        play._install_busy = False
+        page.window._ensure_page.return_value = play
+        page.profile_combo = Mock()
+        page.profile_combo.currentText.return_value = "My Profile"
+
+        page._open_mo2()
+
+        page.window._ensure_page.assert_called_once_with("play")
+        play._open_mo2.assert_called_once_with("My Profile")
     def _make_play_page_stub(self):
         from commander_gui.ui.play_page import PlayPage
 
@@ -3048,6 +3641,9 @@ class RegressionTests(unittest.TestCase):
         page._monitoring_mo2 = True
         page._mo2_seen = False
         page._handoff_checks = 0
+        page._handoff_limit = 10
+        page._steam_launch = False
+        page._debugger_env = {}
         page._pre_launch_mo2_pids = set()
         page._mo2_launch_pids = set()
         page._game_exe_name = None
@@ -3083,7 +3679,7 @@ class RegressionTests(unittest.TestCase):
         self.assertTrue(page._mo2_seen)
         self.assertEqual(page._mo2_launch_pids, {111})
         self.assertEqual(page._handoff_checks, -1)
-        page._set_result.assert_called_with("MO2 is running...")
+        page._set_result.assert_called_with("Mod Organizer 2 is running")
         page._set_launch_button_state.assert_not_called()
 
     @patch("commander_gui.ui.play_page.mo2_pids", return_value=set())
@@ -3123,6 +3719,62 @@ class RegressionTests(unittest.TestCase):
         page._record_playtime.assert_called_once()
         page._set_result.assert_called_with("GAMMA closed normally.", error=False)
         page._launch_status_clear_timer.start.assert_called_once_with(3000)
+
+    def test_cleared_layout_widgets_never_show_out_of_their_layout(self):
+        """A chip added and cleared in one go used to appear at 640x480 in
+        the page's corner when a modal dialog's event loop ran its queued
+        show before its deferred delete."""
+        from PySide6.QtWidgets import QApplication, QHBoxLayout, QLabel, QWidget
+
+        from commander_gui.ui.common import clear_layout
+
+        QApplication.instance() or QApplication([])
+        parent = QWidget()
+        row = QHBoxLayout(parent)
+        parent.show()
+        chip = QLabel("Co-op mode")
+        row.addWidget(chip)
+        clear_layout(row)
+        QApplication.processEvents()  # runs the queued show, not the delete
+        self.assertFalse(chip.isVisible())
+        parent.close()
+
+    @patch("commander_gui.ui.play_page.debugger_crash_loop", return_value=True)
+    def test_crash_loop_is_caught_without_a_log(self, _loop):
+        """A Steam co-op launch has no launcher.log; the winedbg pile-up in
+        the process list must still stop it."""
+        page = self._make_play_page_stub()
+        page._break_crash_loop = Mock()
+
+        page._on_launch_check("GAMMA", [], None)
+
+        page._break_crash_loop.assert_called_once_with(None)
+
+    @patch("commander_gui.ui.play_page.mo2_pids", return_value=set())
+    def test_steam_launch_that_never_starts_records_no_playtime(self, _mo2_pids):
+        """A Steam co-op launch has no wrapper: MO2 never appearing means
+        Steam did not start it, not a session that came and went."""
+        page = self._make_play_page_stub()
+        page._steam_launch = True
+        page._handoff_checks = page._handoff_limit = 480
+
+        page._on_launch_check("GAMMA", [], None)
+
+        self.assertFalse(page._launching)
+        page._record_playtime.assert_not_called()
+        self.assertTrue(page._set_result.call_args.kwargs["error"])
+
+    @patch("commander_gui.ui.play_page.mo2_pids", return_value={111})
+    @patch("commander_gui.ui.play_page.os.kill")
+    def test_quitting_a_steam_launch_kills_only_its_own_processes(self, kill, _mo2_pids):
+        page = self._make_play_page_stub()
+        page._steam_launch = True
+
+        with patch("commander_gui.ui.play_page._terminate_process_group") as terminate:
+            page._abort_launch("closed")
+
+        terminate.assert_not_called()
+        kill.assert_called_once_with(111, signal.SIGTERM)
 
     @patch("commander_gui.ui.play_page.mo2_pids", return_value=set())
     def test_mo2_handoff_reports_normal_close_after_mo2_exits(self, _mo2_pids):
@@ -3180,7 +3832,7 @@ class RegressionTests(unittest.TestCase):
         self.assertIsNone(page._proc)
         self.assertTrue(page._monitoring_mo2)
         self.assertNotIn(process.pid, page._registry._processes)
-        page._set_result.assert_called_with("Launcher exited; waiting for MO2...")
+        page._set_result.assert_called_with("Waiting for Mod Organizer 2 to open")
         page._set_launch_button_state.assert_not_called()
 
     def test_launch_wrapper_failure_discards_registry_and_reports(self):
@@ -3204,9 +3856,25 @@ class RegressionTests(unittest.TestCase):
         self.assertFalse(page._launching)
         warning.assert_called_once()
         result = page._set_result.call_args.args[0]
-        self.assertIn("exited with an error (code 1)", result)
-        self.assertIn("boom", result)
+        self.assertIn("closed with an error (code 1)", result)
+        # The log goes in the dialog's details, not the Play page's status.
+        self.assertIn("boom", warning.call_args.kwargs["details"])
         page._launch_status_clear_timer.start.assert_called_once_with(3000)
+
+    def test_game_quit_from_its_menu_is_not_an_error(self):
+        from commander_gui.ui.play_page import engine_closed_cleanly, readable_log_tail
+
+        noise = "gamemodeauto: dlopen failed - libgamemode.so: cannot open shared object file"
+        self.assertEqual(readable_log_tail("\n".join([noise] * 20 + ["a", "b", "b", "b"])), "a\nb  (x3)")
+        with tempfile.TemporaryDirectory() as tmp:
+            logs = Path(tmp) / "appdata" / "logs"
+            logs.mkdir(parents=True)
+            log = logs / "xray_player.log"
+            log.write_text("Destroying Direct3D...\n[xrLogger] InternalCloseLog called, terminating thread\n")
+            self.assertTrue(engine_closed_cleanly(tmp, time.time() - 60))
+            self.assertFalse(engine_closed_cleanly(tmp, time.time() + 60))  # an older run's log
+            log.write_text("FATAL ERROR\n[xrLogger] InternalCloseLog called, terminating thread\n")
+            self.assertFalse(engine_closed_cleanly(tmp, time.time() - 60))
 
     def test_abort_launch_cleans_spawned_process_group(self):
         page = self._make_play_page_stub()
@@ -3256,10 +3924,10 @@ class RegressionTests(unittest.TestCase):
 
         terminate.assert_not_called()
 
-    def test_play_page_persist_dirs_expands_tilde(self):
-        from commander_gui.ui.play_page import PlayPage
+    def test_settings_page_persist_dirs_expands_tilde(self):
+        from commander_gui.ui.settings_page import SettingsPage
 
-        page = PlayPage.__new__(PlayPage)
+        page = SettingsPage.__new__(SettingsPage)
         page._persisting = False
         page.window = Mock()
         page.window.install_busy = False
@@ -3269,27 +3937,24 @@ class RegressionTests(unittest.TestCase):
         page.anomaly_edit = Mock(text=Mock(return_value="~/anomaly"))
         page.gamma_edit = Mock(text=Mock(return_value="~/gamma"))
         page.cache_edit = Mock(text=Mock(return_value="~/cache"))
-        page._reload_targets = Mock()
-        page._refresh_preview = Mock()
-        page._update_cache_info = Mock()
 
-        with patch("commander_gui.ui.play_page.mo2_running", return_value=False):
+        with patch("commander_gui.ui.settings_page.game_running", return_value=False):
             page._persist_dirs()
 
         self.assertNotIn("~", profile.anomaly)
         self.assertTrue(Path(profile.anomaly).is_absolute())
         page.anomaly_edit.setText.assert_called_with(profile.anomaly)
 
-    def test_play_page_persist_dirs_refuses_while_busy(self):
-        from commander_gui.ui.play_page import PlayPage
+    def test_settings_page_persist_dirs_refuses_while_busy(self):
+        from commander_gui.ui.settings_page import SettingsPage
 
-        page = PlayPage.__new__(PlayPage)
+        page = SettingsPage.__new__(SettingsPage)
         page._persisting = False
         page.window = Mock()
         page.window.install_busy = True
         page._load_folders = Mock()
 
-        with patch("commander_gui.ui.play_page.QMessageBox.warning") as warning:
+        with patch("commander_gui.ui.settings_page.QMessageBox.warning") as warning:
             page._persist_dirs()
 
         warning.assert_called_once()
@@ -3297,8 +3962,7 @@ class RegressionTests(unittest.TestCase):
         page.window.settings.save.assert_not_called()
 
     def test_cancel_full_install_rechecks_after_dialog_to_avoid_crash(self):
-        from PySide6.QtWidgets import QMessageBox
-
+        from commander_gui.ui.dialogs import MessageBox as QMessageBox
         from commander_gui.ui.install_page import InstallPage
 
         page = InstallPage.__new__(InstallPage)
@@ -3326,8 +3990,7 @@ class RegressionTests(unittest.TestCase):
         runner.cancel.assert_not_called()
 
     def test_cancel_winetricks_rechecks_after_dialog_to_avoid_crash(self):
-        from PySide6.QtWidgets import QMessageBox
-
+        from commander_gui.ui.dialogs import MessageBox as QMessageBox
         from commander_gui.ui.install_page import InstallPage
 
         page = InstallPage.__new__(InstallPage)
@@ -3354,9 +4017,8 @@ class RegressionTests(unittest.TestCase):
         full-install must do the same since it installs Anomaly first too."""
         import tempfile
 
-        from PySide6.QtWidgets import QMessageBox
-
         from commander_gui.settings import CliProfile
+        from commander_gui.ui.dialogs import MessageBox as QMessageBox
         from commander_gui.ui.install_page import InstallPage
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -3377,6 +4039,12 @@ class RegressionTests(unittest.TestCase):
                 "minimal": Mock(isChecked=Mock(return_value=False)),
                 "preserve_user": Mock(isChecked=Mock(return_value=False)),
                 "preserve_mcm": Mock(isChecked=Mock(return_value=False)),
+                "redownload_github": Mock(isChecked=Mock(return_value=False)),
+                "keep_engine_exes": Mock(isChecked=Mock(return_value=False)),
+                "offline": Mock(isChecked=Mock(return_value=False)),
+            }
+            page.anomaly_checkboxes = {
+                "anomaly_mirror": Mock(isChecked=Mock(return_value=False)),
             }
             page._resume_state = None
             page.full_progress = Mock()
@@ -3384,6 +4052,7 @@ class RegressionTests(unittest.TestCase):
             page.anomaly_button = Mock()
             page._checked_archives = set()
             page._cache_timer = Mock()
+            page._auto_active = True
 
             with (
                 patch(
@@ -3399,6 +4068,11 @@ class RegressionTests(unittest.TestCase):
                 runner_cls.return_value = Mock()
                 page._start_full_install()
 
+            # Marked as started before it runs (closing mid-install never
+            # reaches the finished handler), remembering it was Automatic.
+            self.assertEqual(page._resume_state["gamma"], profile.gamma)
+            self.assertTrue(page._resume_state["auto"])
+
             self.assertTrue((base / "anomaly").is_dir())
             self.assertTrue((base / "gamma").is_dir())
             self.assertTrue((base / "cache").is_dir())
@@ -3413,9 +4087,8 @@ class RegressionTests(unittest.TestCase):
         """
         import tempfile
 
-        from PySide6.QtWidgets import QMessageBox
-
         from commander_gui.settings import CliProfile
+        from commander_gui.ui.dialogs import MessageBox as QMessageBox
         from commander_gui.ui.install_page import InstallPage
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -3436,6 +4109,7 @@ class RegressionTests(unittest.TestCase):
             page.install_button = Mock()
             page.anomaly_button = Mock()
             page.anomaly_checkboxes = {
+                "anomaly_mirror": Mock(isChecked=Mock(return_value=False)),
                 "verify_after_install": Mock(isChecked=Mock(return_value=False)),
                 "auto_continue_gamma": Mock(isChecked=Mock(return_value=False)),
             }
@@ -3502,6 +4176,7 @@ class RegressionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             page = self._make_bare_install_page(tmp)
             page.anomaly_checkboxes = {
+                "anomaly_mirror": Mock(isChecked=Mock(return_value=False)),
                 "verify_after_install": Mock(isChecked=Mock(return_value=False)),
                 "auto_continue_gamma": Mock(isChecked=Mock(return_value=True)),
             }
@@ -3519,6 +4194,7 @@ class RegressionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             page = self._make_bare_install_page(tmp)
             page.anomaly_checkboxes = {
+                "anomaly_mirror": Mock(isChecked=Mock(return_value=False)),
                 "verify_after_install": Mock(isChecked=Mock(return_value=False)),
                 "auto_continue_gamma": Mock(isChecked=Mock(return_value=False)),
             }
@@ -3533,7 +4209,7 @@ class RegressionTests(unittest.TestCase):
             page.window.set_install_busy.assert_called_with(False)
 
     def test_verify_after_install_checkbox_runs_a_second_anomaly_check(self):
-        """Regression test: the "Verify files after install" checkbox
+        """Regression test: the "Check Anomaly files after install" checkbox
 
         must run a second `anomaly check` CommandRunner after a
         successful install, before the sequence is considered finished.
@@ -3541,6 +4217,7 @@ class RegressionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             page = self._make_bare_install_page(tmp)
             page.anomaly_checkboxes = {
+                "anomaly_mirror": Mock(isChecked=Mock(return_value=False)),
                 "verify_after_install": Mock(isChecked=Mock(return_value=True)),
                 "auto_continue_gamma": Mock(isChecked=Mock(return_value=False)),
             }
@@ -3564,6 +4241,7 @@ class RegressionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             page = self._make_bare_install_page(tmp)
             page.anomaly_checkboxes = {
+                "anomaly_mirror": Mock(isChecked=Mock(return_value=False)),
                 "verify_after_install": Mock(isChecked=Mock(return_value=False)),
                 "auto_continue_gamma": Mock(isChecked=Mock(return_value=False)),
             }
@@ -3592,6 +4270,7 @@ class RegressionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             page = self._make_bare_install_page(tmp)
             page.anomaly_checkboxes = {
+                "anomaly_mirror": Mock(isChecked=Mock(return_value=False)),
                 "verify_after_install": Mock(isChecked=Mock(return_value=False)),
                 "auto_continue_gamma": Mock(isChecked=Mock(return_value=False)),
             }
@@ -3610,6 +4289,7 @@ class RegressionTests(unittest.TestCase):
 
             page = self._make_bare_install_page(tmp)
             page.anomaly_checkboxes = {
+                "anomaly_mirror": Mock(isChecked=Mock(return_value=False)),
                 "verify_after_install": Mock(isChecked=Mock(return_value=False)),
                 "auto_continue_gamma": Mock(isChecked=Mock(return_value=False)),
             }
@@ -3637,6 +4317,7 @@ class RegressionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             page = self._make_bare_install_page(tmp)
             page.anomaly_checkboxes = {
+                "anomaly_mirror": Mock(isChecked=Mock(return_value=False)),
                 "verify_after_install": Mock(isChecked=Mock(return_value=False)),
                 "auto_continue_gamma": Mock(isChecked=Mock(return_value=True)),
             }
@@ -3655,6 +4336,64 @@ class RegressionTests(unittest.TestCase):
             mock_start_full.assert_called_once_with(skip_confirm=True)
             mock_notify.assert_not_called()
 
+    def test_verify_with_anomaly_unticked_skips_its_check_and_finding(self):
+        """Unticking "Anomaly files" on the Verify step must not run
+        `anomaly check`, and must not report Anomaly as unchecked."""
+        from commander_gui.integrity import build_findings
+
+        with tempfile.TemporaryDirectory() as tmp:
+            page = self._make_bare_install_page(tmp)
+            page._verify_runner = None
+            page.verify_checkboxes = {
+                "check_anomaly": Mock(isChecked=Mock(return_value=False)),
+                "check_cache": Mock(isChecked=Mock(return_value=True)),
+            }
+            page.verify_tiles = {key: Mock() for key in ("anomaly", "mods", "md5", "cache")}
+            for name in ("repair_button", "verify_findings", "verify_progress", "verify_button"):
+                setattr(page, name, Mock())
+            with (
+                patch("commander_gui.ui.install_page.game_running", return_value=False),
+                patch("commander_gui.ui.install_page.clear_layout"),
+                patch("commander_gui.ui.install_page.CommandRunner") as runner,
+                patch.object(page, "_set_verify_pill"),
+                patch.object(page, "_set_verify_console"),
+                patch.object(page, "_start_gamma_verify") as start_gamma,
+            ):
+                page._start_verify()
+            runner.assert_not_called()
+            start_gamma.assert_called_once_with()
+            page.verify_tiles["anomaly"].set_state.assert_called_with("idle", "-", "Skipped")
+            findings = build_findings(anomaly_checked=True)
+            self.assertFalse(any(f.level == "problem" for f in findings))
+
+    def test_anomaly_only_check_skipped_when_full_check_follows_gamma(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            page = self._make_bare_install_page(tmp)
+            on = Mock(isChecked=Mock(return_value=True))
+            page.anomaly_checkboxes = {"verify_after_install": on}
+            page.verify_checkboxes = {"verify_after_gamma": on}
+            page._auto_chain = True
+            self.assertFalse(page._wants_anomaly_only_check())
+            page._auto_chain = False
+            self.assertTrue(page._wants_anomaly_only_check())
+            page.verify_checkboxes = {"verify_after_gamma": Mock(isChecked=Mock(return_value=False))}
+            page._auto_chain = True
+            self.assertTrue(page._wants_anomaly_only_check())
+
+    def test_anomaly_reinstall_chain_hands_keep_settings_to_gamma(self):
+        """Reinstall Anomaly's "Keep user.ltx and MCM settings" choice must
+        reach the GAMMA reinstall it chains into, and be used only once."""
+        with tempfile.TemporaryDirectory() as tmp:
+            page = self._make_bare_install_page(tmp)
+            page._auto_chain = True
+            page._chain_preserve = False
+            with patch.object(page, "_start_full_install") as mock_start_full:
+                page._finish_anomaly_sequence(cancelled=False, install_ok=True)
+            mock_start_full.assert_called_once_with(
+                skip_confirm=True, preserve_user=False, preserve_mcm=False
+            )
+            self.assertIsNone(page._chain_preserve)
+
     def test_reset_auto_chain_ignores_the_anomaly_checkboxes(self):
         """Regression test: GAMMA Reset's own auto-chain
 
@@ -3668,9 +4407,11 @@ class RegressionTests(unittest.TestCase):
             # Checkboxes both off - if the auto-chain were wrongly gated
             # by them, this would fail to chain.
             page.anomaly_checkboxes = {
+                "anomaly_mirror": Mock(isChecked=Mock(return_value=False)),
                 "verify_after_install": Mock(isChecked=Mock(return_value=False)),
                 "auto_continue_gamma": Mock(isChecked=Mock(return_value=False)),
             }
+            page.checkboxes = {"offline": Mock(isChecked=Mock(return_value=False))}
             with (
                 patch("commander_gui.ui.install_page.CommandRunner"),
                 patch.object(page, "_update_install_status"),
@@ -3680,6 +4421,21 @@ class RegressionTests(unittest.TestCase):
                 with patch.object(page, "_start_full_install") as mock_start_full:
                     page._on_anomaly_finished(0, "Anomaly install complete!")
             mock_start_full.assert_called_once_with(skip_confirm=True)
+
+    def test_reset_with_offline_skips_the_online_anomaly_install(self):
+        """`anomaly install` has no offline mode: Offline goes straight to the
+        offline full install, which unpacks Anomaly from the cache."""
+        with tempfile.TemporaryDirectory() as tmp:
+            page = self._make_bare_install_page(tmp)
+            page.checkboxes = {"offline": Mock(isChecked=Mock(return_value=True))}
+            with (
+                patch.object(page, "_start_anomaly_install") as mock_anomaly,
+                patch.object(page, "_start_full_install") as mock_full,
+            ):
+                self.assertTrue(page.start_auto_install(include_anomaly=True))
+            mock_anomaly.assert_not_called()
+            mock_full.assert_called_once_with(skip_confirm=True)
+            self.assertFalse(page._auto_chain)
 
     def test_post_anomaly_verify_finished_resumes_the_chain(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -3738,6 +4494,44 @@ class RegressionTests(unittest.TestCase):
             for cb in page.anomaly_checkboxes.values():
                 self.assertTrue(cb.isEnabled())
 
+    def test_install_gamma_stays_available_as_reinstall(self):
+        """Once GAMMA is installed the button turns into Reinstall instead of
+        greying out - it is the only way to re-unpack mods or apply
+        "Re-download GitHub addons"."""
+        from PySide6.QtWidgets import QApplication
+
+        from commander_gui.settings import CliProfile
+        from commander_gui.ui.install_page import InstallPage
+
+        QApplication.instance() or QApplication([])
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            profile = CliProfile(
+                active=True,
+                profile_name="test",
+                anomaly=str(base / "anomaly"),
+                gamma=str(base / "gamma"),
+                cache=str(base / "cache"),
+            )
+
+            class FakeWindow:
+                settings = CliSettings(profiles=[profile])
+                install_busy = False
+
+                def refresh_settings(self):
+                    pass
+
+            page = InstallPage(FakeWindow())
+            page._resume_state = None
+            with patch("commander_gui.ui.install_page.gamma_installed", return_value=True):
+                page._update_button_states()
+            self.assertTrue(page.install_button.isEnabled())
+            self.assertEqual(page.install_button.text(), "Reinstall GAMMA")
+            with patch("commander_gui.ui.install_page.gamma_installed", return_value=False):
+                page._update_button_states()
+            self.assertTrue(page.install_button.isEnabled())
+            self.assertEqual(page.install_button.text(), "Install GAMMA")
+
     def test_start_post_anomaly_verify_shows_the_cancel_button(self):
         """Regression test: on_finished() (just called for the Anomaly
 
@@ -3758,8 +4552,7 @@ class RegressionTests(unittest.TestCase):
 
         Anomaly-only install too, not just a GAMMA full-install.
         """
-        from PySide6.QtWidgets import QMessageBox
-
+        from commander_gui.ui.dialogs import MessageBox as QMessageBox
         from commander_gui.ui.install_page import InstallPage
 
         page = InstallPage.__new__(InstallPage)
@@ -3778,9 +4571,8 @@ class RegressionTests(unittest.TestCase):
     def test_confirm_install_gamma_dialog_notes_resume_state(self):
         """The confirm dialog must say upfront if this run resumes a prior
         interrupted install, not only as a status-bar toast afterward."""
-        from PySide6.QtWidgets import QMessageBox
-
         from commander_gui.settings import CliProfile
+        from commander_gui.ui.dialogs import MessageBox as QMessageBox
         from commander_gui.ui.install_page import InstallPage
 
         page = InstallPage.__new__(InstallPage)
@@ -3793,7 +4585,8 @@ class RegressionTests(unittest.TestCase):
             )
         )
         page.checkboxes = {
-            "minimal": Mock(isChecked=Mock(return_value=False))
+            "minimal": Mock(isChecked=Mock(return_value=False)),
+            "offline": Mock(isChecked=Mock(return_value=False)),
         }
         page._resume_state = {"profile": "test"}
 
@@ -3803,8 +4596,8 @@ class RegressionTests(unittest.TestCase):
         ) as mock_question:
             page._start_full_install()
 
-        dialog_text = mock_question.call_args[0][2]
-        self.assertIn("Resuming a previously interrupted", dialog_text)
+        points = " ".join(mock_question.call_args.kwargs["points"])
+        self.assertIn("picks up the install where it stopped", points)
 
     def test_on_winetricks_line_suppresses_noise_from_visible_log(self):
         """A noise line must not reach the console, not just skip %-parsing."""
@@ -3989,6 +4782,39 @@ class RegressionTests(unittest.TestCase):
         self.assertEqual(env, {"WINEPREFIX": "/prefix"})
         self.assertEqual(cwd, str(gamma))
 
+    def test_build_command_makes_relative_gamma_dir_absolute(self):
+        # The CLI's default "gamma/gamma" made wine look for the exe at
+        # gamma/gamma/gamma/gamma/ModOrganizer.exe, since cwd was relative too.
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "gamma" / "gamma").mkdir(parents=True)
+            (Path(tmp) / "gamma" / "gamma" / "ModOrganizer.exe").touch()
+            old = os.getcwd()
+            os.chdir(tmp)
+            try:
+                command, _env, cwd = build_command("gamma/gamma", Runner("wine", "Wine", ["wine"], {}))
+            finally:
+                os.chdir(old)
+        self.assertEqual(cwd, os.path.join(tmp, "gamma", "gamma"))
+        self.assertEqual(command, ["wine", os.path.join(cwd, "ModOrganizer.exe")])
+
+    def test_load_settings_pins_relative_folders_to_the_start_folder(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "settings.json"
+            path.write_text(json.dumps({"Profiles": [{"Active": True, "Gamma": "gamma/gamma", "Anomaly": "/abs/anomaly", "Cache": "gamma/cache"}]}))
+            (Path(tmp) / "gamma" / "gamma").mkdir(parents=True)
+            old = os.getcwd()
+            os.chdir(tmp)
+            try:
+                profile = load_settings(path).active_profile
+            finally:
+                os.chdir(old)
+            saved = json.loads(path.read_text())["Profiles"][0]
+        self.assertEqual(profile.gamma, os.path.join(tmp, "gamma", "gamma"))
+        self.assertEqual(saved["Gamma"], profile.gamma)
+        self.assertEqual(profile.anomaly, "/abs/anomaly")
+        # Missing here: a start from the wrong folder must not pin it.
+        self.assertEqual(profile.cache, "gamma/cache")
+
     def test_svg_noise_detector_suppresses_renderer_warnings(self):
         from PySide6.QtCore import QtMsgType
 
@@ -4087,31 +4913,6 @@ class RegressionTests(unittest.TestCase):
             add_mod(lines, "NewMod", category="Extra Mods"),
             ["+Visual_separator", "+Shaders", "-NewMod", "+Extra Mods_separator"],
         )
-
-    def test_rename_mod_changes_display_name_only(self):
-        self.assertEqual(
-            rename_mod(["-Old Name", "+Keep"], "Old Name", "New Name"),
-            ["-New Name", "+Keep"],
-        )
-
-    def test_rename_mod_preserves_status(self):
-        self.assertEqual(rename_mod(["+Old Name"], "Old Name", "Renamed"), ["+Renamed"])
-
-    def test_rename_mod_rejects_duplicate(self):
-        with self.assertRaises(ValueError):
-            rename_mod(["-First", "+Second"], "First", "Second")
-
-    def test_rename_mod_rejects_separator_name(self):
-        with self.assertRaises(ValueError):
-            rename_mod(["-First"], "First", "Uncategorized_separator")
-
-    def test_rename_mod_rejects_invalid_name(self):
-        with self.assertRaises(ValueError):
-            rename_mod(["-First"], "First", "nested/mod")
-
-    def test_rename_mod_returns_same_list_when_missing(self):
-        lines = ["-First"]
-        self.assertEqual(rename_mod(lines, "Missing", "New Name"), lines)
 
     def test_rename_category_changes_the_separator_name_only(self):
         self.assertEqual(
@@ -4291,12 +5092,6 @@ class RegressionTests(unittest.TestCase):
             add_mod([], "+LeadingPlus")
         with self.assertRaises(ValueError):
             add_mod([], "-LeadingDash")
-
-    def test_rename_mod_rejects_status_prefix(self):
-        with self.assertRaises(ValueError):
-            rename_mod(["-First"], "First", "+Prefixed")
-        with self.assertRaises(ValueError):
-            rename_mod(["-First"], "First", "-Prefixed")
 
     def test_add_category_rejects_status_prefix(self):
         with self.assertRaises(ValueError):
@@ -5100,6 +5895,113 @@ class ModCounterTests(unittest.TestCase):
                 window._mod_counter_timer.stop()
                 window.close()
 
+    def test_narrow_window_fits_status_bar_and_play_page(self):
+        # Tiling compositors (niri, Umbriel's scrolling layout) give the
+        # window a column narrower than the status bar's natural ~1300 px.
+        from PySide6.QtWidgets import QApplication, QBoxLayout
+
+        from commander_gui.ui.main_window import _TAB_INDEX, MainWindow
+
+        app = QApplication.instance() or QApplication([])
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.dict(os.environ, {"XDG_CONFIG_HOME": tmp}),
+            patch("commander_gui.ui.welcome_overlay.maybe_show_welcome", return_value=None),
+        ):
+            window = MainWindow()
+            try:
+                window.show()
+                window.tabs.setCurrentIndex(_TAB_INDEX["play"])
+                play = window._pages["play"]
+                window.resize(960, 800)
+                app.processEvents()
+                self.assertLessEqual(window.statusBar().minimumSizeHint().width(), 960)
+                # Too narrow for everything: the Font, Theme and Language
+                # boxes go first, the version and profile stay.
+                self.assertTrue(window._status_info_label.isVisible())
+                self.assertFalse(window._status_font_combo.isVisible())
+                window.resize(600, 800)
+                app.processEvents()
+                self.assertFalse(window._status_info_label.isVisible())
+                self.assertEqual(play._cards_row.direction(), QBoxLayout.Direction.TopToBottom)
+                window.resize(1600, 800)
+                app.processEvents()
+                self.assertTrue(window._status_info_label.isVisible())
+                self.assertTrue(window._status_font_combo.isVisible())
+                self.assertEqual(play._cards_row.direction(), QBoxLayout.Direction.LeftToRight)
+            finally:
+                window._mod_counter_timer.stop()
+                window.close()
+
+    def test_reflow_stacks_divided_grid_and_puts_it_back(self):
+        # Narrow window: each side of a divided card goes under the one
+        # before it, a full-width row stays last, and widening restores it.
+        from PySide6.QtWidgets import QApplication, QFrame, QGridLayout, QLabel, QWidget
+
+        from commander_gui.ui import reflow
+
+        QApplication.instance() or QApplication([])
+        owner = QWidget()
+        grid = reflow.divided(QGridLayout(owner))
+        divider = QFrame()
+        divider.setObjectName("vDivider")
+        left, right, console = QLabel("left"), QLabel("right"), QLabel("console")
+        grid.addWidget(left, 0, 0)
+        grid.addWidget(divider, 0, 1)
+        grid.addWidget(right, 0, 2)
+        grid.addWidget(console, 1, 0, 1, 3)
+        before = [grid.getItemPosition(grid.indexOf(w)) for w in (left, right, console)]
+        reflow._set_stacked(grid, True)
+        self.assertTrue(reflow.is_stacked(grid))
+        self.assertEqual(grid.getItemPosition(grid.indexOf(left))[:2], (0, 0))
+        right_row, right_column = grid.getItemPosition(grid.indexOf(right))[:2]
+        console_row = grid.getItemPosition(grid.indexOf(console))[0]
+        self.assertEqual(right_column, 0)
+        self.assertGreater(right_row, 0)
+        self.assertGreater(console_row, right_row)
+        self.assertTrue(divider.isHidden())
+        reflow._set_stacked(grid, False)
+        self.assertFalse(reflow.is_stacked(grid))
+        self.assertEqual([grid.getItemPosition(grid.indexOf(w)) for w in (left, right, console)], before)
+        self.assertFalse(divider.isHidden())
+        # The page swapping an item while stacked (deleting the old one)
+        # must not break going back: the Install page does this.
+        reflow._set_stacked(grid, True)
+        grid.removeWidget(right)
+        replacement = QLabel("replacement")
+        grid.addWidget(replacement, 5, 0)
+        reflow._set_stacked(grid, False)
+        self.assertEqual(grid.getItemPosition(grid.indexOf(left)), before[0])
+        self.assertEqual(grid.getItemPosition(grid.indexOf(console)), before[2])
+        self.assertGreaterEqual(grid.indexOf(replacement), 0)
+
+    def test_reflow_fits_only_the_page_not_its_scroll_content(self):
+        # Regression: a resize of the page's scroll content was taken for a
+        # page resize and started a fit on the content mid-fit - a loop that
+        # froze the app and kept growing its memory.
+        from unittest.mock import patch
+
+        from PySide6.QtWidgets import QApplication, QScrollArea, QVBoxLayout, QWidget
+
+        from commander_gui.ui import reflow
+
+        QApplication.instance() or QApplication([])
+        page = QWidget()
+        area = QScrollArea(page)
+        area.setWidgetResizable(True)
+        QVBoxLayout(page).addWidget(area)
+        content = QWidget()
+        QVBoxLayout(content)
+        area.setWidget(content)
+        reflow.watch(page)
+        page.show()
+        try:
+            with patch.object(reflow, "fit") as fit:
+                content.resize(content.width() + 40, content.height())
+            self.assertNotIn(content, [call.args[0] for call in fit.call_args_list])
+        finally:
+            page.close()
+
     def test_switching_pages_refreshes_the_mod_counter_immediately(self):
         from PySide6.QtWidgets import QApplication
 
@@ -5200,7 +6102,7 @@ class ModCounterTests(unittest.TestCase):
             )
             window.update_mod_counter()
             self.assertEqual(window.mod_counter_label.text(), "1 Mods (incomplete)")
-            self.assertIn("last install attempt failed", window.mod_counter_label.toolTip())
+            self.assertIn("last install failed", window.mod_counter_label.toolTip())
 
     def test_install_status_row_set_incomplete(self):
         from PySide6.QtWidgets import QApplication
@@ -5386,10 +6288,11 @@ class ModCounterTests(unittest.TestCase):
 
         profile unchanged and revert the combo back to it.
         """
-        from PySide6.QtWidgets import QApplication, QMessageBox
+        from PySide6.QtWidgets import QApplication
 
         from commander_gui.ui.common import NoWheelComboBox
         from commander_gui.ui.dashboard import DashboardPage
+        from commander_gui.ui.dialogs import MessageBox as QMessageBox
 
         QApplication.instance() or QApplication([])
         with (
@@ -5426,23 +6329,18 @@ class ModCounterTests(unittest.TestCase):
     def test_game_running_sees_a_game_started_without_mo2(self):
         """Play Anomaly runs the game with no Mod Organizer: the profile
         switch guard must still see it."""
-        from types import SimpleNamespace
 
         from commander_gui.ui import common
 
         with (
             patch.object(common, "mo2_running", return_value=False),
-            patch.object(common.shutil, "which", return_value="/usr/bin/pgrep"),
-            patch.object(
-                common.subprocess, "run", return_value=SimpleNamespace(returncode=0)
-            ) as run,
+            patch.object(common, "process_running", return_value=True) as running,
         ):
             self.assertTrue(common.game_running(force=True))
-        self.assertIn("Anomaly", run.call_args.args[0][-1])
+        self.assertIn("Anomaly", running.call_args.args[0])
         with (
             patch.object(common, "mo2_running", return_value=False),
-            patch.object(common.shutil, "which", return_value="/usr/bin/pgrep"),
-            patch.object(common.subprocess, "run", return_value=SimpleNamespace(returncode=1)),
+            patch.object(common, "process_running", return_value=False),
         ):
             self.assertFalse(common.game_running(force=True))
 
@@ -5548,9 +6446,8 @@ class ModCounterTests(unittest.TestCase):
             mock_activate.assert_not_called()
             self.assertEqual(combo.currentText(), "Mine")
 
-    def test_dashboard_mo2_profiles_loaded_prefers_actual_selected_over_stale_config(
-        self,
-    ):
+    def test_dashboard_mo2_profile_combo_shows_the_profile_play_launches(self):
+        # ROMEO picked inside MO2 showed here while Play still sent -p G.A.M.M.A.
         from PySide6.QtWidgets import QApplication
 
         from commander_gui.ui.dashboard import DashboardPage
@@ -5576,7 +6473,7 @@ class ModCounterTests(unittest.TestCase):
                 (["G.A.M.M.A", "Solo Profile"], "Solo Profile"),
                 page._refresh_generation,
             )
-            self.assertEqual(page.mo2_profile_combo.currentText(), "Solo Profile")
+            self.assertEqual(page.mo2_profile_combo.currentText(), "G.A.M.M.A")
 
     def test_mo2_profile_switch_updates_the_cli_profile_and_refreshes(self):
         from PySide6.QtWidgets import QApplication
@@ -5619,6 +6516,40 @@ class ModCounterTests(unittest.TestCase):
                 done_handler((0, ""))
             self.assertEqual(p1.mo2_profile, "Solo Profile")
             mock_refresh.assert_called_once()
+
+    def test_mo2_profile_switch_is_saved_when_a_refresh_raced_it(self):
+        from PySide6.QtWidgets import QApplication
+
+        from commander_gui.ui.dashboard import DashboardPage
+
+        QApplication.instance() or QApplication([])
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.dict(os.environ, {"XDG_CONFIG_HOME": tmp}),
+        ):
+            p1 = CliProfile(active=True, profile_name="Mine", mo2_profile="G.A.M.M.A")
+
+            class FakeWindow:
+                settings = CliSettings(profiles=[p1])
+                install_busy = False
+                install_operation = None
+
+                def refresh_settings(self):
+                    pass
+
+            with patch("commander_gui.ui.dashboard.BackgroundTask"):
+                page = DashboardPage(FakeWindow())
+                page.mo2_profile_combo.addItem("Solo Profile")
+                with patch(
+                    "commander_gui.ui.dashboard.mo2_running", return_value=False
+                ):
+                    page.mo2_profile_combo.setCurrentIndex(
+                        page.mo2_profile_combo.findText("Solo Profile")
+                    )
+                    done_handler = page._set_mo2_selected_task.result.connect.call_args[0][0]
+            page._refresh_generation += 1  # a refresh landed mid-call
+            done_handler((0, ""))
+            self.assertEqual(p1.mo2_profile, "Solo Profile")
 
     def test_mo2_profile_switch_blocked_while_mo2_is_running(self):
         from PySide6.QtWidgets import QApplication
@@ -5769,7 +6700,7 @@ class ModCounterTests(unittest.TestCase):
                 "umup:/path/to/proton",
             )
 
-    def test_dashboard_download_threads_combo_has_exactly_three_options(self):
+    def test_dashboard_download_threads_combo_options(self):
         from PySide6.QtWidgets import QApplication
 
         from commander_gui.ui.dashboard import DashboardPage
@@ -5797,9 +6728,20 @@ class ModCounterTests(unittest.TestCase):
                     (combo.itemText(i), combo.itemData(i))
                     for i in range(combo.count())
                 ],
-                [("4 (Safe)", 4), ("6 (Balanced)", 6), ("8 (Fast)", 8)],
+                [
+                    ("1 (One at a time)", 1),
+                    ("2 (Slow connection)", 2),
+                    ("4 (Safe)", 4),
+                    ("6 (Balanced)", 6),
+                    ("8 (Fast)", 8),
+                ],
             )
             self.assertEqual(combo.currentData(), 6)
+            # A CLI-set value off the list is shown as-is, not as 1.
+            p1.download_threads = 12
+            with patch("commander_gui.ui.dashboard.BackgroundTask"):
+                page = DashboardPage(FakeWindow())
+            self.assertEqual(page.download_threads_combo.currentData(), 12)
 
     def test_dashboard_download_threads_switch_updates_the_active_profile(self):
         from PySide6.QtWidgets import QApplication
@@ -6019,7 +6961,7 @@ class ModCounterTests(unittest.TestCase):
             self.assertFalse(page.launch_button.isEnabled())
             self.assertFalse(page.open_mo2_button.isEnabled())
             self.assertFalse(page.direct_button.isEnabled())
-            self.assertIn("resume it", page.launch_button.toolTip())
+            self.assertIn("Resume it", page.launch_button.toolTip())
 
     def _make_stubbed_play_page(self, tmp):
         """A real PlayPage whose preview can be refreshed without a real
@@ -6051,6 +6993,43 @@ class ModCounterTests(unittest.TestCase):
         page._resolve_command = lambda **_kwargs: (["fake", "launch", "cmd"], None, None)
         page.executables = []
         return page
+
+    def test_launch_anomaly_switches_gamma_coop_to_anomaly_then_launches(self):
+        """Launch Anomaly with co-op set up for GAMMA moves co-op to Anomaly
+        (Multiplayer's "Play co-op on") and then launches, instead of being greyed out."""
+        from PySide6.QtCore import QObject, Signal
+        from PySide6.QtWidgets import QApplication
+
+        class SyncTask(QObject):
+            result = Signal(object)
+            error = Signal(str)
+
+            def __init__(self, fn, *args, parent=None):
+                super().__init__(parent)
+                self._call = lambda: fn(*args)
+
+            def start(self):
+                self.result.emit(self._call())
+
+        QApplication.instance() or QApplication([])
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"XDG_CONFIG_HOME": tmp}):
+            page = self._make_stubbed_play_page(tmp)
+            busy = []
+            page.window.set_install_busy = lambda on, *_a: busy.append(on)
+            page.window.update_mod_counter = lambda: None
+            switched, launched = [], []
+            page.launch_game = lambda: launched.append(True)
+            with patch("commander_gui.ui.play_page.coop.is_active", return_value=True), \
+                    patch("commander_gui.ui.play_page.coop.install_kind", return_value="gamma"), \
+                    patch("commander_gui.ui.play_page.coop.set_install_kind", side_effect=lambda *a: switched.append(a[-1])), \
+                    patch("commander_gui.ui.play_page.mo2_running", return_value=False), \
+                    patch("commander_gui.ui.play_page.game_running", return_value=False), \
+                    patch("commander_gui.ui.play_page.BackgroundTask", SyncTask):
+                page._refresh_preview_inner()
+                page._launch_direct()
+            self.assertEqual(switched, ["anomaly"])
+            self.assertEqual(busy, [True, False])
+            self.assertEqual(launched, [True])
 
     def test_set_launch_button_state_shows_quit_game_while_launching(self):
         """Regression test: the hero button must relabel to "Quit Game"
@@ -6106,7 +7085,9 @@ class ModCounterTests(unittest.TestCase):
             self.assertEqual(page.launch_button.text(), "")
 
     def test_launch_button_click_routes_to_quit_confirmation_while_launching(self):
-        from PySide6.QtWidgets import QApplication, QMessageBox
+        from PySide6.QtWidgets import QApplication
+
+        from commander_gui.ui.dialogs import MessageBox as QMessageBox
 
         with tempfile.TemporaryDirectory() as tmp, patch.dict(
             os.environ, {"XDG_CONFIG_HOME": tmp}
@@ -6133,7 +7114,7 @@ class ModCounterTests(unittest.TestCase):
                 ),
             ):
                 page._on_launch_button_clicked()
-            mock_abort.assert_called_once_with("Game closed by user.")
+            mock_abort.assert_called_once_with("Game closed by user.", error=False)
 
     def test_launch_button_click_while_idle_still_launches_normally(self):
         from PySide6.QtWidgets import QApplication
@@ -6218,13 +7199,13 @@ class ModCounterTests(unittest.TestCase):
                     {"PROTONPATH": "/home/user/.../GE-Proton9-20"},
                 ),
             )
-            self.assertIn("Proton GE: 9-20", self._chip_texts(page))
+            self.assertIn("Proton-GE: 9-20", self._chip_texts(page))
 
             page._build_chips(
                 ok=True,
                 runner=Runner("wine", "Wine", ["wine"], {}),
             )
-            self.assertIn("Proton GE: none", self._chip_texts(page))
+            self.assertIn("Proton-GE: none", self._chip_texts(page))
 
     def test_switch_language_does_not_duplicate_keyboard_shortcuts(self):
         """Regression test mirroring the status-bar duplication bug above:
@@ -6354,7 +7335,7 @@ class ModCounterTests(unittest.TestCase):
         ):
             window = MainWindow()
             self.assertEqual(window._status_theme_combo.currentData(), active_theme())
-            # The style is app-wide: left on "dusk"/18px/"Inter" (a font that
+            # The style is app-wide: left on "midnight"/18px/"Inter" (a font that
             # may not be installed), every widget any later test builds pays
             # for it - the rest of the suite ran minutes slower.
             app = QApplication.instance()
@@ -6363,12 +7344,12 @@ class ModCounterTests(unittest.TestCase):
             self.addCleanup(app.setStyleSheet, app.styleSheet())
 
             # Exactly what settings_page.py's pickers call.
-            window.apply_theme("dusk")
+            window.apply_theme("midnight")
             window.apply_font_size(18)
             window.apply_font_family("Inter")
 
-            self.assertEqual(active_theme(), "dusk")
-            self.assertEqual(window._status_theme_combo.currentData(), "dusk")
+            self.assertEqual(active_theme(), "midnight")
+            self.assertEqual(window._status_theme_combo.currentData(), "midnight")
             self.assertEqual(window._status_fontsize_combo.currentData(), 18)
             self.assertEqual(window._status_font_combo.currentData(), "Inter")
 
@@ -6486,17 +7467,22 @@ class UserModsTrackerTests(unittest.TestCase):
             (source_one / "one.txt").write_text("one", encoding="utf-8")
             (source_two / "two.txt").write_text("two", encoding="utf-8")
             original_rmtree = shutil.rmtree
-            deletions = 0
+            original_rename = os.rename
+
+            # Source two can't be renamed aside (a mount point), and the
+            # copy fallback's deletion of it then fails too.
+            def failing_rename(src, dst):
+                if Path(src) == source_two:
+                    raise OSError("injected rename failure")
+                return original_rename(src, dst)
 
             def failing_rmtree(path, *args, **kwargs):
-                nonlocal deletions
-                if Path(path) in (source_one, source_two):
-                    deletions += 1
-                    if deletions == 2:
-                        raise OSError("injected deletion failure")
+                if Path(path) == source_two:
+                    raise OSError("injected deletion failure")
                 return original_rmtree(path, *args, **kwargs)
 
             with (
+                patch("commander_gui.ui.utilities_page.os.rename", failing_rename),
                 patch("commander_gui.ui.utilities_page.shutil.rmtree", failing_rmtree),
                 self.assertRaises(OSError),
             ):
@@ -6509,6 +7495,27 @@ class UserModsTrackerTests(unittest.TestCase):
             self.assertEqual((source_two / "two.txt").read_text(), "two")
             self.assertFalse((destination / "one").exists())
             self.assertFalse((destination / "two").exists())
+
+    def test_move_sets_the_original_aside_without_copying_it_again(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "source"
+            destination = root / "destination"
+            source.mkdir()
+            destination.mkdir()
+            (source / "a.txt").write_text("a", encoding="utf-8")
+            original_copytree = shutil.copytree
+
+            def no_backup_copy(src, dst, *args, **kwargs):
+                assert ".move-backup-" not in Path(dst).name, "backup was copied"
+                return original_copytree(src, dst, *args, **kwargs)
+
+            with patch("commander_gui.ui.utilities_page.shutil.copytree", no_backup_copy):
+                moved = _move_folders([("Source", str(source))], destination, lambda _: None)
+            self.assertEqual(moved, [("Source", str(destination / "source"))])
+            self.assertFalse(source.exists())
+            self.assertEqual(list(root.glob(".source.move-backup-*")), [])
+            self.assertEqual((destination / "source" / "a.txt").read_text(), "a")
 
     def test_move_done_keeps_recovery_state_when_ini_rewrite_fails(self):
         from types import SimpleNamespace
@@ -6591,6 +7598,9 @@ class UserModsTrackerTests(unittest.TestCase):
             page.fresh_reset_button = QPushButton()
             page.gamma_reset_button = QPushButton()
             page.full_uninstall_button = QPushButton()
+            page.romeo_panel = QLabel()
+            page.romeo_uninstall_button = QPushButton()
+            page._romeo_task = None
             page.fresh_reset_hint = QLabel()
             page._runner = None
             page._wipe_task = None
@@ -6800,7 +7810,7 @@ class UserModsTrackerTests(unittest.TestCase):
         html = _cache_preflight_summary_html(result, include_anomaly=False)
         self.assertIn("Mod14.7z", html)
         self.assertNotIn("Mod15.7z", html)
-        self.assertIn("... and 5 more", html)
+        self.assertIn("and 5 more", html)
 
     def test_cache_preflight_summary_html_escapes_archive_names(self):
         result = CacheArchiveVerifyResult(missing=["<script>evil.7z"])
@@ -6847,6 +7857,9 @@ class UserModsTrackerTests(unittest.TestCase):
             page.fresh_reset_button = QPushButton()
             page.gamma_reset_button = QPushButton()
             page.full_uninstall_button = QPushButton()
+            page.romeo_panel = QLabel()
+            page.romeo_uninstall_button = QPushButton()
+            page._romeo_task = None
             page.fresh_reset_hint = QLabel()
 
             page._update_fresh_reset_enabled()
@@ -6882,6 +7895,9 @@ class UserModsTrackerTests(unittest.TestCase):
             page.fresh_reset_button = QPushButton()
             page.gamma_reset_button = QPushButton()
             page.full_uninstall_button = QPushButton()
+            page.romeo_panel = QLabel()
+            page.romeo_uninstall_button = QPushButton()
+            page._romeo_task = None
             page.fresh_reset_hint = QLabel()
 
             page._update_fresh_reset_enabled()
@@ -7019,7 +8035,7 @@ class UserModsTrackerTests(unittest.TestCase):
             try:
                 window._on_commander_update_status_checked("v9.9.9")
                 button = window._update_status_button
-                self.assertEqual(button.text(), "COMMANDER update available")
+                self.assertEqual(button.text(), "Click here to update COMMANDER")
                 self.assertTrue(button.isEnabled())
                 self.assertIn(WARN.name(), button.styleSheet())
 
@@ -7046,7 +8062,7 @@ class UserModsTrackerTests(unittest.TestCase):
             window = MainWindow()
             try:
                 self.assertEqual(
-                    window._update_status_button.text(), "Checking for updates..."
+                    window._update_status_button.text(), "Checking for updates"
                 )
                 with patch(
                     "commander_gui.ui.main_window.BackgroundTask"
@@ -7213,8 +8229,9 @@ class UserModsTrackerTests(unittest.TestCase):
 
         def fake_urlopen(request, timeout=None):
             if request.full_url.endswith(".sha512sum"):
-                # Releases before checksums were published.
-                raise urllib.error.HTTPError(request.full_url, 404, "Not Found", {}, None)
+                import hashlib
+
+                return FakeResponse(hashlib.sha512(body).hexdigest().encode(), {})
             return FakeResponse(body, {"Content-Length": str(len(body))})
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -7261,8 +8278,9 @@ class UserModsTrackerTests(unittest.TestCase):
 
         def fake_urlopen(request, timeout=None):
             if request.full_url.endswith(".sha512sum"):
-                # Releases before checksums were published.
-                raise urllib.error.HTTPError(request.full_url, 404, "Not Found", {}, None)
+                import hashlib
+
+                return FakeResponse(hashlib.sha512(body).hexdigest().encode(), {})
             return FakeResponse(body, {"Content-Length": str(len(body))})
 
         calls = []
@@ -7367,7 +8385,12 @@ class UserModsTrackerTests(unittest.TestCase):
             self.assertFalse(downloaded.exists())
             self.assertTrue(os.access(running_path, os.X_OK))
 
-    def _serve(self, body, headers, checksum=None):
+    def _serve(self, body, headers, checksum=None, missing_checksum=False):
+        import hashlib
+
+        if checksum is None and not missing_checksum:
+            checksum = hashlib.sha512(body).hexdigest().encode() + b"  X.AppImage\n"
+
         class FakeResponse:
             def __init__(self, data, hdrs):
                 self._data = data
@@ -7438,6 +8461,34 @@ class UserModsTrackerTests(unittest.TestCase):
             ):
                 download_commander_update("v9.9.9", running_path)
 
+    def test_restart_into_a_ready_update_waits_for_a_running_install(self):
+        from types import SimpleNamespace
+
+        from commander_gui.ui.main_window import MainWindow
+
+        window = SimpleNamespace(install_busy=True)
+        window._refuse_restart_while_busy = lambda: MainWindow._refuse_restart_while_busy(window)
+        with (
+            patch("commander_gui.ui.main_window.QMessageBox.warning") as warned,
+            patch("commander_gui.ui.main_window.relaunch_commander") as relaunch,
+            patch("commander_gui.ui.main_window.QApplication.quit") as quit_app,
+        ):
+            MainWindow._restart_into_update(window, Path("/tmp/new.AppImage"))
+        warned.assert_called_once()
+        relaunch.assert_not_called()
+        quit_app.assert_not_called()
+
+    def test_self_update_refuses_a_release_without_a_checksum(self):
+        body = _FAKE_APPIMAGE_HEADER + b"payload"
+        with tempfile.TemporaryDirectory() as tmp:
+            running_path = Path(tmp) / "Commander.AppImage"
+            running_path.write_bytes(b"old")
+            with self._serve(
+                body, {"Content-Length": str(len(body))}, missing_checksum=True
+            ), self.assertRaisesRegex(CommanderSelfUpdateError, "no published checksum"):
+                download_commander_update("v9.9.9", running_path)
+            self.assertEqual(sorted(p.name for p in Path(tmp).iterdir()), ["Commander.AppImage"])
+
     def test_download_and_install_commander_update_requires_an_appimage(self):
         with (
             patch.dict(os.environ, {}, clear=True),
@@ -7445,27 +8496,49 @@ class UserModsTrackerTests(unittest.TestCase):
         ):
             download_and_install_commander_update("v9.9.9")
 
-    def test_help_page_snapshot_reflects_the_active_profile(self):
+    def test_download_and_install_commander_update_replaces_the_running_appimage(self):
+        body = _FAKE_APPIMAGE_HEADER + b"new"
+        with tempfile.TemporaryDirectory() as tmp:
+            running = Path(tmp) / "Commander.AppImage"
+            running.write_bytes(b"old")
+            with (
+                patch.dict(os.environ, {"APPIMAGE": str(running)}),
+                self._serve(body, {"Content-Length": str(len(body))}),
+            ):
+                path = download_and_install_commander_update("v9.9.9")
+                self.assertEqual(path, running)
+                self.assertEqual(running.read_bytes(), body)
+
+    def test_cancel_while_checking_update_does_not_install(self):
+        # Cancel pressed while the download was being checked: the closed
+        # window must not be followed by the AppImage being swapped anyway.
+        body = _FAKE_APPIMAGE_HEADER + b"new"
+        cancel = threading.Event()
+        with tempfile.TemporaryDirectory() as tmp:
+            running = Path(tmp) / "Commander.AppImage"
+            running.write_bytes(b"old")
+            with (
+                patch.dict(os.environ, {"APPIMAGE": str(running)}),
+                self._serve(body, {"Content-Length": str(len(body))}),
+                patch("commander_gui.self_update.verify_appimage_file", side_effect=lambda _p: cancel.set()),
+                self.assertRaisesRegex(CommanderSelfUpdateError, "cancelled"),
+            ):
+                download_and_install_commander_update("v9.9.9", cancel_event=cancel)
+            self.assertEqual(running.read_bytes(), b"old")
+            self.assertEqual(sorted(p.name for p in Path(tmp).iterdir()), ["Commander.AppImage"])
+
+    def test_progress_dialog_closes_after_cancel(self):
         from PySide6.QtWidgets import QApplication
 
-        from commander_gui.ui.help_page import HelpPage
+        from commander_gui.ui.dialogs import ProgressDialog
 
         QApplication.instance() or QApplication([])
-        profile = CliProfile(active=True, profile_name="Mine", gamma="/games/gamma")
-
-        class FakeWindow:
-            settings = CliSettings(profiles=[profile])
-
-            def refresh_settings(self):
-                pass
-
-        page = HelpPage(FakeWindow())
-        page.refresh()
-        self.assertIn("Mine", page.snapshot_status.text())
-
-        FakeWindow.settings = CliSettings(profiles=[])
-        page.refresh()
-        self.assertIn("No active profile", page.snapshot_status.text())
+        dialog = ProgressDialog("Updating", "Downloading...")
+        dialog.show()
+        dialog.reject()  # Cancel: the button disables, the box stays up
+        self.assertTrue(dialog.isVisible())
+        dialog.close()  # the work stopped: it really closes now
+        self.assertFalse(dialog.isVisible())
 
     def test_system_check_page_constructs_and_refreshes_without_error(self):
         from PySide6.QtWidgets import QApplication
@@ -7496,7 +8569,7 @@ class UserModsTrackerTests(unittest.TestCase):
 
         error behind the 2-second minimum-display timer, even on the very
         first check (before _last_check_ts is ever set). _show_checks()
-        already skips that delay on a first load because the "Scanning..."
+        already skips that delay on a first load because the "Scanning"
         placeholders are on screen already - _show_error() must match that,
         or a fast failure on startup sits behind a pointless artificial
         delay instead of being reported right away.
@@ -7634,8 +8707,10 @@ class UserModsTrackerTests(unittest.TestCase):
         own loginusers.vdf fields proved unreliable for guessing this),
         not just refuse with a dead-end warning.
         """
-        from PySide6.QtWidgets import QApplication, QInputDialog, QMessageBox
+        from PySide6.QtWidgets import QApplication
 
+        from commander_gui.ui.dialogs import InputDialog as QInputDialog
+        from commander_gui.ui.dialogs import MessageBox as QMessageBox
         from commander_gui.ui.settings_page import SettingsPage
 
         QApplication.instance() or QApplication([])
@@ -7664,7 +8739,7 @@ class UserModsTrackerTests(unittest.TestCase):
             page = SettingsPage(FakeWindow())
             with (
                 patch(
-                    "commander_gui.ui.settings_page.find_shortcuts_vdf",
+                    "commander_gui.steam_shortcuts.find_shortcuts_vdf",
                     return_value=None,
                 ),
                 patch(
@@ -7692,8 +8767,9 @@ class UserModsTrackerTests(unittest.TestCase):
         startup, so after a successful add while Steam is running, the
         user must be offered a restart - not just told to do it manually.
         """
-        from PySide6.QtWidgets import QApplication, QMessageBox
+        from PySide6.QtWidgets import QApplication
 
+        from commander_gui.ui.dialogs import MessageBox as QMessageBox
         from commander_gui.ui.settings_page import SettingsPage
 
         QApplication.instance() or QApplication([])
@@ -7757,9 +8833,10 @@ class UserModsTrackerTests(unittest.TestCase):
             )
 
     def test_settings_page_reset_playtime_zeroes_the_active_profile_only(self):
-        from PySide6.QtWidgets import QApplication, QMessageBox
+        from PySide6.QtWidgets import QApplication
 
         from commander_gui import gui_settings
+        from commander_gui.ui.dialogs import MessageBox as QMessageBox
         from commander_gui.ui.settings_page import SettingsPage
 
         QApplication.instance() or QApplication([])
@@ -7793,9 +8870,10 @@ class UserModsTrackerTests(unittest.TestCase):
             self.assertEqual(playtime["Other"], 1200.0)
 
     def test_settings_page_reset_playtime_declines_without_an_active_profile(self):
-        from PySide6.QtWidgets import QApplication, QMessageBox
+        from PySide6.QtWidgets import QApplication
 
         from commander_gui import gui_settings
+        from commander_gui.ui.dialogs import MessageBox as QMessageBox
         from commander_gui.ui.settings_page import SettingsPage
 
         QApplication.instance() or QApplication([])
@@ -8087,7 +9165,8 @@ class UserModsTrackerTests(unittest.TestCase):
             self.assertIsNotNone(existing)
             self.assertGreater(existing, 0)
             nested = free_space_bytes(str(Path(tmp) / "not" / "created" / "yet"))
-            self.assertEqual(nested, existing)
+            # Same filesystem; other processes may write to it between calls.
+            self.assertAlmostEqual(nested, existing, delta=64 << 20)
 
     def test_crash_dump_names_finds_mdmp_files_and_tolerates_missing_folder(self):
         from commander_gui.ui.common import crash_dump_names
@@ -8443,8 +9522,9 @@ class UserModsTrackerTests(unittest.TestCase):
         launch_assistant() pieces Utilities' own log-dump button uses -
         but only when the user actually says yes.
         """
-        from PySide6.QtWidgets import QApplication, QMessageBox
+        from PySide6.QtWidgets import QApplication
 
+        from commander_gui.ui.dialogs import MessageBox as QMessageBox
         from commander_gui.ui.play_page import PlayPage
 
         QApplication.instance() or QApplication([])
@@ -8580,7 +9660,7 @@ class UserModsTrackerTests(unittest.TestCase):
             with patch("commander_gui.ui.mod_manager_page.QMessageBox.information") as mock_info:
                 page._on_conflicts_found([])
             mock_info.assert_called_once()
-            self.assertFalse(page.conflicts_button.text() == "Scanning...")
+            self.assertFalse(page.conflicts_button.text() == "Scanning")
 
     def test_check_file_conflicts_opens_the_conflicts_dialog_when_found(self):
         """Regression test: a real report shared one conflicting file
@@ -8864,7 +9944,7 @@ class UserModsTrackerTests(unittest.TestCase):
         self.assertEqual(offered, ["Gameplay"])
 
     def test_rename_category_ui_writes_the_renamed_separator_and_reloads(self):
-        """Regression test: the Mod Manager page's new "Rename Category..."
+        """Regression test: the Mod Manager page's new "Rename Category"
 
         action (right-click on a category header) must actually persist
         the rename to modlist.txt and reload the tree, mirroring the
@@ -9205,36 +10285,24 @@ class UserModsTrackerTests(unittest.TestCase):
                     "commander_gui.ui.mod_manager_page.QInputDialog.getText",
                     return_value=("Renamed", True),
                 ),
-                patch("commander_gui.ui.mod_manager_page.run_sync") as mock_run_sync,
+                patch(
+                    "commander_gui.ui.mod_manager_page.select_mo2_profile", return_value=(0, "")
+                ) as mock_select,
                 patch.object(page, "_load_profiles"),
             ):
                 page._rename_mo2_profile()
-                # The MO2 CLI call now runs on a BackgroundTask (real
-                # QThread) instead of blocking the caller.
-                # Only the selected-profile write counts: pumping events also
-                # lets earlier tests' leftover pages run their own (patched)
-                # "mo2 profiles list" queries here.
+                # The ini write runs on a BackgroundTask (real QThread).
                 app = QApplication.instance()
-
-                def set_calls():
-                    return [
-                        c for c in mock_run_sync.call_args_list
-                        if c.args and c.args[0][:3] == ["mo2", "config", "set"]
-                    ]
-
                 deadline = time.monotonic() + 5
-                while not set_calls() and time.monotonic() < deadline:
+                while not mock_select.called and time.monotonic() < deadline:
                     app.processEvents()
                     time.sleep(0.01)
                 for _ in range(20):
                     app.processEvents()
-            self.assertEqual(
-                set_calls(),
-                [call(["mo2", "config", "set", "selected-profile", "Renamed"], timeout=30)],
-            )
+            mock_select.assert_called_once_with(page._active_profile().gamma, "Renamed")
 
     def test_delete_mo2_profile_calls_the_cli_after_confirmation(self):
-        from PySide6.QtWidgets import QMessageBox
+        from commander_gui.ui.dialogs import MessageBox as QMessageBox
 
         with (
             tempfile.TemporaryDirectory() as tmp,
@@ -9276,7 +10344,7 @@ class UserModsTrackerTests(unittest.TestCase):
             mock_task_cls.assert_not_called()
 
     def test_delete_mo2_profile_declined_confirmation_does_nothing(self):
-        from PySide6.QtWidgets import QMessageBox
+        from commander_gui.ui.dialogs import MessageBox as QMessageBox
 
         with (
             tempfile.TemporaryDirectory() as tmp,
@@ -9438,7 +10506,7 @@ class UserModsTrackerTests(unittest.TestCase):
             self.assertNotIn("My Category", page._tracked_user_categories())
 
     def test_delete_category_ui_untracks_after_deletion(self):
-        from PySide6.QtWidgets import QMessageBox
+        from commander_gui.ui.dialogs import MessageBox as QMessageBox
 
         with (
             tempfile.TemporaryDirectory() as tmp,
@@ -9468,7 +10536,7 @@ class UserModsTrackerTests(unittest.TestCase):
             self.assertNotIn("My Category", names)
 
     def test_category_context_menu_only_offers_delete_for_tracked_categories(self):
-        """Regression test: "Delete Category..." must never be offered
+        """Regression test: "Delete Category" must never be offered
 
         for a real GAMMA category, only for one the user created
         themselves via "New Category" (see user_created_categories in
@@ -9503,8 +10571,8 @@ class UserModsTrackerTests(unittest.TestCase):
                 page._show_category_context_menu(header_item("My Category"), QPoint(0, 0))
                 tracked_actions = [c.args[0] for c in menu.addAction.call_args_list]
 
-            self.assertNotIn("Delete Category...", foo_actions)
-            self.assertIn("Delete Category...", tracked_actions)
+            self.assertNotIn("Delete Category", foo_actions)
+            self.assertIn("Delete Category", tracked_actions)
 
     def test_move_category_ui_reorders_via_the_context_menu_handler(self):
         with (
@@ -9582,8 +10650,9 @@ class UserModsTrackerTests(unittest.TestCase):
         Last Update" would have nothing to restore. The snapshot must be
         taken right before the CLI update-apply command runs.
         """
-        from PySide6.QtWidgets import QApplication, QMessageBox
+        from PySide6.QtWidgets import QApplication
 
+        from commander_gui.ui.dialogs import MessageBox as QMessageBox
         from commander_gui.ui.update_page import UpdatePage
 
         QApplication.instance() or QApplication([])
@@ -9623,7 +10692,7 @@ class UserModsTrackerTests(unittest.TestCase):
             # pre-apply content.
             modlist.write_text("+NewMod\n")
             with (
-                patch("commander_gui.ui.update_page.mo2_running", return_value=False),
+                patch("commander_gui.ui.update_page.game_running", return_value=False),
                 patch("commander_gui.ui.update_page.QMessageBox.question")
                 as mock_question,
                 patch("commander_gui.ui.update_page.QMessageBox.information"),
@@ -9697,7 +10766,7 @@ class UserModsTrackerTests(unittest.TestCase):
         self.assertEqual(page._mode, "create")
 
     def test_profiles_page_cancelled_switch_keeps_unsaved_edits(self):
-        from PySide6.QtWidgets import QMessageBox
+        from commander_gui.ui.dialogs import MessageBox as QMessageBox
 
         page = self._profiles_page(
             [
@@ -9904,7 +10973,7 @@ class UserModsTrackerTests(unittest.TestCase):
             )
 
     def test_profiles_page_always_saves_official_sources(self):
-        from commander_gui.profile_bundle import non_default_sources
+        from commander_gui.profile_bundle import SOURCE_FIELDS
 
         page = self._profiles_page(
             [
@@ -9918,7 +10987,8 @@ class UserModsTrackerTests(unittest.TestCase):
         page._begin_edit()
         self.assertFalse(page._is_dirty())
         values = page._form_values()
-        self.assertEqual(non_default_sources(values), [])
+        default = CliProfile()
+        self.assertTrue(all(getattr(values, name) == getattr(default, name) for name in SOURCE_FIELDS))
         # Fields no longer on the form are kept from the saved profile.
         self.assertEqual((values.mo2_profile, values.download_threads), ("Mine", 9))
 
@@ -10044,25 +11114,31 @@ class UserModsTrackerTests(unittest.TestCase):
             self.assertEqual(check_commander_update("1.2.9H1"), "v1.2.9H2")
             self.assertIsNone(check_commander_update("1.2.9H2"))
 
-    def test_check_commander_update_returns_none_when_unreachable(self):
+    def test_check_commander_update_raises_when_unreachable(self):
         from commander_gui.updates import check_commander_update
 
+        # Not None: that would read as "up to date" for a check that
+        # never happened.
         with (
             patch("commander_gui.network.time.sleep"),
             patch(
                 "commander_gui.updates.urllib.request.urlopen",
                 side_effect=OSError("no network"),
             ),
+            self.assertRaises(OSError),
         ):
-            self.assertIsNone(check_commander_update("1.2.9-unstable"))
+            check_commander_update("1.2.9-unstable")
 
-    def test_network_urlopen_allows_http_and_https(self):
+    def test_network_urlopen_allows_https_and_local_http_only(self):
         with patch("commander_gui.network.urllib.request.urlopen") as urlopen:
             network.urlopen("https://example.com/x", timeout=1)
             network.urlopen(
-                urllib.request.Request("http://example.com/x"), timeout=1
+                urllib.request.Request("http://localhost:8000/x"), timeout=1
             )
         self.assertEqual(urlopen.call_count, 2)
+        # Plain http elsewhere: the modpack list could be swapped on the way.
+        with self.assertRaises(ValueError):
+            network.urlopen(urllib.request.Request("http://example.com/x"), timeout=1)
 
     def test_remote_version_returns_none_for_oversized_response(self):
         profile = CliProfile()
@@ -10089,7 +11165,7 @@ class UserModsTrackerTests(unittest.TestCase):
         exec_line = autostart._desktop_exec(["/home/John Doe/App.AppImage"])
         self.assertEqual(exec_line, '"/home/John Doe/App.AppImage"')
 
-    def test_latest_version_human_falls_back_to_readme_on_format_mismatch(self):
+    def test_version_falls_back_to_readme_on_format_mismatch(self):
         """Regression test: the README fallback must actually run.
 
         Previously the loop broke on the first *non-empty* fetch regardless
@@ -10131,7 +11207,9 @@ class UserModsTrackerTests(unittest.TestCase):
             "commander_gui.updates.urllib.request.urlopen",
             side_effect=fake_urlopen,
         ):
-            self.assertEqual(latest_version_human(CliProfile()), "0.9.5")
+            self.assertEqual(
+                _version_from_patchnotes_or_readme(CliProfile(), responses["Patchnotes.md"]), "0.9.5"
+            )
 
     def test_proton_archive_rejects_special_members(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -10402,13 +11480,11 @@ class UserModsTrackerTests(unittest.TestCase):
     def test_dependencies_progress_maps_stages_onto_overall_bar(self):
         """Audit follow-up: determinate staged bar for Install Dependencies."""
         self.assertIsNone(_dependencies_progress("umu", None))
-        # Stage boundaries: winetricks 0-10, umu 10-25, tools 25-40, verbs 40-100.
+        # Stage boundaries: winetricks 0-10, umu 10-40, verbs 40-100.
         self.assertEqual(_dependencies_progress("winetricks", 0), 0)
         self.assertEqual(_dependencies_progress("winetricks", 100), 10)
         self.assertEqual(_dependencies_progress("umu", 0), 10)
-        self.assertEqual(_dependencies_progress("umu", 100), 25)
-        self.assertEqual(_dependencies_progress("tools", 0), 25)
-        self.assertEqual(_dependencies_progress("tools", 100), 40)
+        self.assertEqual(_dependencies_progress("umu", 100), 40)
         self.assertEqual(_dependencies_progress("verbs", 0), 40)
         self.assertEqual(_dependencies_progress("verbs", 50), 70)
         self.assertEqual(_dependencies_progress("verbs", 100), 100)
@@ -10549,6 +11625,16 @@ class UserModsTrackerTests(unittest.TestCase):
                 state = gui_settings.load_gui_settings()
             self.assertEqual(state["start_page"], "update")
 
+    def test_every_nav_page_is_a_valid_start_page(self):
+        from commander_gui.ui.main_window import NAV_ITEMS
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "gui-settings.json"
+            for key, _title in NAV_ITEMS:
+                path.write_text(json.dumps({"start_page": key}), encoding="utf-8")
+                with patch.object(gui_settings, "gui_settings_path", return_value=path):
+                    self.assertEqual(gui_settings.load_gui_settings()["start_page"], key)
+
     def test_malformed_modpack_json_returns_none(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "modpack_maker_list.json"
@@ -10592,7 +11678,7 @@ class UserModsTrackerTests(unittest.TestCase):
             manifest = game_dir / "gamma-md5.txt"
             manifest.write_text("corrupt garbage", encoding="utf-8")
             result = scan_mods_md5(str(game_dir))
-            self.assertTrue(any("corrupt" in e.lower() for e in result.errors))
+            self.assertTrue(any("unreadable" in e.lower() for e in result.errors))
 
     def test_empty_md5_baseline_is_valid_for_empty_mods(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -11004,7 +12090,7 @@ class UserModsTrackerTests(unittest.TestCase):
         page._render(
             UpdateStatus(diffs=[UpdateDiff(status="Modified", text="SomeAddon")])
         )
-        self.assertFalse(page.filter_combo.isHidden())
+        self.assertFalse(page.filter_row.isHidden())
         self.assertFalse(page.count_summary.isHidden())
 
         with patch("commander_gui.ui.update_page.invalidate_baseline"):
@@ -11012,7 +12098,7 @@ class UserModsTrackerTests(unittest.TestCase):
 
         self.assertEqual(page._diffs, [])
         self.assertTrue(page.table.isHidden())
-        self.assertTrue(page.filter_combo.isHidden())
+        self.assertTrue(page.filter_row.isHidden())
         self.assertTrue(page.count_summary.isHidden())
 
     def test_stale_update_check_result_starts_a_replacement_check(self):
@@ -11111,18 +12197,6 @@ class UserModsTrackerTests(unittest.TestCase):
         ):
             self.assertIsNone(fetch_latest_patchnotes(CliProfile()))
 
-    def test_changelog_web_url_builds_a_github_blob_link(self):
-        from commander_gui.updates import changelog_web_url
-
-        class FakeProfile:
-            stalker_gamma_repo_url = "https://github.com/Grokitach/Stalker_GAMMA"
-            stalker_gamma_repo_branch = "main"
-
-        self.assertEqual(
-            changelog_web_url(FakeProfile()),
-            "https://github.com/Grokitach/Stalker_GAMMA/blob/main/Patchnotes.md",
-        )
-
     def test_check_updates_populates_patchnotes_on_the_status(self):
         """Regression test: fetch_latest_patchnotes()'s fetch must be shared
 
@@ -11220,90 +12294,21 @@ class UserModsTrackerTests(unittest.TestCase):
         self.assertEqual(title1, "S.T.A.L.K.E.R. G.A.M.M.A. 0.9.4 Patch Notes")
         self.assertIn("Older notes here.", body1)
 
+    def test_new_releases_marks_only_releases_after_the_seen_version(self):
+        from commander_gui.updates import new_releases
+
+        titles = ["GAMMA 0.9.5", "GAMMA 0.9.4", "GAMMA 0.9.3.1"]
+        self.assertEqual(new_releases(titles, "0.9.4", True), [True, False, False])
+        self.assertEqual(new_releases(titles, "0.9.3", True), [True, True, True])
+        # Unknown seen version: only the newest release is new.
+        self.assertEqual(new_releases(titles, None, True), [True, False, False])
+        # Up to date: nothing is new.
+        self.assertEqual(new_releases(titles, "0.9.3", False), [False, False, False])
+
     def test_parse_patchnotes_sections_handles_no_heading_at_all(self):
         from commander_gui.updates import parse_patchnotes_sections
 
         self.assertEqual(parse_patchnotes_sections("just some text, no heading"), [])
-
-    def test_whats_new_shows_one_collapsible_section_per_release(self):
-        """Regression test: the "What's New" box used to show only the
-
-        latest release's own text (from latest_version_human()'s regex
-        match) even though the fetched Patchnotes.md held the entire
-        release history - this confirms each release now gets its own
-        collapsible entry, latest expanded, the rest collapsed.
-        """
-        from PySide6.QtWidgets import QApplication
-
-        from commander_gui.ui.update_page import UpdatePage
-        from commander_gui.updates import UpdateStatus
-
-        QApplication.instance() or QApplication([])
-        profile = CliProfile(active=True, profile_name="Test", gamma="/games/gamma")
-
-        class FakeWindow:
-            settings = CliSettings(profiles=[profile])
-            install_busy = False
-
-            def refresh_settings(self):
-                pass
-
-        page = UpdatePage(FakeWindow())
-        patchnotes = (
-            "# **GAMMA 0.9.5**\n\nNewest changes.\n\n"
-            "# **GAMMA 0.9.4**\n\nOlder changes.\n"
-        )
-        page._render(UpdateStatus(patchnotes=patchnotes))
-
-        self.assertEqual(page.whats_new_sections_layout.count(), 2)
-        first = page.whats_new_sections_layout.itemAt(0).widget()
-        second = page.whats_new_sections_layout.itemAt(1).widget()
-        self.assertEqual(first.toggle_button.text(), "▾  GAMMA 0.9.5")
-        self.assertTrue(first.toggle_button.isChecked())
-        self.assertFalse(first.body.isHidden())
-        self.assertEqual(second.toggle_button.text(), "▸  GAMMA 0.9.4")
-        self.assertFalse(second.toggle_button.isChecked())
-        self.assertTrue(second.body.isHidden())
-
-        # Clicking the collapsed one expands it in place.
-        second.toggle_button.click()
-        self.assertEqual(second.toggle_button.text(), "▾  GAMMA 0.9.4")
-        self.assertFalse(second.body.isHidden())
-        self.assertIn("Older changes.", second.body.toPlainText())
-
-    def test_render_shows_the_whats_new_panel_when_patchnotes_are_present(self):
-        from PySide6.QtWidgets import QApplication
-
-        from commander_gui.ui.update_page import UpdatePage
-        from commander_gui.updates import UpdateStatus
-
-        QApplication.instance() or QApplication([])
-        profile = CliProfile(active=True, profile_name="Test", gamma="/games/gamma")
-
-        class FakeWindow:
-            settings = CliSettings(profiles=[profile])
-            install_busy = False
-
-            def refresh_settings(self):
-                pass
-
-        page = UpdatePage(FakeWindow())
-        # No check has happened yet - nothing to show.
-        self.assertFalse(page.no_patchnotes_label.isHidden())
-        self.assertTrue(page.whats_new_sections.isHidden())
-
-        page._render(UpdateStatus(patchnotes="# **GAMMA 0.9.5**\n\nSome notes."))
-        self.assertTrue(page.no_patchnotes_label.isHidden())
-        self.assertFalse(page.whats_new_sections.isHidden())
-        self.assertEqual(page.whats_new_sections_layout.count(), 1)
-        section = page.whats_new_sections_layout.itemAt(0).widget()
-        self.assertEqual(section.toggle_button.text(), "▾  GAMMA 0.9.5")
-        self.assertIn("Some notes", section.body.toPlainText())
-
-        page._render(UpdateStatus())
-        self.assertFalse(page.no_patchnotes_label.isHidden())
-        self.assertTrue(page.whats_new_sections.isHidden())
-        self.assertEqual(page.whats_new_sections_layout.count(), 0)
 
     def test_last_checked_label_updates_after_a_successful_check(self):
         from PySide6.QtWidgets import QApplication
@@ -11335,9 +12340,10 @@ class UserModsTrackerTests(unittest.TestCase):
         self.assertIn("just now", page.last_checked_label.text())
 
     def test_apply_warns_on_low_disk_space_but_can_proceed(self):
-        from PySide6.QtWidgets import QApplication, QMessageBox
+        from PySide6.QtWidgets import QApplication
 
         from commander_gui.parsers import UpdateDiff
+        from commander_gui.ui.dialogs import MessageBox as QMessageBox
         from commander_gui.ui.update_page import UpdatePage
         from commander_gui.updates import UpdateStatus
 
@@ -11375,9 +12381,10 @@ class UserModsTrackerTests(unittest.TestCase):
         mock_runner_cls.assert_called_once()
 
     def test_apply_cancelled_at_low_disk_space_prompt_does_not_start(self):
-        from PySide6.QtWidgets import QApplication, QMessageBox
+        from PySide6.QtWidgets import QApplication
 
         from commander_gui.parsers import UpdateDiff
+        from commander_gui.ui.dialogs import MessageBox as QMessageBox
         from commander_gui.ui.update_page import UpdatePage
         from commander_gui.updates import UpdateStatus
 
@@ -11415,8 +12422,9 @@ class UserModsTrackerTests(unittest.TestCase):
 
     def test_mod_manager_deleting_on_disk_files_invalidates_the_baseline(self):
         from PySide6.QtCore import QCoreApplication
-        from PySide6.QtWidgets import QApplication, QMessageBox
+        from PySide6.QtWidgets import QApplication
 
+        from commander_gui.ui.dialogs import MessageBox as QMessageBox
         from commander_gui.ui.mod_manager_page import ModManagerPage
 
         QApplication.instance() or QApplication([])
@@ -11470,7 +12478,7 @@ class UserModsTrackerTests(unittest.TestCase):
                     QMessageBox,
                     "clickedButton",
                     autospec=True,
-                    side_effect=lambda: captured.get("confirm"),
+                    side_effect=lambda _box: captured.get("confirm"),
                 ),
                 patch.object(
                     QMessageBox, "addButton", autospec=True, side_effect=capture_add_button
@@ -11630,6 +12638,7 @@ class UserModsTrackerTests(unittest.TestCase):
             result = (
                 Md5ScanResult(manifest_path=str(Path(tmp) / "gamma-md5.txt")),
                 GammaVerifyResult(used_official_list=True),
+                None,
             )
             with (
                 patch.object(page, "_finish_verify"),
@@ -11784,8 +12793,9 @@ class UserModsTrackerTests(unittest.TestCase):
         upfront when the target drive doesn't have enough free space,
         instead of letting a multi-hour install fail partway through.
         """
-        from PySide6.QtWidgets import QApplication, QMessageBox
+        from PySide6.QtWidgets import QApplication
 
+        from commander_gui.ui.dialogs import MessageBox as QMessageBox
         from commander_gui.ui.install_page import InstallPage
 
         QApplication.instance() or QApplication([])
@@ -11827,9 +12837,9 @@ class UserModsTrackerTests(unittest.TestCase):
             ):
                 page._start_full_install(skip_confirm=False)
 
-            dialog_body = mock_question.call_args.args[2]
-            self.assertIn("WARNING", dialog_body)
-            self.assertIn("150 GB", dialog_body)
+            warning = mock_question.call_args.kwargs["note"]
+            self.assertIn("Only 5.0 GB is free", warning)
+            self.assertIn("150 GB", warning)
 
             with (
                 patch(
@@ -11844,13 +12854,14 @@ class UserModsTrackerTests(unittest.TestCase):
                 page._start_full_install(skip_confirm=False)
 
             self.assertNotIn(
-                "this install needs about",
-                mock_question_ok.call_args.args[2],
+                "This install needs about",
+                mock_question_ok.call_args.kwargs["note"],
             )
 
     def test_anomaly_install_confirm_warns_when_disk_space_is_low(self):
-        from PySide6.QtWidgets import QApplication, QMessageBox
+        from PySide6.QtWidgets import QApplication
 
+        from commander_gui.ui.dialogs import MessageBox as QMessageBox
         from commander_gui.ui.install_page import InstallPage
 
         QApplication.instance() or QApplication([])
@@ -11885,9 +12896,9 @@ class UserModsTrackerTests(unittest.TestCase):
             ):
                 page._start_anomaly_install(skip_confirm=False)
 
-            dialog_body = mock_question.call_args.args[2]
-            self.assertIn("WARNING", dialog_body)
-            self.assertIn("20 GB", dialog_body)
+            warning = mock_question.call_args.kwargs["note"]
+            self.assertIn("is free on this drive", warning)
+            self.assertIn("20 GB", warning)
 
     def test_start_full_install_remembers_the_resolved_preserve_flags(self):
         """Regression test: an auto-retry (gamma_large_files_v2) re-enters
@@ -11965,7 +12976,7 @@ class UserModsTrackerTests(unittest.TestCase):
         this fix, when no GAMMA mods needed repairing, nothing ever
         re-ran full-install afterward to restore that overlay.
         """
-        from PySide6.QtWidgets import QMessageBox
+        from commander_gui.ui.dialogs import MessageBox as QMessageBox
 
         with tempfile.TemporaryDirectory() as tmp:
             page, _profile = self._make_install_page_for_repair(tmp)
@@ -11988,9 +12999,8 @@ class UserModsTrackerTests(unittest.TestCase):
         restores the overlay as a side effect - a second, redundant
         restore pass must not be scheduled on top of it.
         """
-        from PySide6.QtWidgets import QMessageBox
-
         from commander_gui.repair import RepairPlan
+        from commander_gui.ui.dialogs import MessageBox as QMessageBox
 
         with tempfile.TemporaryDirectory() as tmp:
             page, _profile = self._make_install_page_for_repair(tmp)
@@ -12057,6 +13067,7 @@ class UserModsTrackerTests(unittest.TestCase):
                     return_value=SettleResult(reinstalled=["a", "b"]),
                 ) as mock_settle,
                 patch.object(page, "_start_post_scan"),
+                patch("commander_gui.ui.install_page.BackgroundTask", InlineTask),
             ):
                 page._on_repair_install_finished(0, "Repair finished cleanly.")
             mock_settle.assert_called_once_with(["record-a", "record-b"])
@@ -12100,11 +13111,8 @@ class UserModsTrackerTests(unittest.TestCase):
             page._verify_anomaly_ok = True
             presence = GammaVerifyResult(used_official_list=True)
             scan = Md5ScanResult(manifest_path=str(Path(tmp) / "gamma-md5.txt"))
-            result = (presence, scan, None, {}, False, None)
-            with (
-                patch.object(page, "_finish_verify") as mock_finish,
-                patch.object(page, "_gamma_ok_message", return_value="ok"),
-            ):
+            result = (presence, scan, None, {}, False, None, None, {})
+            with patch.object(page, "_finish_verify") as mock_finish:
                 page._on_gamma_verify_done(result)
             self.assertIsNone(page._repair_plan)
             self.assertEqual(page._repair_records, {})
@@ -12125,10 +13133,13 @@ class UserModsTrackerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             page, _profile = self._make_install_page_for_repair(tmp)
             page._verify_counts = {"OK": 1, "CORRUPT": 2, "NOT FOUND": 0}
-            result = (_GAMMA_NOT_INSTALLED, None, None, {}, False, None)
-            with patch.object(page, "_prompt_repair") as mock_prompt:
+            result = (_GAMMA_NOT_INSTALLED, None, None, {}, False, None, None, {})
+            with (
+                patch.object(page, "_offer_repair") as mock_offer,
+                patch.object(page, "_finish_verify"),
+            ):
                 page._on_gamma_verify_done(result)
-            mock_prompt.assert_called_once_with(True, False)
+            mock_offer.assert_called_once_with(True, False, False)
             self.assertTrue(page._gamma_skipped)
 
     def test_gamma_not_installed_with_clean_anomaly_still_concludes(self):
@@ -12142,10 +13153,10 @@ class UserModsTrackerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             page, _profile = self._make_install_page_for_repair(tmp)
             page._verify_counts = {"OK": 5, "CORRUPT": 0, "NOT FOUND": 0}
-            result = (_GAMMA_NOT_INSTALLED, None, None, {}, False, None)
+            result = (_GAMMA_NOT_INSTALLED, None, None, {}, False, None, None, {})
             with (
-                patch.object(page, "_prompt_repair") as mock_prompt,
-                patch.object(page, "_conclude_after_repairs") as mock_conclude,
+                patch.object(page, "_offer_repair") as mock_prompt,
+                patch.object(page, "_conclude_verify") as mock_conclude,
             ):
                 page._on_gamma_verify_done(result)
             mock_prompt.assert_not_called()
@@ -12174,6 +13185,10 @@ class UserModsTrackerTests(unittest.TestCase):
                 # to something that eventually releases the busy lock.
                 cancelled_handler = runner.cancelled.connect.call_args[0][0]
             cancelled_handler()
+            # Still locked: the CLI hasn't exited yet.
+            self.assertEqual(busy_calls, [])
+            runner.was_cancelled = True
+            page._on_anomaly_recheck_finished(130, "")
             self.assertEqual(busy_calls, [(False,)])
             self.assertTrue(page.verify_button.isEnabled())
 
@@ -12228,6 +13243,41 @@ class UserModsTrackerTests(unittest.TestCase):
             self.assertEqual(page.full_progress.status_label.text(), "Cancelled")
             self.assertIsNone(page._post_anomaly_verify_runner)
             self.assertFalse(page._post_anomaly_verify_cancelled)
+
+    def test_anomaly_bad_exit_code_is_judged_by_a_file_check(self):
+        """A nonzero Anomaly exit code (e.g. a crash after it finished) must
+
+        not by itself stop GAMMA: the files are verified first, and only a
+        failed verify holds GAMMA back. Files that are missing or a
+        cancelled check keep the failure.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            for verify_rc, installed, cancelled, expected in (
+                (0, True, False, True),
+                (1, True, False, False),
+                (0, False, False, False),
+                (0, True, True, False),
+            ):
+                page, _profile = self._make_install_page_for_repair(tmp)
+                page._anomaly_failure = None
+                page._anomaly_failed = False
+                page._auto_cancelled = False
+                page._verify_anomaly_after_install = False
+                page._anomaly_runner = Mock(was_cancelled=False)
+                with (
+                    patch.object(page, "_update_install_status"),
+                    patch.object(page, "_start_post_anomaly_verify") as mock_verify,
+                ):
+                    page._on_anomaly_finished(-11, "")
+                mock_verify.assert_called_once()
+                self.assertEqual(page._anomaly_failure, (-11, ""))
+                page._post_anomaly_verify_runner = Mock(was_cancelled=cancelled)
+                with (
+                    patch.object(page, "_finish_anomaly_sequence") as mock_finish,
+                    patch("commander_gui.ui.install_page.anomaly_installed", return_value=installed),
+                ):
+                    page._on_post_anomaly_verify_finished(verify_rc, "")
+                mock_finish.assert_called_once_with(False, expected)
 
     def test_post_anomaly_verify_finished_hides_the_cancel_button(self):
         """Regression test: full_progress.on_finished() was never called
@@ -12296,9 +13346,12 @@ class UserModsTrackerTests(unittest.TestCase):
         self.assertEqual(profile.profile_name, "test")
 
     def test_run_sync_separates_stdout_and_stderr(self):
+        from commander_gui import config
         from commander_gui.cli_runner import run_sync
 
-        rc, output = run_sync(["--version"])
+        # The real binary on purpose (conftest blocks it everywhere else).
+        with patch("commander_gui.cli_runner.cli_binary_path", config.cli_binary_path):
+            rc, output = run_sync(["--version"])
         self.assertEqual(rc, 0)
         self.assertIsInstance(output, str)
         self.assertTrue(len(output) > 0)
@@ -12429,6 +13482,55 @@ class UserModsTrackerTests(unittest.TestCase):
         self.assertIn("mktemp", script)
         self.assertIn("mv -f", script)
         self.assertNotIn("| tar -xOf - umu-run > ~/.local/bin/umu-run", script)
+
+    def test_umu_install_command_refuses_a_tarball_with_the_wrong_hash(self):
+        import io
+        import stat
+        import subprocess
+        import tarfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            home.mkdir()
+            fake_bin = Path(tmp) / "bin"
+            fake_bin.mkdir()
+            tampered = Path(tmp) / "tampered.tar"
+            with tarfile.open(tampered, "w") as tar:
+                data = b"#!/bin/sh\necho pwned\n"
+                info = tarfile.TarInfo("umu/umu-run")
+                info.size = len(data)
+                tar.addfile(info, io.BytesIO(data))
+            curl = fake_bin / "curl"
+            # A "curl" that serves the tampered tarball to whatever -o names.
+            curl.write_text(
+                '#!/bin/sh\nwhile [ "$#" -gt 0 ]; do [ "$1" = -o ] && cp '
+                f'"{tampered}" "$2"; shift; done\n'
+            )
+            curl.chmod(curl.stat().st_mode | stat.S_IEXEC)
+            with patch(
+                "commander_gui.winetricks.shutil.which", return_value=str(curl)
+            ):
+                command = umu_install_command()
+            env = {**os.environ, "HOME": str(home), "PATH": f"{fake_bin}:{os.environ['PATH']}"}
+            result = subprocess.run(command, env=env, capture_output=True, check=False)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertFalse((home / ".local" / "bin" / "umu-run").exists())
+
+    def test_release_notes_links_open_only_web_urls(self):
+        from PySide6.QtCore import QUrl
+        from PySide6.QtWidgets import QApplication, QTextBrowser
+
+        from commander_gui.ui.common import open_web_links
+
+        QApplication.instance() or QApplication([])
+        browser = QTextBrowser()
+        open_web_links(browser)
+        with patch("commander_gui.ui.common.open_url") as opened:
+            browser.anchorClicked.emit(QUrl("file:///etc/passwd"))
+            browser.anchorClicked.emit(QUrl("smb://evil/share"))
+            opened.assert_not_called()
+            browser.anchorClicked.emit(QUrl("https://github.com/x"))
+            opened.assert_called_once_with("https://github.com/x")
 
     def test_umu_install_command_returns_empty_without_curl(self):
         with patch("commander_gui.winetricks.shutil.which", return_value=None):
@@ -12585,6 +13687,16 @@ class AuditFixTests(unittest.TestCase):
         self.assertLess(version("v1.3H5"), version("1.3.2"))
         self.assertEqual(version("1.3"), version("v1.3.0"))
         self.assertGreater(version("1.3.0"), version("v1.2.9H3"))
+        # Four parts: one fixed width, never the 4th part against a hotfix.
+        self.assertEqual(len(version("1.2.9.1")), len(version("1.2.9H1")))
+        self.assertGreater(version("1.2.9.1"), version("1.2.9"))
+        self.assertLess(version("1.2.9.1"), version("1.3.0"))
+
+    def test_update_status_ignores_a_marker_that_is_not_a_build_number(self):
+        from commander_gui.updates import UpdateStatus
+
+        self.assertFalse(UpdateStatus(installed="920", latest="<html>login</html>").update_available)
+        self.assertTrue(UpdateStatus(installed="garbled", latest="921").update_available)
 
     def test_fomod_folder_without_destination_keeps_its_folder(self):
         from commander_gui.fomod import FomodFile, _place_item
@@ -12636,6 +13748,22 @@ class AuditFixTests(unittest.TestCase):
             cache.mkdir()
             (cache / "mod.7z").write_bytes(b"7z")
             self.assertEqual(len(_validate_wipe_paths([("Anomaly", str(anomaly)), ("Cache", str(cache))])), 2)
+            # An offline pack zipped on a Mac carries ._ AppleDouble files.
+            (cache / "Stalker_GAMMA.git").mkdir()
+            (cache / "._Stalker_GAMMA.git").write_bytes(b"x")
+            (cache / ".DS_Store").write_bytes(b"x")
+            self.assertEqual(len(_validate_wipe_paths([("Cache", str(cache))])), 1)
+
+    def test_wipe_refuses_a_notes_folder_as_the_cache(self):
+        from commander_gui.ui.utilities_page import _validate_wipe_paths
+
+        with tempfile.TemporaryDirectory(dir=Path.home()) as tmp:
+            notes = Path(tmp) / "notes"
+            notes.mkdir()
+            (notes / "todo.txt").write_text("x")
+            (notes / "data.json").write_text("{}")
+            with self.assertRaisesRegex(ValueError, "does not look like"):
+                _validate_wipe_paths([("Cache", str(notes))])
 
     def test_wipe_refuses_hidden_home_folders(self):
         from commander_gui.ui.utilities_page import _safe_wipe_path
@@ -12674,17 +13802,13 @@ class AuditFixTests(unittest.TestCase):
         outside = {"PYTHONPATH": "/x", "HOME": "/h"}
         self.assertEqual(child_environment(outside), outside)
 
-    def test_bundle_sources_are_detected_and_resettable(self):
-        from commander_gui.profile_bundle import non_default_sources, reset_sources
+    def test_bundle_sources_are_resettable(self):
+        from commander_gui.profile_bundle import reset_sources
 
         profile = CliProfile()
-        self.assertEqual(non_default_sources(profile), [])
         profile.gamma_large_files_repo_url = "https://github.com/evil/fork"
-        self.assertEqual(
-            non_default_sources(profile), [("gamma_large_files_repo_url", "https://github.com/evil/fork")]
-        )
         reset_sources(profile)
-        self.assertEqual(non_default_sources(profile), [])
+        self.assertEqual(profile.gamma_large_files_repo_url, CliProfile().gamma_large_files_repo_url)
 
     def test_bundle_with_infinite_threads_and_bad_manifest(self):
         import zipfile
@@ -12853,6 +13977,23 @@ class RepairSafetyTests(unittest.TestCase):
                 (gamma / "mods" / "12- Some Mod" / "gamedata" / "a.script").read_text(), "original"
             )
 
+    def test_a_reinstalled_mod_keeps_the_new_copy_with_a_symlinked_mods_folder(self):
+        from commander_gui.repair import quarantine_mod_and_archive, settle_quarantine
+
+        with tempfile.TemporaryDirectory() as tmp:
+            gamma = Path(tmp) / "gamma"
+            gamma.mkdir()
+            real_mods = Path(tmp) / "gamma_mods"
+            (real_mods / "12- Some Mod").mkdir(parents=True)
+            (gamma / "mods").symlink_to(real_mods)
+            record = quarantine_mod_and_archive(str(gamma), "12- Some Mod")
+            fresh = real_mods / "12- Some Mod" / "gamedata"
+            fresh.mkdir(parents=True)
+            (fresh / "a.script").write_text("reinstalled")
+            result = settle_quarantine([record])
+            self.assertEqual(result.reinstalled, ["12- Some Mod"])
+            self.assertEqual((fresh / "a.script").read_text(), "reinstalled")
+
     def test_a_reinstalled_mod_keeps_the_new_copy(self):
         from commander_gui.repair import settle_quarantine
 
@@ -12924,7 +14065,8 @@ class OverlayRevertTests(unittest.TestCase):
             (root / "bin").mkdir()
             vanilla = b"vanilla engine"
             (root / "bin" / "AnomalyDX11.exe").write_bytes(vanilla)
-            (root / "fsgame.ltx").write_bytes(b"gamma fsgame")
+            # A vanilla fsgame.ltx is normal: the CLI never writes GAMMA's.
+            (root / "fsgame.ltx").write_bytes(b"vanilla fsgame")
             (root / "tools" / "checksums.md5").write_text(
                 f"{hashlib.md5(vanilla).hexdigest()} *bin/AnomalyDX11.exe\n"
                 f"{hashlib.md5(b'vanilla fsgame').hexdigest()} *fsgame.ltx\n"
@@ -13000,6 +14142,27 @@ class AssistantThemeParityTests(unittest.TestCase):
             )
 
 
+class WinterTimeOfDayTests(unittest.TestCase):
+    def test_winter_follows_the_clock_in_every_window(self) -> None:
+        """Winter paints dawn, day, dusk or night by the hour; each look must
+        be complete (COMMANDER and ASSISTANT tokens, scene image) or a
+        window falls back to GAMMA or an unpainted backdrop at that hour."""
+        from assistant.ui import theme as assistant_theme
+        from commander_gui.themes import THEMES, resolve_theme
+
+        hours = {0: "winter_night", 6: "winter_dawn", 8: "winter", 16: "winter", 17: "winter_dusk", 19: "winter_night"}
+        for hour, expected in hours.items():
+            self.assertEqual(resolve_theme("winter", hour), expected, hour)
+        self.assertEqual(resolve_theme("midnight", 3), "midnight")
+        assets = Path(__file__).resolve().parents[1] / "commander_gui" / "assets"
+        for key in set(hours.values()):
+            self.assertLessEqual(set(THEMES["reactor"]), set(THEMES[key]), key)
+            self.assertTrue((assets / THEMES[key]["back_image"]).is_file(), key)
+            for side in ("left", "right"):
+                self.assertTrue((assets / f"{THEMES[key]['back_trees']}_{side}.png").is_file(), key)
+            self.assertEqual(set(assistant_theme.THEMES[key]), set(assistant_theme.THEMES["gamma"]), key)
+
+
 class RepairPreviewTests(unittest.TestCase):
     def test_preview_lists_every_mod_with_its_file_counts(self):
         from commander_gui.integrity import Md5ScanResult
@@ -13060,7 +14223,7 @@ class CrashAnalyzeTests(unittest.TestCase):
                 patch.object(page, "_start_crash_report") as start,
             ):
                 page._check_for_crash()
-            self.assertEqual(ask.call_args.args[0], "Game Crashed")
+            self.assertEqual(ask.call_args.args[0], "The game crashed")
             start.assert_called_once_with(open_assistant=True)
 
             page._crash_report_opens_assistant = True
@@ -13127,7 +14290,7 @@ class CreateInstallFoldersConfirmationTests(unittest.TestCase):
             for name in ("anomaly", "gamma", "cache"):
                 self.assertTrue((Path(tmp) / name).is_dir())
             info.assert_called_once()
-            self.assertIn("Step 3 and Step 4", info.call_args.args[2])
+            self.assertIn("steps 3 and 4", info.call_args.args[2])
             self.assertEqual(profile.gamma, str(Path(tmp) / "gamma"))
 
     def test_no_confirmation_when_the_folders_could_not_be_saved(self):
@@ -13215,6 +14378,7 @@ class UpdateStatusRecheckTests(unittest.TestCase):
             patch.object(MainWindow, "_offer_commander_self_update", lambda self, tag: clicks.append(tag)),
             # A __new__()-built window has no live Qt signal to emit on.
             patch.object(MainWindow, "commander_update_found", Mock()),
+            patch.object(MainWindow, "commander_update_checked", Mock()),
         ):
             window._on_commander_update_status_checked("v1.3.0")
             window._on_commander_update_status_checked("v1.3.0H1")
@@ -13224,19 +14388,31 @@ class UpdateStatusRecheckTests(unittest.TestCase):
 
 class AboutDiscordLinkTests(unittest.TestCase):
     def test_about_page_links_to_the_discord_invite(self):
-        from PySide6.QtWidgets import QApplication, QPushButton
+        from PySide6.QtWidgets import QApplication
 
         from commander_gui.ui import about_page
 
         QApplication.instance() or QApplication([])
         page = about_page.AboutPage.__new__(about_page.AboutPage)
         about_page.QWidget.__init__(page)
-        card = page._links_card()
-        buttons = [b for b in card.findChildren(QPushButton) if b.text() == "Join the Discord"]
+        buttons = [b for b in page._link_buttons() if b.text() == "Join the Discord"]
         self.assertEqual(len(buttons), 1)
         with patch.object(about_page, "open_url") as open_url:
             buttons[0].click()
         self.assertEqual(open_url.call_args.args[0], "https://discord.gg/6A9psrtYhh")
+
+    def test_search_highlights_matches_and_clearing_restores_plain_text(self):
+        from PySide6.QtWidgets import QApplication, QLabel
+
+        from commander_gui.ui.about_page import _highlight
+
+        QApplication.instance() or QApplication([])
+        label = QLabel("Wine/Proton <prefix> & GE-Proton")
+        _highlight(label, ["proton"])
+        self.assertEqual(label.text().count("<span style=\"background-color"), 2)
+        self.assertIn("&lt;prefix&gt; &amp;", label.text())
+        _highlight(label, [])
+        self.assertEqual(label.text(), "Wine/Proton <prefix> & GE-Proton")
 
 
 
@@ -13367,10 +14543,13 @@ class UnstableBuildTests(unittest.TestCase):
                 settings = CliSettings(profiles=[CliProfile(active=True, profile_name="T")])
                 switched: ClassVar[list] = []
 
-                def switch_commander_build(self, target):
+                def switch_commander_build(self, target, tag=None):
                     self.switched.append(target)
 
             window = FakeWindow()
+            label = patch.object(settings_page, "__version_label__", "1.3.0")
+            label.start()
+            self.addCleanup(label.stop)
             with (
                 patch.object(settings_page, "__version__", "1.3.0"),
                 patch.object(settings_page, "newer_unstable_tag", return_value=None),
@@ -13396,6 +14575,14 @@ class UnstableBuildTests(unittest.TestCase):
                 page._render_build()
                 self.assertFalse(page._switch_build_button.isEnabled())
                 self.assertIn("git switch", page._build_note.text())
+                # From source the check must still run, or "Checking" sticks.
+                page._unstable_checked = False
+                with (
+                    patch.object(settings_page, "__version__", "1.3.0"),
+                    patch.object(page, "_check_unstable") as check,
+                ):
+                    page._render_build()
+                check.assert_called_once()
 
 
 class AssistantGammaOverlayTests(unittest.TestCase):
@@ -13455,3 +14642,499 @@ class TaskOwnerDeletedMidRunTests(unittest.TestCase):
                 QCoreApplication.sendPostedEvents(thread)
                 self.assertNotIn(task, _ACTIVE_TASKS)
                 self.assertEqual(results, [])
+
+
+class MessageDialogTests(unittest.TestCase):
+    def test_opens_from_a_page_that_shadows_window(self):
+        """Regression test: pages keep the MainWindow in ``self.window``,
+        which hides QWidget.window(); the themed pop-up crashed on it and
+        the Steam restart prompt never appeared."""
+        from PySide6.QtCore import Qt
+        from PySide6.QtWidgets import QApplication, QDialog, QPushButton, QWidget
+
+        from commander_gui.ui.dialogs import MessageBox
+
+        QApplication.instance() or QApplication([])
+        host = QWidget()
+        host.custom_title_bar = True
+        page = QWidget(host)
+        page.window = host
+
+        def click_primary(dialog):
+            self.assertTrue(dialog.windowFlags() & Qt.WindowType.FramelessWindowHint)
+            dialog.findChild(QPushButton, "primary").click()
+            return QDialog.DialogCode.Accepted
+
+        with patch.object(QDialog, "exec", click_primary):
+            answer = MessageBox.question(page, "Title", "Text")
+        self.assertEqual(answer, MessageBox.StandardButton.Yes)
+
+
+class XrRazomModManagerGuardTests(unittest.TestCase):
+    """Mod Manager refuses xrRazom by layout, never by name."""
+
+    def test_detects_xrrazom_layout_only(self):
+        from commander_gui.coop import looks_like_xrrazom
+
+        real = ["Anomaly", "Anomaly/bin", "Anomaly/bin/AnomalyDX11.exe", "gamedata/configs/x.ltx"]
+        wrapped = ["xrRazom-1.4", *("xrRazom-1.4/" + n for n in real)]
+        addon = ["xrRazom addon/gamedata/scripts/x.script", "xrRazom addon/xrRazom-release.txt"]
+
+        self.assertTrue(looks_like_xrrazom(real))
+        self.assertTrue(looks_like_xrrazom(wrapped))
+        self.assertFalse(looks_like_xrrazom(addon))
+        self.assertFalse(looks_like_xrrazom(["gamedata/x", "bin/x.dll"]))
+
+
+class LaunchOptionChipTests(unittest.TestCase):
+    """Multi-token options wrap the other wrappers and toggle off cleanly."""
+
+    def setUp(self):
+        # MangoHud and vkBasalt's own setup is tests/test_overlays.py's.
+        stub = patch("commander_gui.overlays.resolve", side_effect=lambda env, prefix: prefix)
+        stub.start()
+        self.addCleanup(stub.stop)
+
+    def test_gamescope_wraps_mangohud(self):
+        from commander_gui import launch_options
+
+        text = "PULSE_LATENCY_MSEC=60 mangohud %command%"
+        on = launch_options.toggle(text, "gamescope -f --", True)
+        self.assertEqual(on, "gamescope -f -- PULSE_LATENCY_MSEC=60 mangohud %command%")
+        self.assertTrue(launch_options.is_on(on, "gamescope -f --"))
+        self.assertEqual(launch_options.toggle(on, "gamescope -f --", False), text)
+
+    def test_frame_gen_finds_lossless_dll(self):
+        from commander_gui import launch_options
+
+        with tempfile.TemporaryDirectory() as tmp:
+            library = Path(tmp, "lib")
+            with patch("commander_gui.launcher._steam_library_paths", return_value=[library]):
+                self.assertIsNone(launch_options.lossless_dll())
+                dll = library / "steamapps/common/Lossless Scaling/Lossless.dll"
+                dll.parent.mkdir(parents=True)
+                dll.write_text("")
+                self.assertEqual(launch_options.lossless_dll(), dll)
+                picked = Path(tmp, "Lossless.dll")
+                picked.write_text("")
+                with patch.object(gui_settings, "load_gui_settings", return_value={"lossless_dll": str(picked)}):
+                    self.assertEqual(launch_options.lossless_dll(), picked)
+                    picked.unlink()
+                    self.assertEqual(launch_options.lossless_dll(), dll)
+        on = launch_options.frame_gen("mangohud %command% -x", True)
+        self.assertEqual(on, "mangohud LSFGVK_ENV=1 LSFGVK_MULTIPLIER=2 %command% -x")
+        on = launch_options.set_var(on, launch_options.FG_MULTIPLIER, "4")
+        on = launch_options.set_var(on, launch_options.FG_FLOW_SCALE, "0.5")
+        self.assertEqual(launch_options.var(on, launch_options.FG_MULTIPLIER), "4")
+        self.assertEqual(launch_options.set_var(on, launch_options.FG_FLOW_SCALE, None).count("FLOW"), 0)
+        self.assertEqual(launch_options.frame_gen(on, False), "mangohud %command% -x")
+
+    def test_frame_gen_runs_only_with_a_native_lossless_dll(self):
+        """Frame generation needs Lossless.dll: not lsfg-vk.dll (the lsfg-vk
+        beta's) nor Lossless Scaling's own .NET LosslessScaling.dll. Without
+        one it is left out, so a launch never shows a black screen."""
+        from commander_gui import launch_options
+
+        def pe(clr_size: int) -> bytes:
+            head = bytearray(512)
+            head[:2] = b"MZ"
+            head[0x3C:0x40] = (0x40).to_bytes(4, "little")
+            head[0x40:0x44] = b"PE\0\0"
+            head[0x58:0x5A] = (0x20B).to_bytes(2, "little")
+            clr = 0x58 + 112 + 14 * 8
+            head[clr + 4 : clr + 8] = clr_size.to_bytes(4, "little")
+            return bytes(head)
+
+        text = "LSFGVK_ENV=1 LSFGVK_MULTIPLIER=3 LSFGVK_PERFORMANCE_MODE=1 %command%"
+        with tempfile.TemporaryDirectory() as tmp:
+            dll = Path(tmp, "Lossless.dll")
+            dll.write_bytes(pe(0))
+            beta = Path(tmp, "lsfg-vk.dll")
+            beta.write_bytes(pe(0))
+            dotnet = Path(tmp, "LosslessScaling.dll")
+            dotnet.write_bytes(pe(72))
+            self.assertTrue(launch_options.native_dll(dll))
+            self.assertFalse(launch_options.native_dll(dotnet))
+            self.assertTrue(launch_options.frame_gen_ready(dll))
+            self.assertFalse(launch_options.frame_gen_ready(beta))
+            self.assertFalse(launch_options.frame_gen_ready(dotnet))
+            with patch.object(launch_options, "_BUNDLED_FRAME_GEN", Path(tmp, "none.so")):
+                self.assertFalse(launch_options.frame_gen_ready(dll))
+            conf = Path(tmp, "frame-gen.toml")
+            for used, expected in (
+                (dll, {"MAKO_CONFIG": str(conf), "VK_INSTANCE_LAYERS": launch_options.FRAME_GEN_LAYER,
+                       "DISABLE_LSFG": "1", "DISABLE_LSFGVK": "1", "DISABLE_GAMESCOPE_WSI": "1"}),
+                (beta, {}),
+            ):
+                env: dict[str, str] = {}
+                with patch.object(launch_options, "lossless_dll", return_value=used), patch(
+                    "commander_gui.config.settings_dir", return_value=Path(tmp)
+                ), patch.object(launch_options, "_install_frame_gen"):
+                    launch_options.apply(["game"], env, text)
+                self.assertEqual(env, expected, used.name)
+            # From a profile of COMMANDER's own, active only in the game's
+            # executable (not Wine's explorer.exe and the like).
+            config = conf.read_text()
+            self.assertIn('[[profile]]\nname = "COMMANDER"\nactive_in = ["AnomalyDX11AVX.exe", ', config)
+            self.assertIn("frame_generation_enabled = true\nmultiplier = 3\n", config)
+            self.assertIn("performance_mode = true\n", config)
+            self.assertIn(f"dll = {json.dumps(str(dll))}\n", config)
+            # Reread in the running game: off is frame_generation_enabled = false.
+            with patch.object(launch_options, "lossless_dll", return_value=dll), patch(
+                "commander_gui.config.settings_dir", return_value=Path(tmp)
+            ):
+                launch_options.live_frame_gen("LSFGVK_MULTIPLIER=4 %command%")
+            self.assertIn("frame_generation_enabled = false\nmultiplier = 4\n", conf.read_text())
+
+    def test_bundled_frame_gen_is_set_up_with_its_library_by_full_path(self):
+        """A bare library name never loads from ~/.local; the manifest names
+        the copied library by full path. Explicit, with no enable switch:
+        only a launch that lists it in VK_INSTANCE_LAYERS loads it."""
+        from commander_gui import launch_options
+
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"XDG_DATA_HOME": tmp}):
+            bundled = Path(tmp, "bundle", "libmako-render.so")
+            bundled.parent.mkdir()
+            bundled.write_bytes(b"so")
+            with patch.object(launch_options, "_BUNDLED_FRAME_GEN", bundled):
+                launch_options._install_frame_gen.cache_clear()
+                launch_options._install_frame_gen()
+                launch_options._install_frame_gen.cache_clear()
+            layer = json.loads(Path(tmp, "vulkan/explicit_layer.d/commander-mako.json").read_text())["layer"]
+            self.assertEqual(Path(layer["library_path"]).read_bytes(), b"so")
+            self.assertEqual(layer["name"], launch_options.FRAME_GEN_LAYER)
+            self.assertNotIn("enable_environment", layer)
+        self.assertTrue(launch_options._BUNDLED_FRAME_GEN.is_file())
+
+    def test_quiet_wine_logs_and_proton_log_exclude_each_other(self):
+        from commander_gui import launch_options
+
+        text = launch_options.toggle("PROTON_LOG=1", "WINEDEBUG=-all", True)
+        self.assertEqual(text, "WINEDEBUG=-all")
+        self.assertEqual(launch_options.toggle(text, "PROTON_LOG=1", True), "PROTON_LOG=1")
+
+    def test_coop_shortcut_options_ignore_game_mode(self):
+        """The co-op shortcut is the same in Game and Desktop Mode (else each
+        switch restarts Steam), and co-op never drops the Steam overlay."""
+        from commander_gui import launch_options
+
+        text = launch_options.for_coop("gamescope -f -- LD_PRELOAD= PROTON_ENABLE_WAYLAND=1 mangohud %command%")
+        self.assertEqual(text, "gamescope -f -- mangohud %command%")
+        shortcuts = set()
+        for game_mode in (True, False):
+            with patch.object(launch_options, "in_game_mode", return_value=game_mode):
+                shortcuts.add(launch_options.for_steam(text, "%command% -x"))
+        self.assertEqual(shortcuts, {"mangohud %command% -x"})
+
+    def test_for_steam_merges_into_shortcut_options(self):
+        from commander_gui import launch_options
+
+        base = "STEAM_COMPAT_DATA_PATH='/my pfx' SteamAppId=480 %command% run -e Anomaly"
+        with patch.object(launch_options, "in_game_mode", return_value=False):
+            merged = launch_options.for_steam("SteamAppId=1 LD_PRELOAD= mangohud %command% -x", base)
+        self.assertEqual(
+            merged,
+            "SteamAppId=480 LD_PRELOAD='' STEAM_COMPAT_DATA_PATH='/my pfx' "
+            "mangohud %command% run --arguments=-x -e Anomaly",
+        )
+        # Words after %command% reach the game through MO2's --arguments; MO2
+        # itself quits on them (CTD with "... %command% r__tex_evict_enabled").
+        with patch.object(launch_options, "in_game_mode", return_value=False):
+            command = launch_options.apply(
+                ["mo2", "-p", "P", "run", "--arguments=-nosplash", "-e", "Anomaly"], {}, "%command% -a b"
+            )
+        self.assertEqual(command, ["mo2", "-p", "P", "run", "--arguments=-nosplash -a b", "-e", "Anomaly"])
+        with patch.object(launch_options, "in_game_mode", return_value=False):
+            self.assertEqual(launch_options.for_steam("", base), "STEAM_COMPAT_DATA_PATH='/my pfx' SteamAppId=480 %command% run -e Anomaly")
+
+    def test_apply_splits_env_wrappers_and_arguments(self):
+        from commander_gui import launch_options
+
+        env: dict[str, str] = {}
+        with patch.object(launch_options, "in_game_mode", return_value=False):
+            command = launch_options.apply(["game"], env, "gamescope -f -- LD_PRELOAD= mangohud %command% -x")
+        self.assertEqual(command, ["gamescope", "-f", "--", "mangohud", "game", "-x"])
+        self.assertEqual(env, {"LD_PRELOAD": ""})
+
+
+class StockMo2ProfileOnFreshInstallTests(unittest.TestCase):
+    def test_missing_custom_profile_goes_back_to_stock_name(self):
+        # Removing GAMMA with ROMEO selected made the next install write
+        # GAMMA's profile under "ROMEO" and leave no G.A.M.M.A profile.
+        from types import SimpleNamespace
+
+        from commander_gui.ui.common import use_stock_mo2_profile_if_missing
+
+        with tempfile.TemporaryDirectory() as gamma:
+            settings = SimpleNamespace(saves=0)
+            settings.save = lambda: setattr(settings, "saves", settings.saves + 1)
+            profile = SimpleNamespace(gamma=gamma, mo2_profile="ROMEO")
+            use_stock_mo2_profile_if_missing(settings, profile)
+            self.assertEqual((profile.mo2_profile, settings.saves), ("G.A.M.M.A", 1))
+
+            for marker in ("ModOrganizer.exe", "ModOrganizer.ini"):
+                Path(gamma, marker).touch()
+            Path(gamma, "profiles", "ROMEO").mkdir(parents=True)
+            profile.mo2_profile = "ROMEO"
+            use_stock_mo2_profile_if_missing(settings, profile)
+            self.assertEqual((profile.mo2_profile, settings.saves), ("ROMEO", 1))
+
+
+class TokenColorTests(unittest.TestCase):
+    def test_rgba_tokens_parse_instead_of_falling_back(self):
+        # Winter's card is rgba(); QColor() alone can't read it, which left
+        # the Welcome panel GAMMA's dark green under Winter's dark text.
+        from commander_gui import themes
+
+        previous = themes.active_theme()
+        try:
+            themes.set_active_theme("winter_dawn")
+            card = themes.token_color("card", "#000000")
+            self.assertEqual((card.red(), card.green(), card.blue(), card.alpha()), (218, 226, 233, 185))
+            themes.set_active_theme("gamma")
+            self.assertEqual(themes.token_color("card", "#000000").name(), "#141b15")
+            self.assertEqual(themes.token_color("no_such_token", "#123456").name(), "#123456")
+        finally:
+            themes.set_active_theme(previous)
+
+    def test_deck_glass_and_rows_read_winter_rgba(self):
+        # Deck Mode parsed rgba() with QColor() too: the mod list's header
+        # rows came out black and the cards kept Winter's see-through alpha.
+        from Steamdeck.deck_theme import _translucent
+
+        self.assertEqual(_translucent("rgba(22, 29, 36, 175)", 240), "rgba(22, 29, 36, 240)")
+        source = (Path(__file__).resolve().parents[1] / "Steamdeck" / "screens" / "mods.py").read_text()
+        self.assertNotIn('QColor(tokens.get("btn', source)
+
+
+class WinterSnowfallTests(unittest.TestCase):
+    def test_snow_and_lights_follow_theme_and_setting(self):
+        # Shared by the desktop window and Deck Mode's backdrop: flakes and
+        # fairy lights only in Winter, and switching snow off clears them.
+        from PySide6.QtWidgets import QApplication, QWidget
+
+        QApplication.instance() or QApplication([])
+        from commander_gui import themes
+        from commander_gui.ui.winter import ChristmasLights, Snowfall
+
+        previous = themes.active_theme()
+        host = QWidget()
+        host.resize(400, 300)
+        try:
+            themes.set_active_theme("winter")
+            snowfall = Snowfall(host)
+            snowfall.lights = ChristmasLights(QWidget(host), host)
+            snowfall._tick()
+            self.assertEqual(len(snowfall.flakes), Snowfall.FLAKES)
+            with patch("commander_gui.gui_settings.load_gui_settings", return_value={"live_animation": False}):
+                snowfall.sync(True)
+            self.assertEqual(snowfall.flakes, [])
+            self.assertFalse(snowfall.lights.isHidden())
+            themes.set_active_theme("gamma")
+            snowfall.sync(True)
+            self.assertTrue(snowfall.lights.isHidden())
+            self.assertFalse(snowfall._timer.isActive())
+        finally:
+            themes.set_active_theme(previous)
+            host.deleteLater()
+
+
+class RedForestTests(unittest.TestCase):
+    def test_red_forest_follows_the_clock_in_every_window(self) -> None:
+        """Each Red Forest look must be complete: COMMANDER and ASSISTANT
+        tokens, the scene image and both swaying tree layers."""
+        from assistant.ui import theme as assistant_theme
+        from commander_gui.themes import THEMES, resolve_theme
+
+        hours = {0: "redforest_night", 6: "redforest_dawn", 8: "redforest", 16: "redforest", 17: "redforest_dusk", 19: "redforest_night"}
+        for hour, expected in hours.items():
+            self.assertEqual(resolve_theme("redforest", hour), expected, hour)
+        # Locked to one time of day in Settings, the clock no longer moves it.
+        from commander_gui import themes
+
+        with patch("commander_gui.gui_settings.load_gui_settings", return_value={"live_time": "night"}):
+            themes.set_active_theme("redforest")
+        try:
+            self.assertEqual(resolve_theme("redforest"), "redforest_night")
+            self.assertEqual(resolve_theme("winter"), "winter_night")
+        finally:
+            themes._LIVE_TIME = ""
+        assets = Path(__file__).resolve().parents[1] / "commander_gui" / "assets"
+        for key in set(hours.values()):
+            self.assertLessEqual(set(THEMES["reactor"]), set(THEMES[key]), key)
+            self.assertNotIn("back_snow", THEMES[key])
+            self.assertTrue((assets / THEMES[key]["back_image"]).is_file(), key)
+            for side in ("left", "right"):
+                self.assertTrue((assets / f"{THEMES[key]['back_trees']}_{side}.png").is_file(), key)
+            self.assertEqual(set(assistant_theme.THEMES[key]), set(assistant_theme.THEMES["gamma"]), key)
+
+    def test_trees_fire_and_leaves_follow_theme_and_setting(self):
+        from PySide6.QtGui import QPainter, QPixmap
+        from PySide6.QtWidgets import QApplication, QWidget
+
+        QApplication.instance() or QApplication([])
+        from commander_gui import themes
+        from commander_gui.ui.redforest import RedForest
+
+        previous = themes.active_theme()
+        host = QWidget()
+        host.resize(400, 300)
+        canvas = QPixmap(400, 300)
+        try:
+            themes.set_active_theme("redforest_night")
+            forest = RedForest(host)
+            forest._tick()
+            self.assertEqual(len(forest.leaves), RedForest.LEAVES)
+            painter = QPainter(canvas)
+            forest.paint(painter)
+            painter.end()
+            # Both tree layers and the fire get repainted as they move, the
+            # trees only where they have branches: less than their whole box.
+            self.assertEqual(len(forest._trees), 2)
+            self.assertIsNotNone(forest._fire)
+            for rects in forest._trees:
+                self.assertGreater(len(rects), 1)
+            with patch.object(host, "update") as update:
+                forest._tick()
+                # Every band of both trees, and the fire (every second tick).
+                self.assertEqual(update.call_count - RedForest.LEAVES, sum(map(len, forest._trees)) + 1)
+                update.reset_mock()
+                forest._tick()  # a crown 33 ms on has moved under half a pixel
+                self.assertEqual(update.call_count, RedForest.LEAVES)
+            with patch("commander_gui.gui_settings.load_gui_settings", return_value={"live_animation": False}):
+                forest.sync(True)
+            self.assertEqual(forest.leaves, [])
+            self.assertFalse(forest._timer.isActive())
+            forest.sync(True)
+            self.assertTrue(forest._timer.isActive())
+            # Winter sways its trees too, slower, but drops no leaves.
+            themes.set_active_theme("winter_night")
+            forest.sync(True)
+            self.assertTrue(forest._timer.isActive())
+            self.assertEqual(forest.leaves, [])
+            forest._tick()
+            forest._tick()
+            self.assertEqual(forest.leaves, [])
+            self.assertGreater(float(themes.THEMES["winter_night"]["back_sway_s"]), RedForest.SWAY_PERIOD_S)
+            painter = QPainter(canvas)
+            forest.paint(painter)
+            painter.end()
+            self.assertEqual(len(forest._trees), 2)
+            self.assertIsNone(forest._fire)
+            themes.set_active_theme("reactor")
+            forest.sync(True)
+            self.assertFalse(forest._timer.isActive())
+            forest._trees = []
+            painter = QPainter(canvas)
+            forest.paint(painter)
+            painter.end()
+            self.assertEqual(forest._trees, [])
+        finally:
+            themes.set_active_theme(previous)
+            host.deleteLater()
+
+
+class WineUnsafeFolderTests(unittest.TestCase):
+    """Wine drops a dot or space at the end of a folder name, so an install
+    in "G.A.M.M.A./gamma" can't start (MO2 lands in a folder that doesn't exist)."""
+
+    def test_flags_folder_name_ending_in_dot_or_space(self):
+        from commander_gui.ui.common import wine_unsafe_folder
+
+        self.assertEqual(wine_unsafe_folder("/home/a/G.A.M.M.A./gamma"), "/home/a/G.A.M.M.A.")
+        self.assertEqual(wine_unsafe_folder("/home/a/ok", "/home/a/GAMMA /anomaly"), "/home/a/GAMMA ")
+        self.assertIsNone(wine_unsafe_folder("/home/a/G.A.M.M.A/gamma", "/home/a/.cache"))
+
+
+def test_adopt_modpack_list_copies_into_active_profile(tmp_path):
+    from commander_gui.updates import adopt_modpack_list
+
+    src = tmp_path / "profiles" / "G.A.M.M.A"
+    dest = tmp_path / "profiles" / "Mine"
+    src.mkdir(parents=True)
+    dest.mkdir()
+    (src / "modpack_maker_list.json").write_text("[]")
+    (src / "modpack_maker_list.txt").write_text("x\n")
+    assert adopt_modpack_list(str(tmp_path), "Mine")
+    assert (dest / "modpack_maker_list.json").read_text() == "[]"
+    assert not adopt_modpack_list(str(tmp_path), "Mine")  # never overwrites
+
+
+class TesterNov2VerifyAndImportTests(unittest.TestCase):
+    def test_reinstalled_folders_become_the_snapshot(self):
+        from commander_gui.integrity import (
+            MANIFEST_FILENAME,
+            accept_reinstalled,
+            scan_mods_md5,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            gamma = Path(tmp)
+            mod, other = gamma / "mods" / "101- BAS", gamma / "mods" / "11- Other"
+            (mod / "fomod").mkdir(parents=True)
+            other.mkdir(parents=True)
+            (mod / "old.script").write_text("windows layout")
+            (other / "a.script").write_text("a")
+            scan_mods_md5(str(gamma))  # snapshot
+            # Repair unpacks a different layout; an unrelated mod is edited.
+            (mod / "old.script").unlink()
+            (mod / "fomod" / "info.xml").write_text("cli layout")
+            (other / "a.script").write_text("edited")
+            post = scan_mods_md5(str(gamma), trust_baseline=True)
+            accept_reinstalled(str(gamma), post, ["101- BAS"])
+            self.assertEqual(post.changed, ["mods/11- Other/a.script"])
+            self.assertEqual((post.added, post.removed), ([], []))
+            manifest = (gamma / MANIFEST_FILENAME).read_text()
+            self.assertIn("mods/101- BAS/fomod/info.xml", manifest)
+            self.assertNotIn("old.script", manifest)
+            again = scan_mods_md5(str(gamma), trust_baseline=True)
+            self.assertEqual(again.changed, ["mods/11- Other/a.script"])
+
+    def test_split_cache_moves_downloads_next_to_gamma(self):
+        from commander_gui.game_installs import split_cache
+
+        with tempfile.TemporaryDirectory() as tmp:
+            gamma = Path(tmp) / "GAMMA"
+            (gamma / "downloads").mkdir(parents=True)
+            (gamma / "downloads" / "a.zip").write_text("x")
+            cache = split_cache(gamma, gamma / "downloads")
+            self.assertEqual(cache, str(Path(tmp) / "cache"))
+            self.assertTrue((gamma / "downloads").is_symlink())
+            self.assertEqual((gamma / "downloads" / "a.zip").read_text(), "x")
+            # Already split: nothing changes.
+            self.assertEqual(split_cache(gamma, gamma / "downloads"), str(gamma / "downloads"))
+        # GAMMA straight in the home folder: no bare ~/cache.
+        with tempfile.TemporaryDirectory() as tmp:
+            gamma = Path(tmp) / "GAMMA"
+            (gamma / "downloads").mkdir(parents=True)
+            with patch("pathlib.Path.home", return_value=Path(tmp)):
+                self.assertEqual(split_cache(gamma, gamma / "downloads"), str(gamma / "downloads"))
+            self.assertFalse((gamma / "downloads").is_symlink())
+
+    def test_copy_leaves_out_the_windows_launcher_folder(self):
+        from commander_gui.game_installs import WINDOWS_LAUNCHER_DIR, copy_install
+
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "win"
+            (src / "Anomaly").mkdir(parents=True)
+            (src / "GAMMA" / WINDOWS_LAUNCHER_DIR).mkdir(parents=True)
+            (src / "GAMMA" / WINDOWS_LAUNCHER_DIR / "big.bin").write_text("x")
+            (src / "GAMMA" / "ModOrganizer.exe").write_text("x")
+            target = Path(tmp) / "linux"
+            target.mkdir()
+            install = (str(src / "Anomaly"), str(src / "GAMMA"), str(src / "GAMMA" / "downloads"))
+            _a, new_gamma, _c = copy_install(install, target, 2, lambda *_: None, lambda: False)
+            self.assertTrue((Path(new_gamma) / "ModOrganizer.exe").is_file())
+            self.assertFalse((Path(new_gamma) / WINDOWS_LAUNCHER_DIR).exists())
+
+    def test_log_dump_skips_the_windows_launcher_folder(self):
+        from commander_gui.log_dump import _walk_candidates
+
+        with tempfile.TemporaryDirectory() as tmp:
+            junk = Path(tmp) / ".Grok's Modpack Installer" / "resources"
+            junk.mkdir(parents=True)
+            (junk / "Dumper.pm").write_text("x")
+            (Path(tmp) / "logs").mkdir()
+            (Path(tmp) / "logs" / "mo_interface.log").write_text("x")
+            names = [p.name for p in _walk_candidates(Path(tmp))]
+        self.assertEqual(names, ["mo_interface.log"])

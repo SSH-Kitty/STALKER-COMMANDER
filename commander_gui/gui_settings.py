@@ -6,50 +6,82 @@ cover GUI behaviour, currently the game-launcher runner selection.
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import json
 import math
+import os
 import shutil
+import threading
 from pathlib import Path
 
 from .atomic import write_text
 from .config import gui_settings_path
 from .i18n import LANGUAGE_INFO
-from .themes import THEME_INFO
+from .themes import LIVE_TIMES, THEME_INFO
+
+try:
+    import fcntl
+except ImportError:  # Windows
+    fcntl = None
 
 _allowed_languages = {code for code, _native, _english in LANGUAGE_INFO}
 _allowed_themes = {key for key, _label, _description, _swatches in THEME_INFO}
 
+# Top-bar tabs the user may hide (main_window.NAV_ITEMS keys, minus the
+# dashboard). Hardcoded for the same reason as start_page below.
+_HIDEABLE_NAV_TABS = {
+    "systemcheck", "install", "play", "multiplayer", "update",
+    "modmanager", "profiles", "utilities", "about", "credits",
+}
+
 _DEFAULTS = {
     "runner": "auto",  # "auto" | "umu" | "wine" | "proton:<path-to-proton>"
+    "auto_proton": "",  # GE-Proton build dir Auto-detect is pinned to
     "wine_prefix": "",  # WINEPREFIX (Wine) or STEAM_COMPAT_DATA_PATH (Proton)
     "prefixes": {},  # per-runner prefix, keyed by the runner data value
     "target": "",  # last selected launch target title
-    "theme": "gamma",  # key into themes.THEMES
+    "theme": "black",  # key into themes.THEMES; first launch opens in GAMMA Black
     "language": "en",  # key into i18n.LANGUAGE_INFO
     "start_page": "dashboard",  # nav page shown on launch (key into main_window.NAV_ITEMS)
     "font_size": 13,  # base UI font size in px; scales every QSS font
     "font_family": "Exo 2",  # UI font family; applied via QSS font-family
     "always_gamemoderun": False,  # wrap every launch command in gamemoderun
     "autostart": False,  # add to XDG autostart so the app starts at login
+    "tray_icon": True,  # tray icon (desktop only)
+    "tray_close_to_tray": True,  # the window's close button hides COMMANDER to the tray instead of quitting
+    "tray_hide_while_playing": True,  # hide to the tray while the game runs, back when it closes
+    "tray_hint_shown": False,  # the one-time "still running in the tray" notification was sent
     "custom_launch_options": "",  # extra tokens prepended to the launch command
+    "lossless_dll": "",  # Lossless Scaling DLL picked by hand for frame generation
     "mo2_display_dpi": 120,  # Wine display DPI for Mod Organizer 2 (125%)
     "tool_overrides": {},  # manually selected Linux tools and runner locations
     "move_dest": "",  # in-progress Move Game destination (cleared on completion)
     "move_expected": [],  # destination folder names owned by an in-progress move
     "move_sources": [],  # absolute source folders of an in-progress move
     "custom_title_bar": True,  # draw COMMANDER's own title bar instead of the desktop's
+    "animations_enabled": True,  # hover grow, page fades, smooth scroll, splash effects
+    "click_sounds": True,  # short click on buttons, tabs and the tray menu (desktop)
+    "live_animation": True,  # Winter's snow, the Red Forest's trees, campfire and leaves
+    "christmas_lights": True,  # Winter's fairy lights under the top bar
+    "live_time": "",  # Live themes locked to dawn/day/dusk/night; "" follows the clock
+    "hidden_nav_tabs": [],  # top-bar tabs the user hid (keys into main_window.NAV_ITEMS)
     "window_width": 1080,
     "window_height": 950,
+    "window_maximized": False,  # reopen maximized when it was closed maximized
     "last_update_check_ts": 0.0,  # time.time() of the last scheduled background update check
     "update_notifications": True,  # desktop notification when a GAMMA or COMMANDER update comes out
+    "developer_mode": False,  # unlocks features normally kept from players (Settings > General)
+    "developer_features": {},  # developer mode feature key -> on, each picked under the toggle
     "notified_gamma_version": "",  # latest GAMMA version already notified about (notify once per version)
     "notified_commander_tag": "",  # COMMANDER release tag already notified about
+    "dismissed_update_tag": "",  # COMMANDER release tag whose update banner was closed
     "playtime_seconds": {},  # accumulated play time per profile name, in seconds
     "last_played_ts": {},  # time.time() a session last ended, per profile name
     "profile_notes": {},  # profile name -> the note shown on the Profiles page
     "profile_colors": {},  # profile name -> color tag key (see profiles_page.PROFILE_COLORS)
     "user_created_categories": {},  # profile name -> list of category names the user created (deletable); official GAMMA categories are never in this list
+    "mod_nicknames": {},  # GAMMA folder -> {real mod name: name shown in COMMANDER only}; modlist.txt and mod folders are never renamed
     "discord_rpc_enabled": False,  # show "Playing S.T.A.L.K.E.R. GAMMA" on Discord
     "discord_show_mods": True,  # add the enabled mod count under the presence line
     "discord_show_playtime": True,  # add the profile's total playtime there too
@@ -64,15 +96,45 @@ _DEFAULTS = {
     "deck_runner_confirmed": False,  # user picked a runner once in Deck Mode
     "deck_finish_sound": True,  # play the PDA chime when a long Deck task ends
     "deck_finish_rumble": True,  # buzz the controller when a long Deck task ends
+    "deck_overlay_shortcut": "l4r4",  # back grips held to open the overlay over a running game, or "off"
     "welcome_hidden": False,  # "Don't show again" on the Welcome screen (desktop and Deck Mode)
     "welcome_seen_version": "",  # COMMANDER version the Welcome screen last showed for (always shown after an update)
     "update_channel": "stable",  # "stable" | "unstable" - COMMANDER self-update channel (unstable includes pre-releases)
     "pending_settings_restore": {},  # profile -> pre-reset backup to restore after the GAMMA reinstall (game_backup)
+    "offline_archive": "",  # offline cache archive for --offline-archive-path (desktop and Deck)
+    "verify_repair_prompt": False,  # Install page Verify step: open the repair list when a check finds problems
+    "verify_after_gamma": False,  # Install page Verify step: run Verify Integrity after a GAMMA install
 }
 
 _cache: dict | None = None
+_SAVE_LOCK = threading.RLock()
 _cache_path_str: str = ""
 _cache_file_mtime: float = 0.0
+
+
+def animations_enabled() -> bool:
+    """The Settings > Appearance "Animations" switch (cheap: mtime-cached).
+
+    Asked on every wheel tick and hover, so it reads the cache directly
+    instead of taking load_gui_settings()'s deep copy.
+    """
+    return _cached_flag("animations_enabled")
+
+
+def click_sounds_enabled() -> bool:
+    """The Settings > Appearance "Click sounds" switch, asked on every click."""
+    return _cached_flag("click_sounds")
+
+
+def _cached_flag(key: str) -> bool:
+    path = gui_settings_path()
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        mtime = 0.0
+    if _cache is not None and str(path) == _cache_path_str and mtime == _cache_file_mtime:
+        return bool(_cache.get(key, True))
+    return bool(load_gui_settings().get(key, True))
 
 
 def load_gui_settings() -> dict:
@@ -108,11 +170,11 @@ def load_gui_settings() -> dict:
             data.update(stored)
     if not isinstance(data.get("runner"), str):
         data["runner"] = "auto"
-    for key in ("wine_prefix", "target", "custom_launch_options"):
+    for key in ("wine_prefix", "target", "custom_launch_options", "offline_archive"):
         if not isinstance(data.get(key), str):
             data[key] = _DEFAULTS[key]
     if not isinstance(data.get("theme"), str) or data["theme"] not in _allowed_themes:
-        data["theme"] = "gamma"
+        data["theme"] = "black"
     if not isinstance(data.get("language"), str) or data["language"] not in _allowed_languages:
         data["language"] = "en"
     # A hand-edited or corrupted settings file can hold any JSON type here,
@@ -125,13 +187,14 @@ def load_gui_settings() -> dict:
         "dashboard",
         "systemcheck",
         "play",
+        "multiplayer",
         "install",
         "update",
         "modmanager",
         "profiles",
         "utilities",
-        "help",
         "about",
+        "credits",
     }:
         data["start_page"] = "dashboard"
     if not isinstance(data.get("deck_mode_preference"), str) or data[
@@ -147,6 +210,7 @@ def load_gui_settings() -> dict:
     ] not in {
         "dashboard",
         "play",
+        "multiplayer",
         "install",
         "update",
         "mods",
@@ -155,6 +219,8 @@ def load_gui_settings() -> dict:
         "settings",
     }:
         data["deck_start_screen"] = "play"
+    if data.get("deck_overlay_shortcut") not in ("l4r4", "l5r5", "l4l5", "r4r5", "off"):
+        data["deck_overlay_shortcut"] = "l4r4"
     try:
         font_size = int(data.get("font_size", 13))
     except (TypeError, ValueError, OverflowError):
@@ -195,12 +261,38 @@ def load_gui_settings() -> dict:
         data["discord_client_id"] = ""
     if not isinstance(data.get("update_notifications"), bool):
         data["update_notifications"] = True
-    for key in ("notified_gamma_version", "notified_commander_tag"):
+    for key in ("tray_icon", "tray_close_to_tray", "tray_hide_while_playing"):
+        if not isinstance(data.get(key), bool):
+            data[key] = True
+    if not isinstance(data.get("developer_mode"), bool):
+        data["developer_mode"] = False
+    if not isinstance(data.get("developer_features"), dict):
+        data["developer_features"] = {}
+    if not isinstance(data.get("animations_enabled"), bool):
+        data["animations_enabled"] = True
+    if not isinstance(data.get("click_sounds"), bool):
+        data["click_sounds"] = True
+    if not isinstance(data.get("live_animation"), bool):
+        data["live_animation"] = True
+    if not isinstance(data.get("christmas_lights"), bool):
+        data["christmas_lights"] = True
+    if data.get("live_time") not in ("", *LIVE_TIMES):
+        data["live_time"] = ""
+    hidden = data.get("hidden_nav_tabs")
+    # Same hardcoded key set as start_page; the dashboard is the way back
+    # to everything else, so it can never be hidden.
+    data["hidden_nav_tabs"] = (
+        sorted({k for k in hidden if isinstance(k, str) and k in _HIDEABLE_NAV_TABS})
+        if isinstance(hidden, list)
+        else []
+    )
+    for key in ("notified_gamma_version", "notified_commander_tag", "dismissed_update_tag"):
         if not isinstance(data.get(key), str):
             data[key] = ""
     for key in (
         "always_gamemoderun",
         "autostart",
+        "tray_hint_shown",
         "discord_rpc_enabled",
         "discord_show_mods",
         "discord_show_playtime",
@@ -273,6 +365,18 @@ def load_gui_settings() -> dict:
         if isinstance(user_categories, dict)
         else {}
     )
+    nicknames = data.get("mod_nicknames")
+    data["mod_nicknames"] = (
+        {
+            str(k): {
+                str(name): nick for name, nick in v.items() if isinstance(nick, str) and nick
+            }
+            for k, v in nicknames.items()
+            if isinstance(v, dict)
+        }
+        if isinstance(nicknames, dict)
+        else {}
+    )
     if not isinstance(data.get("move_dest"), str):
         data["move_dest"] = ""
     if not isinstance(data.get("move_expected"), list):
@@ -295,12 +399,42 @@ def load_gui_settings() -> dict:
     return data
 
 
+@contextlib.contextmanager
+def _settings_update_lock(path: Path):
+    """Hold the read-modify-write of *path* exclusive, across threads and
+    processes: two savers that both loaded before either wrote lost one
+    change. A lock file of its own - atomic.write_text() already flocks
+    ``.<name>.lock``, and a second flock on that from this process would
+    wait on itself."""
+    with _SAVE_LOCK:
+        if fcntl is None:
+            yield
+            return
+        fd = os.open(path.parent / f".{path.name}.update.lock", os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            os.close(fd)  # releases the flock
+
+
+def developer_feature(key: str) -> bool:
+    """A developer mode feature is on only while developer mode is too."""
+    data = load_gui_settings()
+    return data["developer_mode"] and data["developer_features"].get(key) is True
+
+
 def save_gui_settings(**changes) -> None:
-    global _cache, _cache_path_str, _cache_file_mtime
     path = gui_settings_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with _settings_update_lock(path):
+        _save_locked(path, changes)
+
+
+def _save_locked(path: Path, changes: dict) -> None:
+    global _cache, _cache_path_str, _cache_file_mtime
     data = load_gui_settings()
     data.update(changes)
-    path.parent.mkdir(parents=True, exist_ok=True)
     # Preserve a last-known-good backup before overwriting - but only if the
     # current file is actually valid JSON. Copying a corrupted file over the
     # backup would destroy the one thing load_gui_settings() falls back to

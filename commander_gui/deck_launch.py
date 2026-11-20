@@ -21,6 +21,8 @@ import sys
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
+from .autostart import AUTOSTART_FLAG
+
 #: The command-line flag that selects Deck Mode. Forwarded by run.sh,
 #: packaging/stalker-gamma-commander.sh and the AppImage's AppRun, all of
 #: which end in ``-m commander_gui "$@"``.
@@ -32,10 +34,12 @@ DECK_FLAG = "--deck"
 DEPTH_ENV = "COMMANDER_DECK_RELAUNCH_DEPTH"
 MAX_RELAUNCH_DEPTH = 2
 
-#: DMI product names for the two Steam Deck revisions.
+#: DMI product names for Valve's SteamOS hardware. The Steam Machine runs
+#: the same SteamOS and Game Mode, so it gets Deck Mode too.
 DECK_PRODUCT_NAMES: dict[str, str] = {
-    "Jupiter": "lcd",   # Steam Deck LCD (2022)
-    "Galileo": "oled",  # Steam Deck OLED (2023)
+    "Jupiter": "lcd",       # Steam Deck LCD (2022)
+    "Galileo": "oled",      # Steam Deck OLED (2023)
+    "Fremont": "machine",   # Steam Machine (2026)
 }
 
 _DMI_PRODUCT_NAME = Path("/sys/class/dmi/id/product_name")
@@ -85,7 +89,8 @@ def relaunch_argv(
     if not base:
         # Embedded interpreters may expose no orig_argv at all.
         base = [sys.executable, "-m", "commander_gui"]
-    argv = [executable or sys.executable, *(a for a in base[1:] if a != DECK_FLAG)]
+    # A relaunch is no login: the window shows, not just the tray icon.
+    argv = [executable or sys.executable, *(a for a in base[1:] if a not in (DECK_FLAG, AUTOSTART_FLAG))]
     if deck:
         argv.append(DECK_FLAG)
     return argv
@@ -123,6 +128,9 @@ def relaunch_exec(
     if pre_exec is not None:
         pre_exec()
     release_lock()
+    from .applog import log_shutdown
+
+    log_shutdown(f"relaunching ({'Deck Mode' if deck else 'desktop'})")
     try:
         os.execve(argv[0], argv, env)
     except OSError:
@@ -144,7 +152,7 @@ def steam_deck_model(
     dmi_path: Path = _DMI_PRODUCT_NAME,
     env: Mapping[str, str] | None = None,
 ) -> str | None:
-    """Return ``"lcd"``/``"oled"``/``"unknown"`` on a Steam Deck, else None.
+    """Return ``"lcd"``/``"oled"``/``"machine"``/``"unknown"`` on Valve hardware, else None.
 
     DMI is checked first because it is the only source that cannot be faked
     by accident. ``SteamDeck=1`` is a useful fallback (Steam sets it for
@@ -171,16 +179,21 @@ def is_steam_deck(**kwargs) -> bool:
     return steam_deck_model(**kwargs) is not None
 
 
-def in_game_mode(env: Mapping[str, str] | None = None) -> bool:
+def in_game_mode(
+    env: Mapping[str, str] | None = None, *, dmi_path: Path = _DMI_PRODUCT_NAME
+) -> bool:
     """True if running inside SteamOS Game Mode (a gamescope session).
 
     Game Mode has no window manager: gamescope composites one surface, so a
     window that does not full-screen itself is rendered at whatever size it
     asked for with no way for the user to resize it. This is only consulted
     for that decision, never for whether to offer Deck Mode.
+
+    Valve hardware counts by DMI as well as ``SteamDeck=1``: the Steam
+    Machine's Game Mode is not known to set that variable.
     """
     environ = os.environ if env is None else env
-    if str(environ.get("SteamDeck", "")).strip() != "1":
+    if steam_deck_model(dmi_path=dmi_path, env=environ) is None:
         return False
     markers = (
         environ.get("XDG_CURRENT_DESKTOP", ""),

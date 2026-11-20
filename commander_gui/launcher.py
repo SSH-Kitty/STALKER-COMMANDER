@@ -5,7 +5,7 @@ CLI wiki recommends running ``gamma/ModOrganizer.exe`` inside a Proton/Wine
 prefix. This module detects the most common setups:
 
 * Steam/UMU: ``umu-run`` with the default ``~/Games/umu/umu-default`` prefix,
-  optionally wrapped in ``gamemoderun`` (the recommended path).
+  wrapped in ``gamemoderun`` only when Always use GameMode is on.
 * Steam Proton: any Proton version installed via Steam is discovered
   (``steamapps/common/Proton*``) and launched with ``proton run <exe>``.
 * Plain Wine: ``wine`` with an optional explicit ``WINEPREFIX``.
@@ -16,6 +16,7 @@ file system is active and all GAMMA mods are loaded.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import shlex
@@ -23,13 +24,14 @@ import shutil
 import signal
 import stat
 import subprocess
+import threading
 import time
 from contextlib import ExitStack
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import gui_settings
-from .atomic import write_bytes
+from .atomic import split_lines, write_bytes, write_text
 from .config import child_environment
 from .dependencies import configured_tool
 from .proton_installer import version_key
@@ -71,6 +73,25 @@ _RUNNER_ENV_NAMES = {
     "SteamAppId",
     "SteamGameId",
 }
+
+
+#: Sorts after other sysctl.d files, so it wins over a hardening preset.
+PTRACE_FIX_COMMAND = (
+    "echo 'kernel.yama.ptrace_scope = 1' | sudo tee /etc/sysctl.d/99-zz-stalker-gamma.conf"
+)
+
+
+def ptrace_scope() -> int:
+    """``kernel.yama.ptrace_scope``, or 0 when Yama is absent (or on Windows).
+
+    At 2 or 3 the wineserver may not write into another process, so MO2's
+    usvfs can't hook the game and MO2 fails with "Error 87". 3 is locked
+    until the next reboot.
+    """
+    try:
+        return int(Path("/proc/sys/kernel/yama/ptrace_scope").read_text())
+    except (OSError, ValueError):
+        return 0
 
 
 def steam_shortcut_appid(environ: dict[str, str] | None = None) -> int | None:
@@ -158,6 +179,10 @@ RUNNER_GRAPHICS_ERROR_MARKERS = (
     "d3d11_swapchain_setcolorspace",
 )
 
+#: Wine prints this when the runner lacks a Windows function the game needs:
+#: the runner is too new, too old, or unpacked badly.
+RUNNER_UNSUPPORTED_MARKER = "to unimplemented function"
+
 
 #: Wine prints this once per crashed process. A launch that manages to start
 #: MO2 prints it zero times; a launch into a prefix with a foreign ntdll prints
@@ -214,6 +239,11 @@ def runner_graphics_error(log_text: str) -> bool:
     return any(marker in text for marker in RUNNER_GRAPHICS_ERROR_MARKERS)
 
 
+def runner_unsupported_error(log_text: str) -> bool:
+    """Return whether the runner is missing a Windows function it was asked for."""
+    return RUNNER_UNSUPPORTED_MARKER in log_text.lower()
+
+
 def wine_prefix_for(kind: str, prefix: str) -> str:
     """Resolve a runner preset + configured prefix to the real WINEPREFIX.
 
@@ -234,6 +264,7 @@ class Mo2Executable:
     binary: str = ""
     arguments: str = ""
     working_directory: str = ""
+    hidden: bool = False
 
 
 @dataclass
@@ -548,6 +579,56 @@ def ensure_runner_prefix(runner: Runner) -> None:
         raise LaunchError(f"Could not prepare runner prefix {prefix}: {exc}") from exc
 
 
+def _wineserver_running(pfx: Path) -> bool:
+    """Whether a wineserver serves pfx: it rewrites user.reg when it exits."""
+    target = os.path.realpath(pfx)
+    for proc in Path("/proc").glob("[0-9]*"):
+        try:
+            if not (proc / "comm").read_text().startswith("wineserver"):
+                continue
+            env = (proc / "environ").read_bytes().split(b"\0")
+        except OSError:
+            continue
+        for item in env:
+            if item.startswith(b"WINEPREFIX=") and os.path.realpath(item[11:].decode(errors="replace")) == target:
+                return True
+    return False
+
+
+def set_mouse_grab(runner: Runner, grab: bool) -> None:
+    """Wine's GrabPointer in the runner's prefix. On, a fullscreen game keeps
+    the mouse to itself, so the graphics overlay over it never gets a click;
+    off, the overlay works over fullscreen too. Aiming still reads raw mouse
+    movement either way. Skipped while the prefix's wineserver runs (it
+    would write user.reg over this): then from the next launch."""
+    if raw := runner.env.get("STEAM_COMPAT_DATA_PATH"):
+        pfx = Path(raw).expanduser() / "pfx"
+    elif raw := runner.env.get("WINEPREFIX"):
+        pfx = Path(raw).expanduser()
+    else:
+        return
+    user_reg = pfx / "user.reg"
+    if not user_reg.is_file() or _wineserver_running(pfx):
+        return
+    text = user_reg.read_text(encoding="utf-8", errors="surrogateescape")
+    header = "[Software\\\\Wine\\\\X11 Driver]"
+    value = f'"GrabPointer"="{"Y" if grab else "N"}"'
+    lines = text.split("\n")
+    start = next((i for i, line in enumerate(lines) if line.startswith(header)), None)
+    if start is None:
+        lines += [f"{header} {int(time.time())}", value, ""]
+    else:
+        end = next((i for i in range(start + 1, len(lines)) if not lines[i].strip()), len(lines))
+        found = next((i for i in range(start + 1, end) if lines[i].startswith('"GrabPointer"=')), None)
+        if found is None:
+            lines.insert(end, value)
+        elif lines[found] == value:
+            return
+        else:
+            lines[found] = value
+    write_bytes(user_reg, "\n".join(lines).encode(errors="surrogateescape"), lock=False)
+
+
 def build_runner_tool_command(
     runner: Runner,
     executable: str,
@@ -564,7 +645,7 @@ def build_runner_tool_command(
 
 def mo2_path_to_host(value: str) -> str:
     """Translate an MO2 ini path (``Z:/...``) to a host path."""
-    if value.startswith("Z:"):
+    if value[:2].upper() == "Z:":
         rest = value[2:].replace("\\", "/")
         if not rest.startswith("/"):
             rest = "/" + rest
@@ -595,6 +676,16 @@ def _qsettings_value(value: str) -> str:
     return value
 
 
+def anomaly_launcher_target(anomaly_dir: str) -> Mo2Executable | None:
+    """The "Anomaly" launch target of an install without MO2: AnomalyLauncher.exe."""
+    if not str(anomaly_dir).strip():
+        return None
+    launcher = Path(anomaly_dir) / "AnomalyLauncher.exe"
+    if not launcher.is_file():
+        return None
+    return Mo2Executable(title="Anomaly", binary=str(launcher), working_directory=str(anomaly_dir))
+
+
 def parse_mo2_executables(gamma_dir: str) -> list[Mo2Executable]:
     """Parse the ``[customExecutables]`` section of ModOrganizer.ini."""
     ini = Path(gamma_dir) / "ModOrganizer.ini"
@@ -602,7 +693,7 @@ def parse_mo2_executables(gamma_dir: str) -> list[Mo2Executable]:
         return []
     entries: dict[int, Mo2Executable] = {}
     try:
-        lines = ini.read_text(encoding="utf-8", errors="replace").splitlines()
+        lines = split_lines(ini.read_text(encoding="utf-8", errors="replace"))
     except (OSError, UnicodeError):
         return []
     section = ""
@@ -635,7 +726,207 @@ def parse_mo2_executables(gamma_dir: str) -> list[Mo2Executable]:
             exe.arguments = value
         elif field_name == "workingdirectory":
             exe.working_directory = mo2_path_to_host(value)
-    return [exe for exe in entries.values() if exe.title]
+        elif field_name == "hide":
+            exe.hidden = value.lower() == "true"
+    return [entries[index] for index in sorted(entries) if entries[index].title]
+
+
+MO2_SELECTED_KEY = "MainWindow_executablesListBox_index"
+
+
+def mo2_selected_title(gamma_dir: str) -> str:
+    """Title of the executable picked in MO2's toolbar dropdown, or ``""``.
+
+    MO2 keeps only the dropdown's row number in ``[Widgets]``. Row 0 is its
+    "<Edit...>" entry; the rest are the executables MO2 does not hide.
+    """
+    try:
+        text = (Path(gamma_dir) / "ModOrganizer.ini").read_text(
+            encoding="utf-8", errors="replace"
+        )
+    except OSError:
+        return ""
+    row = None
+    section = ""
+    for line in split_lines(text):
+        stripped = line.strip()
+        if stripped.startswith("["):
+            section = stripped.lower()
+        elif section == "[widgets]" and stripped.startswith(MO2_SELECTED_KEY + "="):
+            try:
+                row = int(stripped.partition("=")[2])
+            except ValueError:
+                return ""
+    if row is None:
+        return ""
+    visible = [exe.title for exe in parse_mo2_executables(gamma_dir) if not exe.hidden]
+    return visible[row - 1] if 1 <= row <= len(visible) else ""
+
+
+def set_mo2_selected_title(gamma_dir: str, title: str) -> bool:
+    """Pick *title* in MO2's toolbar dropdown, so MO2 and Commander agree.
+
+    Returns True when ModOrganizer.ini was changed. MO2 rewrites the ini
+    when it closes, so a pick made while MO2 is open is MO2's to keep.
+    """
+    ini = Path(gamma_dir) / "ModOrganizer.ini"
+    visible = [exe.title for exe in parse_mo2_executables(gamma_dir) if not exe.hidden]
+    if title not in visible or mo2_selected_title(gamma_dir) == title:
+        return False
+    # Row 0 of the dropdown is "<Edit...>".
+    _set_ini_value(ini, "Widgets", MO2_SELECTED_KEY, str(visible.index(title) + 1))
+    return True
+
+
+def _set_ini_value(ini: Path, section: str, key: str, value: str) -> None:
+    """Set ``key=value`` in ``[section]`` of *ini*, adding either if missing."""
+    wanted = f"{key}={value}"
+    header = f"[{section.lower()}]"
+    text = ini.read_text(encoding="utf-8", errors="surrogateescape")
+    newline = "\r\n" if "\r\n" in text else "\n"
+    out: list[str] = []
+    current = ""
+    written = False
+    for line in split_lines(text):
+        stripped = line.strip()
+        if stripped.startswith("["):
+            if current == header and not written:
+                out.append(wanted)
+                written = True
+            current = stripped.lower()
+        elif current == header and stripped.startswith(key + "="):
+            line = wanted
+            written = True
+        out.append(line)
+    if not written:
+        if current != header:
+            out += ["", f"[{section}]"]
+        out.append(wanted)
+    new_text = newline.join(out) + newline
+    # Already set: no rewrite (the Play page's launch preview gets here on
+    # every refresh, and each write is an fsync).
+    if new_text != text:
+        write_text(ini, new_text)
+
+
+def _qt_ini_bytes(value: str) -> str:
+    """*value* as Qt's QSettings writes a QByteArray to an ini file."""
+    out: list[str] = []
+    in_hex = False
+    for byte in value.encode("utf-8"):
+        char = chr(byte)
+        # A hex digit right after a \xNN escape would extend it, so Qt
+        # escapes it too.
+        if byte >= 0x80 or (in_hex and char in "0123456789abcdefABCDEF"):
+            out.append(f"\\x{byte:02x}")
+            in_hex = True
+            continue
+        out.append("\\" + char if char in '\\"' else char)
+        in_hex = False
+    text = f"@ByteArray({''.join(out)})"
+    return f'"{text}"' if any(c in text for c in ";,=") else text
+
+
+def qt_ini_text(value: str) -> str:
+    """Undo _qt_ini_bytes' escapes: ``CLIKR\\xce\\x94\\x44`` -> ``CLIKRΔD``.
+
+    The CLI's ``mo2 config get selected-profile`` prints them as stored.
+    """
+    if "\\" not in value:
+        return value
+    out = bytearray()
+    i = 0
+    while i < len(value):
+        if value[i] == "\\" and value[i + 1 : i + 2] == "x" and len(value) >= i + 4:
+            try:
+                out.append(int(value[i + 2 : i + 4], 16))
+                i += 4
+                continue
+            except ValueError:
+                pass
+        if value[i] == "\\" and i + 1 < len(value):
+            i += 1
+        out += value[i].encode("utf-8")
+        i += 1
+    return out.decode("utf-8", errors="replace")
+
+
+def set_mo2_selected_profile(gamma_dir: str, profile: str) -> None:
+    """Make MO2 open *profile* next time, as its own dropdown saves it.
+
+    Not the CLI's ``mo2 config set selected-profile``: it writes a non-ASCII
+    name (CLIKRΔD) as raw UTF-8, which Qt reads back as Latin-1, so MO2
+    looks for a profile that doesn't exist.
+    """
+    _set_ini_value(
+        Path(gamma_dir) / "ModOrganizer.ini", "General", "selected_profile", _qt_ini_bytes(profile)
+    )
+
+
+def select_mo2_profile(gamma_dir: str, profile: str) -> tuple[int, str]:
+    """set_mo2_selected_profile as ``(returncode, output)``, like run_sync."""
+    try:
+        set_mo2_selected_profile(gamma_dir, profile)
+    except OSError as exc:
+        return 1, str(exc)
+    return 0, ""
+
+
+def mo2_profile_args(gamma_dir: str, profile: str) -> list[str]:
+    """The arguments that make MO2 open *profile*.
+
+    MO2 2.5 dies at startup, before writing a log line, when ``-p`` names
+    a profile with a non-ASCII character (CLIKRΔD). Such a profile goes
+    in as MO2's selected_profile instead, the way MO2's own dropdown
+    saves it. An MO2 already open keeps its own profile either way.
+    """
+    if profile.isascii():
+        return ["-p", profile]
+    try:
+        set_mo2_selected_profile(gamma_dir, profile)
+    except OSError as exc:
+        raise LaunchError(f"Couldn't select MO2 profile {profile}: {exc}") from exc
+    return []
+
+
+def unblock_mo2_python(gamma_dir: str) -> bool:
+    """Take ``plugin_python`` off MO2's plugin blacklist.
+
+    MO2 offers to blacklist a plugin that was loading when it last died
+    (a Steam restart or a quick quit can do that). Without plugin_python
+    the STALKER Anomaly game plugin never loads and MO2 refuses to open
+    the instance. Returns True when ModOrganizer.ini was changed.
+    """
+    ini = Path(gamma_dir) / "ModOrganizer.ini"
+    try:
+        text = ini.read_text(encoding="utf-8", errors="surrogateescape")
+    except OSError:
+        return False
+    newline = "\r\n" if "\r\n" in text else "\n"
+    out: list[str] = []
+    names: list[str] = []
+    section = ""
+    start = -1
+    for line in split_lines(text):
+        stripped = line.strip()
+        if stripped.startswith("["):
+            section = stripped.lower()
+            if section == "[pluginblacklist]":
+                start = len(out) + 1
+        elif section == "[pluginblacklist]":
+            key, _, value = stripped.partition("=")
+            if key.endswith("\\name"):
+                names.append(value)
+            if key == "size" or key.endswith("\\name"):
+                continue
+        out.append(line)
+    kept = [name for name in names if name.lower() != "plugin_python"]
+    if start < 0 or kept == names:
+        return False
+    entries = [f"size={len(kept)}"] + [f"{i}\\name={name}" for i, name in enumerate(kept, 1)]
+    out[start:start] = entries
+    write_text(ini, newline.join(out) + newline)
+    return True
 
 
 def available_commands() -> dict[str, str]:
@@ -823,7 +1114,10 @@ def _proton_runner(proton_script: str, prefix: str = "") -> Runner:
 
 
 def _pick_umu_proton() -> str:
-    """Pick the latest GE-Proton directory for umu, or ''.
+    """Pick the GE-Proton directory for umu's Auto-detect, or ''.
+
+    The newest installed build the first time, then that same build until
+    it is removed.
 
     Only GE-Proton builds are considered.  Directories without a
     ``toolmanifest.vdf`` are skipped since ``umu-run`` validates
@@ -839,8 +1133,18 @@ def _pick_umu_proton() -> str:
         candidates.append((version_key(label), str(build_dir)))
     if not candidates:
         return ""
+    # Stick to the build Auto-detect settled on: a newly installed GE-Proton
+    # must not silently replace it. It moves on only once that build is gone.
+    pinned = gui_settings.load_gui_settings().get("auto_proton")
+    if isinstance(pinned, str) and any(path == pinned for _key, path in candidates):
+        return pinned
     candidates.sort(reverse=True)
-    return candidates[0][1]
+    best = candidates[0][1]
+    try:
+        gui_settings.save_gui_settings(auto_proton=best)
+    except OSError:
+        pass  # unpinned this once; the newest build is still a fine answer
+    return best
 
 
 def _umu_proton_runner(proton_script: str, prefix: str = "") -> Runner:
@@ -864,10 +1168,8 @@ def _umu_proton_runner(proton_script: str, prefix: str = "") -> Runner:
             "umu-run not found on PATH. Install umu-run (or launch via Steam) "
             "and try again."
         )
-    wrapper = []
-    if avail.get("gamemoderun"):
-        wrapper.append(avail["gamemoderun"])
-    wrapper.append(avail["umu"])
+    # GameMode only when the player asks for it (Play page's Always use GameMode).
+    wrapper = [avail["umu"]]
     env = {"PROTONPATH": str(build_dir)}
     env["PROTON_USE_WINED3D"] = "0"
     # Always resolve to the same default (DEFAULT_UMU_PREFIX) that
@@ -913,10 +1215,7 @@ def resolve_runner(kind: str, wine_prefix: str = "") -> Runner:
     avail = available_commands()
     if kind in ("auto", "umu"):
         if avail.get("umu"):
-            wrapper = []
-            if avail.get("gamemoderun"):
-                wrapper.append(avail["gamemoderun"])
-            wrapper.append(avail["umu"])
+            wrapper = [avail["umu"]]
             # Always resolve to the same default Winetricks assumes
             # (wine_prefix_for) rather than leaving umu-run to pick its own.
             env = {"WINEPREFIX": wine_prefix or str(DEFAULT_UMU_PREFIX)}
@@ -946,11 +1245,16 @@ def resolve_runner(kind: str, wine_prefix: str = "") -> Runner:
         if kind == "wine":
             raise LaunchError("wine not found on PATH.")
     raise LaunchError(
-        "No game runner detected. Install umu-run and a GE-Proton build to launch the game."
+        "No game runner detected. Install umu-run and a Proton-GE build to launch the game."
     )
 
 
-def default_launch_target(titles: list[str]) -> str:
+def default_launch_target(titles: list[str], gamma_dir: str = "", saved: str = "") -> str:
+    # MO2's dropdown is the one shared choice (Commander writes its picks
+    # there too), then Commander's last pick, then GAMMA's stock default.
+    for choice in (mo2_selected_title(gamma_dir) if gamma_dir else "", saved):
+        if choice and choice in titles:
+            return choice
     for preferred in PREFERRED_TARGETS:
         if preferred in titles:
             return preferred
@@ -963,8 +1267,16 @@ def build_command(
     *,
     target: str | None = None,
     profile: str | None = None,
+    arguments: str | None = None,
 ) -> tuple[list[str], dict[str, str], str]:
-    """Build (command, env, cwd) to open MO2 and optionally auto-launch ``target``."""
+    """Build (command, env, cwd) to open MO2 and optionally auto-launch ``target``.
+
+    ``arguments`` replaces the target's own arguments for this run; the
+    ``--name=value`` form keeps a value starting with "-" a value.
+    """
+    # The CLI's default profile paths are relative ("gamma/gamma"); passed
+    # as-is, the exe path is then read again from inside that same cwd.
+    gamma_dir = os.path.abspath(os.path.expanduser(gamma_dir))
     mo2 = Path(gamma_dir) / "ModOrganizer.exe"
     if not mo2.is_file():
         raise LaunchError(f"ModOrganizer.exe not found in {gamma_dir}")
@@ -973,9 +1285,9 @@ def build_command(
         profile_path = Path(gamma_dir) / "profiles" / profile
         if not profile_path.is_dir():
             raise LaunchError(f"MO2 profile not found: {profile}")
-        args += ["-p", profile]
+        args += mo2_profile_args(gamma_dir, profile)
     if target:
-        args += ["run", "-e", target]
+        args += ["run", *([f"--arguments={arguments}"] if arguments else []), "-e", target]
     return [*runner.wrapper, *args], dict(runner.env), gamma_dir
 
 
@@ -992,7 +1304,8 @@ def build_direct_command(
         # MO2 stores the argument string as the user typed it, so quoted
         # arguments containing spaces must survive splitting intact.
         try:
-            args += shlex.split(exe.arguments)
+            # Backslashes are Windows path separators here, not escapes.
+            args += shlex.split(exe.arguments.replace("\\", "\\\\"))
         except ValueError:
             args += exe.arguments.split()
     return [*runner.wrapper, *args], dict(runner.env), cwd
@@ -1019,7 +1332,12 @@ def desktop_dir() -> Path:
 def shortcut_slug(title: str) -> str:
     """Return a filename-safe slug for a launch target title."""
     slug = re.sub(r"[^A-Za-z0-9]+", "-", title).strip("-").lower()
-    return slug or "stalker-gamma"
+    # A title with no ASCII letters (Cyrillic, CJK) would otherwise share one
+    # slug, and so one desktop file, with every other such title.
+    return slug or "stalker-gamma" + (
+        "-" + hashlib.sha1(title.encode(), usedforsecurity=False).hexdigest()[:6]
+        if any(c.isalnum() for c in title) else ""
+    )
 
 
 def _desktop_quote(value: str) -> str:
@@ -1095,15 +1413,10 @@ def write_desktop_shortcut(
     return path
 
 
-#: Kept for backward compatibility with anything inspecting it; rotation
-#: itself is no longer size-gated (see _rotate_log's docstring).
-MAX_LOG_BYTES = 1 << 20
-
-
 def _rotate_log(path: Path) -> None:
     """Roll ``path`` to ``path.1`` unconditionally, at the start of a launch.
 
-    Was size-gated (only past :data:`MAX_LOG_BYTES`) until a real incident
+    Was size-gated (only past 1 MiB) until a real incident
     showed why that is wrong: the crash-loop breaker in play_page.py now
     kills a bad launch after a few dozen lines, so a repeatedly-crashing
     prefix never produces a megabyte of output and this never rotated - the
@@ -1120,6 +1433,52 @@ def _rotate_log(path: Path) -> None:
             path.replace(path.with_name(path.name + ".1"))
     except OSError:
         pass
+
+
+#: Variables shown in commander.log for every launch: the runner's, the
+#: graphics stack's and the overlays'/frame generation's.
+_LOGGED_ENV_PREFIXES = (
+    "PROTON", "WINE", "DXVK", "VKD3D", "STEAM_COMPAT", "UMU", "GAMEID", "STORE",
+    "VK_", "MANGOHUD", "ENABLE_VKBASALT", "VKBASALT", "MAKO", "COMMANDER_",
+    "DISABLE_", "LSFG", "SDL_", "__GL", "RADV", "MESA", "LD_PRELOAD",
+)
+
+
+def _log_launch(command: list[str], env: dict[str, str], cwd: str) -> None:
+    """What a launch ran with, into commander.log: command, runner variables,
+    overlays and frame generation, and whether their Vulkan layers exist."""
+    import json
+
+    from . import applog, launch_options
+    from .log_dump import _scrub
+
+    lines = [f"command: {shlex.join(command)}", f"cwd: {cwd}"]
+    lines += [
+        f"env {key}={env[key]}"
+        for key in sorted(env)
+        if key.upper().startswith(_LOGGED_ENV_PREFIXES)
+    ]
+    config = env.get("MAKO_CONFIG")
+    if config:
+        try:
+            lines.append("frame gen config: " + "; ".join(Path(config).read_text(encoding="utf-8").splitlines()))
+        except OSError as exc:
+            lines.append(f"frame gen config unreadable: {exc}")
+    else:
+        try:
+            dll = launch_options.lossless_dll()
+            lines.append(f"frame gen: not loaded (Lossless.dll={dll}, ready={launch_options.frame_gen_ready(dll)})")
+        except (OSError, ValueError) as exc:
+            lines.append(f"frame gen: not loaded ({exc})")
+    data_home = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share")
+    for manifest in sorted(data_home.glob("vulkan/*_layer.d/commander-*.json")):
+        try:
+            library = json.loads(manifest.read_text(encoding="utf-8"))["layer"]["library_path"]
+            state = "ok" if Path(library).is_file() else f"library missing: {library}"
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            state = f"unreadable ({exc.__class__.__name__})"
+        lines.append(f"layer {manifest.parent.name}/{manifest.name}: {state}")
+    applog.get_logger().info("launch:\n  %s", _scrub("\n  ".join(lines)))
 
 
 def launch_detached(
@@ -1146,6 +1505,10 @@ def launch_detached(
         ):
             full_env.pop(key, None)
             stripped.append(key)
+    try:
+        _log_launch(command, full_env, cwd)
+    except Exception:  # noqa: BLE001, S110 - logging never stops a launch
+        pass
     # The log handle is closed as soon as Popen returns: the child has its own
     # inherited descriptor, so keeping ours open only leaks one per launch.
     with ExitStack() as stack:
@@ -1183,20 +1546,21 @@ def launch_detached(
             )
             if registry is not None:
                 registry.register(process)
+            else:
+                # Nobody waits on it otherwise: reaped once it exits, not
+                # left a zombie until COMMANDER quits.
+                threading.Thread(target=process.wait, daemon=True).start()
             return process
         except OSError as exc:
             raise LaunchError(f"Failed to start {command[0]!r}: {exc}") from exc
 
 
-def kill_stray_debuggers(runner_env: dict[str, str] | None) -> int:
-    """Kill ``winedbg`` processes that belong to *this* game's Wine prefix.
+def prefix_debugger_pids(runner_env: dict[str, str] | None) -> list[int]:
+    """``winedbg`` processes that belong to *this* game's Wine prefix.
 
-    A Wine crash loop answers every fault with winedbg, whose own process
-    faults too; the ones that escaped the launch's process group are
-    stopped here. Only processes whose environment points at the same
-    prefix (WINEPREFIX or Proton's STEAM_COMPAT_DATA_PATH) and that run as
-    this user are touched - ``pkill -f winedbg`` also killed debuggers of
-    unrelated Wine games. Returns how many were signalled.
+    Only processes whose environment points at the same prefix (WINEPREFIX
+    or Proton's STEAM_COMPAT_DATA_PATH) and that run as this user count -
+    ``pgrep winedbg`` would also match debuggers of unrelated Wine games.
     """
     env = runner_env or {}
     wanted = {
@@ -1205,9 +1569,9 @@ def kill_stray_debuggers(runner_env: dict[str, str] | None) -> int:
         if value
     }
     if not wanted:
-        return 0
+        return []
     uid = os.getuid()
-    killed = 0
+    pids = []
     for entry in Path("/proc").iterdir() if Path("/proc").is_dir() else ():
         if not entry.name.isdigit():
             continue
@@ -1226,9 +1590,33 @@ def kill_stray_debuggers(runner_env: dict[str, str] | None) -> int:
             if key in (b"WINEPREFIX", b"STEAM_COMPAT_DATA_PATH") and value:
                 prefixes.add(os.path.realpath(value.decode("utf-8", "replace")))
         if prefixes & wanted:
-            try:
-                os.kill(int(entry.name), signal.SIGKILL)
-                killed += 1
-            except OSError:
-                pass
+            pids.append(int(entry.name))
+    return pids
+
+
+def debugger_crash_loop(runner_env: dict[str, str] | None) -> bool:
+    """True when this prefix has a pile of winedbg processes at once.
+
+    The same crash loop ``runner_crash_loop`` reads from the log, seen in the
+    process list instead - so it also works when Steam, not COMMANDER, owns
+    the game's output (a Steam co-op launch).
+    """
+    return len(prefix_debugger_pids(runner_env)) >= RUNNER_CRASH_LOOP_THRESHOLD
+
+
+def kill_stray_debuggers(runner_env: dict[str, str] | None) -> int:
+    """Kill ``winedbg`` processes that belong to *this* game's Wine prefix.
+
+    A Wine crash loop answers every fault with winedbg, whose own process
+    faults too; the ones that escaped the launch's process group are
+    stopped here (see ``prefix_debugger_pids`` for what counts as this
+    prefix's). Returns how many were signalled.
+    """
+    killed = 0
+    for pid in prefix_debugger_pids(runner_env):
+        try:
+            os.kill(pid, signal.SIGKILL)
+            killed += 1
+        except OSError:
+            pass
     return killed

@@ -18,18 +18,20 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import QObject, Signal
-from PySide6.QtWidgets import QGridLayout, QHBoxLayout
+from PySide6.QtWidgets import QGridLayout, QHBoxLayout, QVBoxLayout, QWidget
 
-from commander_gui import gui_settings
-from commander_gui.cli_runner import cli_command
+from commander_gui import gui_settings, modded_exes
+from commander_gui.cli_runner import cli_command, cli_resume_args
 from commander_gui.dependencies import check_all_dependencies
 from commander_gui.game_backup import (
     apply_pending_settings_restore,
     backup_settings_before,
+    prepare_anomaly_reinstall,
 )
 from commander_gui.gui_settings import configured_wine_prefix
 from commander_gui.i18n import tr
 from commander_gui.integrity import invalidate_baseline
+from commander_gui.keep_state import capture, restore
 from commander_gui.launcher import LaunchError, find_extra_protons
 from commander_gui.parsers import parse_progress_line, strip_ansi
 from commander_gui.proton_installer import (
@@ -46,17 +48,25 @@ from commander_gui.ui.common import (
     aggregate_progress_value,
     anomaly_installed,
     free_space_bytes,
+    game_running,
     gamma_installed,
     human_size,
-    mo2_running,
+    use_stock_mo2_profile_if_missing,
 )
-from commander_gui.ui.install_page import _full_install_args, _resume_state_matches
-from commander_gui.ui.proton_manager import build_status
+from commander_gui.ui.install_page import (
+    OFFLINE_ARCHIVE_SUFFIXES,
+    OFFLINE_GUIDE_URL,
+    _full_install_args,
+    _install_failure_message,
+    _resume_state_matches,
+    offline_archive,
+    offline_install_problem,
+)
+from commander_gui.ui.proton_manager import build_status, release_installed
 from commander_gui.winetricks import (
     WINETRICKS_VERBS,
     check_winetricks_full_status,
-    protontricks_binary,
-    protontricks_install_command,
+    forget_verbs,
     umu_install_command,
     winetricks_binary,
     winetricks_install_command,
@@ -64,10 +74,15 @@ from commander_gui.winetricks import (
 )
 
 from .. import gamepad as pad
+from ..install_switcher import InstallSwitcher
+from ..mod_installer import pick_file
 from ..power import on_battery
 from ..scale import px
+from ..verify import DeckVerifyCard
+from ..welcome import open_url
 from ..widgets import (
     DeckCard,
+    DeckOverlay,
     DeckPicker,
     DeckProgress,
     DeckRow,
@@ -81,6 +96,7 @@ from ..widgets import (
     side_by_side,
 )
 from .base import DeckScreen
+from .multiplayer import confirm_singleplayer
 
 
 class _ProtonProgressBridge(QObject):
@@ -116,7 +132,7 @@ _ANOMALY_INSTALL_BYTES = 20 * 1024**3
 #: rather than pretending to a precision it does not have - but it does
 #: advance, which an indeterminate spinner over a ten-minute Winetricks run
 #: does not.
-_STAGE_START = {"winetricks": 0, "umu": 10, "tools": 25, "verbs": 45}
+_STAGE_START = {"winetricks": 0, "umu": 10, "verbs": 45}
 
 
 def _save_resume(state: dict, window) -> None:
@@ -216,6 +232,16 @@ class InstallScreen(DeckScreen):
         deps_card.body.addWidget(self.deps_button)
         self.body.addWidget(deps_card)
 
+        self.verify_card = DeckVerifyCard(
+            self.window, 4, lambda: self.anomaly_mirror_row.is_checked()
+        )
+        self.body.addWidget(self.verify_card)
+
+        # GAMMA in more than one folder (internal storage and an SD card):
+        # which one the active profile plays.
+        self.install_switcher = InstallSwitcher(self.window, self._on_install_switched)
+        self.body.addWidget(self.install_switcher)
+
         # Compatibility tool | Install options, side by side.
         # The GE-Proton downloader (commander_gui/proton_installer.py) is
         # independent of which runner is selected, so it is its own tool
@@ -224,11 +250,11 @@ class InstallScreen(DeckScreen):
         proton_card.body.addWidget(
             deck_label(tr("Compatibility tool"), role="rowTitle")
         )
-        self.proton_row = DeckRow(tr("GE-Proton"))
+        self.proton_row = DeckRow(tr("Proton-GE"))
         self.proton_row.activated.connect(self._pick_proton_version)
         proton_card.body.addWidget(self.proton_row)
         self.proton_install_button = deck_button(
-            tr("Install GE-Proton"), on_click=self._install_proton
+            tr("Install Proton-GE"), on_click=self._install_proton
         )
         self.proton_install_button.setEnabled(False)
         proton_card.body.addWidget(self.proton_install_button)
@@ -244,7 +270,24 @@ class InstallScreen(DeckScreen):
         self.minimal_row = DeckToggleRow(tr("Minimal (~100 GB)"), False)
         self.preserve_user_row = DeckToggleRow(tr("Preserve user.ltx settings"), True)
         self.preserve_mcm_row = DeckToggleRow(tr("Preserve MCM settings"), True)
-        for row in (self.minimal_row, self.preserve_user_row, self.preserve_mcm_row):
+        self.offline_row = DeckToggleRow(tr("Offline install (cache only)"), False)
+        self.anomaly_mirror_row = DeckToggleRow(tr("Faster Anomaly download (mirror)"), True)
+        self.offline_row.toggled.connect(lambda _on: self._update_buttons())
+        self.offline_archive_row = DeckRow(tr("Offline archive"))
+        self.offline_archive_row.activated.connect(self._pick_offline_archive)
+        self.offline_guide_row = DeckRow(tr("Where to download the offline cache"))
+        self.offline_guide_row.activated.connect(
+            lambda: open_url(self.window, OFFLINE_GUIDE_URL)
+        )
+        for row in (
+            self.minimal_row,
+            self.preserve_user_row,
+            self.preserve_mcm_row,
+            self.anomaly_mirror_row,
+            self.offline_row,
+            self.offline_archive_row,
+            self.offline_guide_row,
+        ):
             options_card.body.addWidget(row)
         options_card.body.addStretch(1)
         self.body.addLayout(side_by_side(proton_card, options_card))
@@ -259,6 +302,8 @@ class InstallScreen(DeckScreen):
         # is a system-wide action, not something tied to one GAMMA install.
         self._update_proton_button()
 
+        self.verify_card.refresh()
+        self.install_switcher.refresh()
         profile = self.profile()
         if profile is None:
             for row in (self.anomaly_row, self.gamma_row, self.deps_row):
@@ -267,6 +312,7 @@ class InstallScreen(DeckScreen):
             self.anomaly_button.setEnabled(False)
             self.install_button.setEnabled(False)
             self.deps_button.setEnabled(False)
+            self.verify_card.set_enabled(False)
             self.note.setText(
                 tr("Create or activate a profile first (Dashboard → Profiles).")
             )
@@ -290,16 +336,12 @@ class InstallScreen(DeckScreen):
             self.install_button.setText(tr("Resume install"))
             self.resume_note.setText(
                 tr(
-                    "The last GAMMA install did not finish. Resume it - "
-                    "most of what already downloaded is reused, but some "
-                    "large files from GAMMA's GitHub repos download again."
+                    "The last GAMMA install did not finish. Resume it to pick "
+                    "up where it stopped. Mods that are already installed are skipped."
                 )
             )
             self.resume_note.show()
         else:
-            self.install_button.setText(
-                tr("Reinstall GAMMA") if self._gamma_installed else tr("Install GAMMA")
-            )
             self.resume_note.hide()
         self._update_buttons()
         self._start_dependency_check()
@@ -312,15 +354,44 @@ class InstallScreen(DeckScreen):
     def _update_buttons(self) -> None:
         idle = not self.window.install_busy and self._runner is None
         has_profile = self.profile() is not None
-        # Disabled once installed, matching desktop's own anomaly_button -
-        # there's nothing a second "Install Anomaly" click should do.
+        # `anomaly install` has no offline mode: the offline full install
+        # unpacks Anomaly from the cache along with GAMMA. A reinstall reuses
+        # the archive already in the cache, so Offline only blocks a first
+        # install - matching desktop's own anomaly_button.
         self.anomaly_button.setEnabled(
-            idle and has_profile and not self._anomaly_installed
+            idle and has_profile and (self._anomaly_installed or not self.offline_row.is_checked())
+        )
+        # A failed run can leave a folder that looks installed but isn't.
+        self.anomaly_button.setText(
+            tr("Retry Anomaly") if getattr(self, "_anomaly_failed", False)
+            else tr("Reinstall Anomaly") if self._anomaly_installed
+            else tr("Install Anomaly")
         )
         self.install_button.setEnabled(idle and has_profile)
         self.deps_button.setEnabled(idle and has_profile)
-        for row in (self.minimal_row, self.preserve_user_row, self.preserve_mcm_row):
+        self.verify_card.set_enabled(idle)
+        self.install_switcher.setEnabled(idle and has_profile)
+        offline = self.offline_row.is_checked()
+        if not getattr(self, "_resuming", False):
+            if getattr(self, "_gamma_installed", False):
+                label = tr("Reinstall GAMMA offline") if offline else tr("Reinstall GAMMA")
+            else:
+                label = tr("Install GAMMA offline") if offline else tr("Install GAMMA")
+            self.install_button.setText(label)
+        if offline:
+            # Minimal deletes the cache an offline install depends on.
+            self.minimal_row.set_checked(False)
+        for row in (self.preserve_user_row, self.preserve_mcm_row, self.offline_row):
             row.setEnabled(idle)
+        self.minimal_row.setEnabled(idle and not offline)
+        self.anomaly_mirror_row.setEnabled(idle and not offline)
+        self.offline_archive_row.setEnabled(idle and offline)
+        self.offline_archive_row.setVisible(offline)
+        self.offline_guide_row.setVisible(offline)
+        profile = self.profile()
+        if profile is not None:
+            archive = offline_archive()
+            self.offline_archive_row.set_value(Path(archive).name if archive else tr("Not set"))
         self._update_proton_button()
         self.update_hints()
 
@@ -328,7 +399,7 @@ class InstallScreen(DeckScreen):
     def _start_dependency_check(self) -> None:
         if self._deps_task is not None:
             return
-        self.deps_row.set_status(tr("Checking..."), "warn")
+        self.deps_row.set_status(tr("Checking"), "warn")
         # Off-thread on purpose. The desktop page calls this synchronously,
         # which is tolerable on a desktop and a visible stall on the Deck -
         # it shells out to several package managers and binaries.
@@ -374,6 +445,12 @@ class InstallScreen(DeckScreen):
         status = status or {}
         installed = sum(1 for ok in status.values() if ok)
         total = len(status)
+        # Any verb already there: winetricks would skip it, so the button
+        # becomes a forced reinstall, like the desktop page.
+        self._deps_force = installed > 0
+        self.deps_button.setText(
+            tr("Reinstall Dependencies") if self._deps_force else tr("Install Dependencies")
+        )
         self._deps_count_text = tr(
             "{installed}/{total} dependencies installed",
             installed=installed,
@@ -402,8 +479,11 @@ class InstallScreen(DeckScreen):
         profile = self.profile()
         if profile is None or self.window.install_busy:
             return
-        if mo2_running():
-            self.window.notify(tr("Mod Organizer is running"))
+        if game_running(force=True):
+            self.window.notify(tr("Close the game first"))
+            return
+        if self._anomaly_installed and not getattr(self, "_anomaly_failed", False):
+            self._confirm_anomaly_reinstall(profile)
             return
 
         message = tr("Download and install STALKER Anomaly?")
@@ -416,9 +496,70 @@ class InstallScreen(DeckScreen):
         self.window.confirm(
             tr("Install Anomaly"),
             message,
-            self._start_anomaly_install,
+            lambda: confirm_singleplayer(
+                self.window, profile, tr("installing Anomaly"), self._start_anomaly_install
+            ),
             confirm_text=tr("Install"),
         )
+
+    def _confirm_anomaly_reinstall(self, profile) -> None:
+        """Desktop's Reinstall Anomaly: unpack Anomaly again, then GAMMA
+        on top, since `anomaly install` puts stock files back over GAMMA's
+        own (its engine exes among them)."""
+        with_gamma = self._gamma_installed
+        lines = [
+            tr("COMMANDER unpacks STALKER Anomaly 1.5.3 again over your install."),
+            tr("The Anomaly archive in the download cache is reused if it is still valid."),
+        ]
+        if with_gamma:
+            lines.append(tr("GAMMA is reinstalled right after, so its own files go back on top of Anomaly."))
+        lines.append(tr("Files you added to the Anomaly folder yourself stay. For a clean install, use Fresh Reset on the Utilities page."))
+        lines.append(tr("A backup of your saves, user.ltx and MCM settings is made first."))
+        body = QWidget()
+        layout = QVBoxLayout(body)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(deck_label("\n\n".join(lines) + battery_warning(), role="body", wrap=True))
+        keep_saves = DeckToggleRow(tr("Keep saves"), True)
+        keep_settings = DeckToggleRow(tr("Keep user.ltx and MCM settings"), True)
+        layout.addWidget(keep_saves)
+        layout.addWidget(keep_settings)
+
+        def _start() -> None:
+            self.window.dismiss_overlay()
+            confirm_singleplayer(
+                self.window, profile, tr("reinstalling Anomaly"),
+                lambda: self._confirmed(lambda: self._start_anomaly_reinstall(
+                    keep_saves.is_checked(), keep_settings.is_checked(), with_gamma
+                )),
+            )
+
+        self.window.show_overlay(
+            DeckOverlay(
+                tr("Reinstall Anomaly?"),
+                body,
+                [
+                    (tr("Reinstall now"), _start, "primary"),
+                    (tr("Cancel"), self.window.dismiss_overlay, "normal"),
+                ],
+                default_index=1,
+            )
+        )
+
+    def _start_anomaly_reinstall(self, keep_saves: bool, keep_settings: bool, with_gamma: bool) -> None:
+        profile = self.profile()
+        if profile is None:
+            return
+        message, ok = prepare_anomaly_reinstall(
+            profile, keep_saves=keep_saves, keep_settings=keep_settings, with_gamma=with_gamma
+        )
+        if message:
+            self.window.notify(message, 6000)
+        if not ok:
+            return
+        if with_gamma:
+            # _on_finished starts GAMMA with these once Anomaly is in.
+            self._chain_preserve = keep_settings
+        self._start_anomaly_install()
 
     def _start_anomaly_install(self) -> None:
         profile = self.profile()
@@ -430,27 +571,60 @@ class InstallScreen(DeckScreen):
             except OSError as exc:
                 self.window.notify(str(exc), 6000)
                 return
+        args = ["anomaly", "install"]
+        if self.anomaly_mirror_row.is_checked():
+            args.append("--use-anomaly-mirror")
         self._begin_run(
-            cli_command(["anomaly", "install"], progress_interval_ms=200),
+            cli_command(args, progress_interval_ms=200),
             operation="anomaly",
-            status=tr("Installing Anomaly..."),
+            status=tr("Installing Anomaly"),
         )
+
+    def _pick_offline_archive(self) -> None:
+        def _chosen(path: Path) -> None:
+            gui_settings.save_gui_settings(offline_archive=str(path))
+            self._update_buttons()
+
+        archive = offline_archive()
+        pick_file(
+            self.window,
+            tr("Select the offline cache archive"),
+            Path(archive).parent if archive else Path.home(),
+            OFFLINE_ARCHIVE_SUFFIXES,
+            _chosen,
+        )
+
+    def _offline_archive(self) -> str | None:
+        if self.profile() is None or not self.offline_row.is_checked():
+            return None
+        return offline_archive()
 
     # -- GAMMA install ----------------------------------------------------
     def _confirm_install(self) -> None:
         profile = self.profile()
         if profile is None or self.window.install_busy:
             return
-        if mo2_running():
-            self.window.notify(tr("Mod Organizer is running"))
+        if game_running(force=True):
+            self.window.notify(tr("Close the game first"))
             return
 
+        offline = self._offline_archive()
+        if offline is not None:
+            problem = offline_install_problem(offline, profile.cache)
+            if problem:
+                self.window.notify(problem, 6000)
+                return
         minimal = self.minimal_row.is_checked()
+        # Offline too: the archive is unpacked into the cache first.
         needed = _MINIMAL_INSTALL_BYTES if minimal else _FULL_INSTALL_BYTES
-        message = tr(
-            "This installs Anomaly (if missing) and every GAMMA addon. "
-            "Expect about {size} of downloads.",
-            size=human_size(needed),
+        message = (
+            tr("COMMANDER unpacks the offline archive into the cache folder, then installs from it. Nothing is downloaded.")
+            if offline is not None
+            else tr(
+                "This installs Anomaly (if missing) and every GAMMA addon. "
+                "Expect about {size} of downloads.",
+                size=human_size(needed),
+            )
         )
         free = free_space_bytes(profile.gamma or profile.anomaly)
         if free is not None and free < needed:
@@ -461,7 +635,10 @@ class InstallScreen(DeckScreen):
         self.window.confirm(
             tr("Install GAMMA"),
             message,
-            lambda: self._confirmed(self._start_install),
+            lambda: confirm_singleplayer(
+                self.window, profile, tr("installing GAMMA"),
+                lambda: self._confirmed(self._start_install),
+            ),
             confirm_text=tr("Install"),
         )
 
@@ -470,8 +647,8 @@ class InstallScreen(DeckScreen):
         if self.window.install_busy:
             self.window.notify(tr("Another task is already running."))
             return
-        if mo2_running():
-            self.window.notify(tr("Mod Organizer is running"))
+        if game_running(force=True):
+            self.window.notify(tr("Close the game first"))
             return
         start()
 
@@ -488,6 +665,7 @@ class InstallScreen(DeckScreen):
             except OSError as exc:
                 self.window.notify(str(exc), 6000)
                 return False
+        use_stock_mo2_profile_if_missing(self.window.settings, profile)
 
         # Both must genuinely exist before trusting the cache to skip
         # re-extraction. Checking Anomaly alone is wrong straight after a
@@ -502,16 +680,23 @@ class InstallScreen(DeckScreen):
             error = backup_settings_before(profile, "reinstall")
             if error:
                 self.window.notify(tr("Settings backup failed: {message}", message=error), 6000)
+            # Kept across failed and resumed runs, like the desktop page.
+            if getattr(self, "_kept", None) is None:
+                self._kept = capture(profile, keep_exes=bool(modded_exes.load_state(profile.anomaly)))
         args = _full_install_args(
             self.minimal_row.is_checked(),
             self.preserve_user_row.is_checked(),
             self.preserve_mcm_row.is_checked(),
             skip_extract,
+            offline_archive=self._offline_archive(),
+            anomaly_mirror=self.anomaly_mirror_row.is_checked(),
         )
+        if self._resuming:
+            args += cli_resume_args(profile.gamma, "full-install")
         self._begin_run(
             cli_command(args, progress_interval_ms=200),
             operation="gamma",
-            status=tr("Installing GAMMA..."),
+            status=tr("Installing GAMMA"),
         )
         return True
 
@@ -547,18 +732,19 @@ class InstallScreen(DeckScreen):
     def _confirm_dependencies(self) -> None:
         if self.window.install_busy:
             return
-        if mo2_running():
-            self.window.notify(tr("Mod Organizer is running"))
+        if game_running(force=True):
+            self.window.notify(tr("Close the game first"))
             return
+        force = getattr(self, "_deps_force", False)
         self.window.confirm(
-            tr("Install Dependencies"),
+            tr("Reinstall Dependencies") if force else tr("Install Dependencies"),
             tr(
-                "Installs umu-run, protontricks and the Visual C++ / DirectX "
+                "Installs winetricks, umu-run and the Visual C++ / DirectX "
                 "runtimes Mod Organizer and the game need:\n\n{verbs}",
                 verbs=" ".join(WINETRICKS_VERBS),
             ),
             lambda: self._confirmed(self._start_dependencies),
-            confirm_text=tr("Install"),
+            confirm_text=tr("Reinstall now") if force else tr("Install"),
         )
 
     def _start_dependencies(self) -> None:
@@ -569,30 +755,35 @@ class InstallScreen(DeckScreen):
         from commander_gui.gui_settings import configured_runner
 
         stage = self._stage
-        # curl / pipx stages touch no Wine and get no Wine env; the verbs
+        # curl stages touch no Wine and get no Wine env; the verbs
         # stage gets exactly the env winetricks_install_command() decides.
         env: dict[str, str] | None = None
         if stage == "winetricks":
             command = winetricks_tool_install_command()
             failure = tr("winetricks could not be installed (curl is not available).")
-            status = tr("Installing winetricks...")
+            status = tr("Installing winetricks")
         elif stage == "umu":
             command = umu_install_command()
             failure = tr("umu-run could not be installed (curl is not available).")
-            status = tr("Installing umu-run...")
-        elif stage == "tools":
-            command = protontricks_install_command()
-            failure = tr("protontricks could not be installed.")
-            status = tr("Installing protontricks...")
+            status = tr("Installing umu-run")
         else:
             # Through the game's own runner - bare winetricks would run the
             # host's wine inside the Proton prefix and corrupt it.
             try:
-                command, env = winetricks_install_command(configured_runner())
+                runner = configured_runner()
+                command, env = winetricks_install_command(runner)
                 failure = tr("Winetricks is not available.")
             except LaunchError as exc:
                 command, failure = [], str(exc)
-            status = tr("Installing runtimes...")
+            if command and getattr(self, "_deps_force", False):
+                if runner.kind == "umu":
+                    # umu-run rejects --force as "not a verb"; it only looks
+                    # at winetricks.log, so clear our verbs from it instead.
+                    forget_verbs(runner.env.get("WINEPREFIX") or configured_wine_prefix())
+                else:
+                    # winetricks skips verbs already in winetricks.log without this.
+                    command.insert(len(command) - len(WINETRICKS_VERBS), "--force")
+            status = tr("Installing runtimes")
         if not command:
             self._finish_run()
             self.window.notify(failure, 8000)
@@ -641,6 +832,10 @@ class InstallScreen(DeckScreen):
         event = parse_progress_line(strip_ansi(line))
         if event is None:
             return
+        if event.offline_unpack:
+            self.progress.set_percent(round(event.percent * 100))
+            self.progress.status_message(tr("Unpacking the offline archive"))
+            return
         self.progress.set_percent(
             aggregate_progress_value(
                 event.complete,
@@ -651,7 +846,7 @@ class InstallScreen(DeckScreen):
                 event.operation,
             )
         )
-        self.progress.status_message(f"{event.operation}  {event.name}")
+        self.progress.status_message(f"{event.operation}  {event.name}  {event.size}".rstrip())
 
     def _on_finished(self, rc: int, output: str) -> None:
         cancelled = self._runner is not None and self._runner.was_cancelled
@@ -659,8 +854,7 @@ class InstallScreen(DeckScreen):
         self._runner = None
         ok = cli_ok(rc, output, "") if self._stage is None else rc == 0
 
-        # Dependency stages chain: umu -> protontricks (unless already
-        # present) -> the Winetricks verbs. install_busy stays held across
+        # Dependency stages chain: winetricks -> umu -> the Winetricks verbs. install_busy stays held across
         # the hand-off - dropping it between stages left a window in which
         # another screen could start a second job against the same prefix.
         if self._stage is not None and ok and not cancelled:
@@ -669,15 +863,34 @@ class InstallScreen(DeckScreen):
                 self._run_stage()
                 return
             if self._stage == "umu":
-                self._stage = "verbs" if protontricks_binary() else "tools"
-                self._run_stage()
-                return
-            if self._stage == "tools":
                 self._stage = "verbs"
                 self._run_stage()
                 return
 
+        if getattr(self, "_anomaly_failure", None) is not None:
+            # The file check after a bad exit: only files that check out and
+            # are really there overrule the exit code. A cancelled check
+            # proves nothing, so the failure still stands.
+            profile = self.profile()
+            ok = not cancelled and ok and profile is not None and anomaly_installed(profile.anomaly)
+            if not ok:
+                rc, output = self._anomaly_failure
+            self._anomaly_failure = None
+            cancelled = False
+        elif getattr(self, "_operation", None) == "anomaly" and not cancelled and not ok:
+            # The installer can crash on exit after it finished: check the
+            # files before calling it a failure, like the desktop page.
+            self._anomaly_failure = (rc, output)
+            self._begin_run(
+                cli_command(["anomaly", "check"]),
+                operation="anomaly",
+                status=tr("Verifying Anomaly files"),
+            )
+            return
+
         restore_note = None
+        if getattr(self, "_operation", None) == "anomaly" and not cancelled:
+            self._anomaly_failed = not ok
         self._last_operation = getattr(self, "_operation", None)
         self._last_stage = self._stage
         if getattr(self, "_operation", None) == "gamma":
@@ -687,6 +900,9 @@ class InstallScreen(DeckScreen):
                 self._save_resume_state()
             else:
                 _save_resume({}, self.window)
+                kept, self._kept = getattr(self, "_kept", None), None
+                if kept is not None:
+                    restore(kept)
                 profile = self.profile()
                 # A fresh install rewrote gamma/mods: Verify Integrity must
                 # not compare it against the old MD5 baseline.
@@ -694,6 +910,14 @@ class InstallScreen(DeckScreen):
                     invalidate_baseline(profile.gamma)
                 restore_note = apply_pending_settings_restore(profile)
         self._operation = None
+
+        chain_preserve, self._chain_preserve = getattr(self, "_chain_preserve", None), None
+        if chain_preserve is not None and self._last_operation == "anomaly" and ok and not cancelled:
+            self._finish_run()
+            self.preserve_user_row.set_checked(chain_preserve)
+            self.preserve_mcm_row.set_checked(chain_preserve)
+            self._start_install()
+            return
 
         operation = self._finished_operation_title()
         self._finish_run()
@@ -706,6 +930,14 @@ class InstallScreen(DeckScreen):
                 message += "\n\n" + restore_note
             self.window.announce_finished(
                 tr("{operation} finished", operation=operation), message
+            )
+        elif self._last_operation == "anomaly":
+            summary, _detail = _install_failure_message(rc, output, None)
+            self.window.confirm(
+                tr("Anomaly didn't install correctly"),
+                summary,
+                self._start_anomaly_install,
+                confirm_text=tr("Retry Anomaly"),
             )
         else:
             self.window.announce_finished(
@@ -743,6 +975,10 @@ class InstallScreen(DeckScreen):
         self.deps_button.show()
         self.refresh()
 
+    def _on_install_switched(self) -> None:
+        # Other folders: every screen's cached state belongs to the old ones.
+        self.window.profile_changed()
+
     def on_action(self, action: str) -> bool:
         if action == pad.CONTEXT:
             if self.install_button.isEnabled() and self.install_button.isVisible():
@@ -779,6 +1015,7 @@ class InstallScreen(DeckScreen):
             self._runner is not None
             or self._proton_task is not None
             or self._proton_manage_task is not None
+            or self.verify_card.busy()
         ):
             self.window.notify(tr("An install is already running."))
             return True
@@ -789,9 +1026,12 @@ class InstallScreen(DeckScreen):
         idle = not self.window.install_busy and self._proton_task is None
         # Cheap count only (runs on every busy change); the full list with
         # sizes and "in use" is built when the row is opened.
+        # One scan: it parses libraryfolders.vdf and lists every library,
+        # which can wake a sleeping SD card.
+        protons = find_extra_protons()
         builds = [
             label
-            for label, path in find_extra_protons()
+            for label, path in protons
             if Path(path).parent.parent.name == "compatibilitytools.d"
         ]
         self.proton_builds_row.set_value(
@@ -800,12 +1040,13 @@ class InstallScreen(DeckScreen):
         self.proton_builds_row.setEnabled(idle and bool(builds))
         version = self._proton_version
         if not version:
-            self.proton_install_button.setText(tr("Install GE-Proton"))
+            self.proton_install_button.setText(tr("Install Proton-GE"))
             self.proton_install_button.setEnabled(False)
             return
-        installed = {label for label, _path in find_extra_protons()}
-        if any(version in label for label in installed):
-            self.proton_install_button.setText(tr("GE-Proton installed") + " ✓")
+        # Exact tag match: "GE-Proton9-1" must not count as installed
+        # because "GE-Proton9-10" is.
+        if release_installed(version, {label for label, _path in protons}):
+            self.proton_install_button.setText(tr("Proton-GE installed") + " ✓")
             self.proton_install_button.setEnabled(False)
         else:
             self.proton_install_button.setText(tr("Install {version}", version=version))
@@ -819,7 +1060,7 @@ class InstallScreen(DeckScreen):
             return
         # Fetched on demand, not eagerly on screen build: this is a GitHub
         # API call, and most visits to this screen never touch it.
-        self.window.notify(tr("Fetching GE-Proton releases..."), 0)
+        self.window.notify(tr("Fetching Proton-GE releases"), 0)
         self._proton_releases_task = BackgroundTask(
             fetch_ge_proton_releases, count=100, parent=self
         )
@@ -832,7 +1073,7 @@ class InstallScreen(DeckScreen):
         self.window.toast.hide()
         self._proton_releases = list(releases or [])
         if not self._proton_releases:
-            self.window.notify(tr("No GE-Proton releases found."), 4000)
+            self.window.notify(tr("No Proton-GE releases found."), 4000)
             return
         self._show_proton_picker()
 
@@ -849,7 +1090,7 @@ class InstallScreen(DeckScreen):
         )
         picker.chosen.connect(self._apply_proton_version)
         self.window.show_overlay(
-            picker_overlay(self.window, tr("GE-Proton version"), picker, panel_width=1100)
+            picker_overlay(self.window, tr("Proton-GE version"), picker, panel_width=1100)
         )
 
     def _apply_proton_version(self, tag: object) -> None:
@@ -865,11 +1106,10 @@ class InstallScreen(DeckScreen):
         version = self._proton_version
         if not version or self.window.install_busy or self._proton_task is not None:
             return
-        installed = {label for label, _path in find_extra_protons()}
-        if any(version in label for label in installed):
+        if release_installed(version, {label for label, _path in find_extra_protons()}):
             return
         self.window.confirm(
-            tr("Install GE-Proton"),
+            tr("Install Proton-GE"),
             tr(
                 "Downloads and installs {version} as a Steam compatibility "
                 "tool.",
@@ -890,8 +1130,8 @@ class InstallScreen(DeckScreen):
 
         self.window.set_install_busy(True, "proton")
         self.proton_install_button.setEnabled(False)
-        self.proton_install_button.setText(tr("Installing..."))
-        self.proton_status.setText(tr("Preparing download..."))
+        self.proton_install_button.setText(tr("Installing"))
+        self.proton_status.setText(tr("Preparing download"))
         self.progress.reset()
         self.progress.show()
         self.anomaly_button.hide()
@@ -909,7 +1149,7 @@ class InstallScreen(DeckScreen):
             if total > 0:
                 pct = int(downloaded * 100 / total)
                 text = tr(
-                    "Downloading {version}... {done}/{total}",
+                    "Downloading {version} {done}/{total}",
                     version=version,
                     done=human_size(downloaded),
                     total=human_size(total),
@@ -934,7 +1174,7 @@ class InstallScreen(DeckScreen):
     def _manage_protons(self) -> None:
         if self._proton_manage_task is not None or self.window.install_busy:
             return
-        self.window.notify(tr("Checking GE-Proton builds..."), 0)
+        self.window.notify(tr("Checking Proton-GE builds"), 0)
 
         def _scan():
             builds = installed_builds()
@@ -955,7 +1195,7 @@ class InstallScreen(DeckScreen):
         self.window.toast.hide()
         entries = list(scanned or [])
         if not entries:
-            self.window.notify(tr("No GE-Proton builds found in compatibilitytools.d."))
+            self.window.notify(tr("No Proton-GE builds found in compatibilitytools.d."))
             self._update_proton_button()
             return
         picker = DeckPicker(
@@ -968,7 +1208,7 @@ class InstallScreen(DeckScreen):
         )
         picker.chosen.connect(lambda index: self._confirm_proton_removal(*entries[int(index)]))
         self.window.show_overlay(
-            picker_overlay(self.window, tr("Remove a GE-Proton build"), picker, panel_width=1200)
+            picker_overlay(self.window, tr("Remove a Proton-GE build"), picker, panel_width=1200)
         )
 
     def _confirm_proton_removal(self, build, size: int) -> None:
@@ -994,7 +1234,7 @@ class InstallScreen(DeckScreen):
             if self.window.install_busy or self._proton_manage_task is not None:
                 self.window.notify(tr("Another task is already running."))
                 return
-            if mo2_running(force=True):
+            if game_running(force=True):
                 self.window.notify(
                     tr("Mod Organizer / the game is currently running. Close it first.")
                 )
@@ -1008,7 +1248,7 @@ class InstallScreen(DeckScreen):
             task.start()
 
         self.window.confirm(
-            tr("Remove GE-Proton"), message, _start, confirm_role="danger", confirm_text=tr("Remove")
+            tr("Remove Proton-GE"), message, _start, confirm_role="danger", confirm_text=tr("Remove")
         )
 
     def _on_proton_removed(self, name: str, size: int, error: str | None) -> None:
@@ -1039,7 +1279,7 @@ class InstallScreen(DeckScreen):
         )
         self._update_proton_button()
         self.window.announce_finished(
-            tr("GE-Proton installed"),
+            tr("Proton-GE installed"),
             tr("Installed {version}", version=self._proton_version),
         )
 
@@ -1055,6 +1295,6 @@ class InstallScreen(DeckScreen):
         else:
             self.proton_status.setText(tr("Failed") + ": " + message)
             self.window.announce_finished(
-                tr("GE-Proton install failed"), tr("Failed") + ": " + message, ok=False
+                tr("Proton-GE install failed"), tr("Failed") + ": " + message, ok=False
             )
         self._update_proton_button()

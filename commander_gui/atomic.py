@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import stat
 import tempfile
 import threading
@@ -16,9 +17,52 @@ except ImportError:  # pragma: no cover - Windows fallback
 _WRITE_LOCK = threading.RLock()
 
 
+def remove_stale(folder: str | Path, pattern: str, max_age_s: float = 86400) -> None:
+    """Delete *pattern* matches in *folder* older than *max_age_s*.
+
+    For the hidden temp files and folders a download or unpack leaves when
+    COMMANDER is killed partway (power loss, SIGKILL): no ``finally`` runs
+    then, and they can be gigabytes. A day old, so one still in use by
+    another COMMANDER window is never touched.
+    """
+    import shutil
+    import time
+
+    cutoff = time.time() - max_age_s
+    try:
+        stale = [p for p in Path(folder).glob(pattern) if p.lstat().st_mtime < cutoff]
+    except OSError:
+        return
+    for path in stale:
+        try:
+            if path.is_dir() and not path.is_symlink():
+                shutil.rmtree(path, ignore_errors=True)
+            else:
+                path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def split_lines(text: str) -> list[str]:
+    """``text.splitlines()`` for files that only break on \\n, \\r\\n or \\r.
+
+    ``str.splitlines()`` also breaks on U+2028, U+0085, \\x0b, \\x0c and
+    \\x1c-\\x1e, so a mod name or INI value holding one was split in two
+    and rewritten as two lines on the next save.
+    """
+    lines = re.split(r"\r\n|\r|\n", text)
+    if lines and lines[-1] == "":
+        lines.pop()
+    return lines
+
+
 def write_text(path: Path, text: str) -> None:
-    """Write UTF-8 text through a unique sibling temporary file."""
-    _write(path, text.encode("utf-8"), lock=True)
+    """Write UTF-8 text through a unique sibling temporary file.
+
+    Text read with ``errors="surrogateescape"`` keeps its non-UTF-8 bytes
+    (a cp1251 name in an LTX/INI file) exactly as they were.
+    """
+    _write(path, text.encode("utf-8", errors="surrogateescape"), lock=True)
 
 
 def write_bytes(path: Path, data: bytes, *, lock: bool = True) -> None:
@@ -74,6 +118,14 @@ def _write(path: Path, data: bytes, *, lock: bool) -> None:
                 stream.flush()
                 os.fsync(stream.fileno())
             os.replace(temporary_path, path)
+            try:  # make the rename itself survive a power cut
+                dir_fd = os.open(path.parent, os.O_RDONLY)
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
+            except OSError:
+                pass
             if lock_fd is not None:
                 fcntl.flock(lock_fd, fcntl.LOCK_UN)
                 os.close(lock_fd)

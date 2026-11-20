@@ -1,236 +1,79 @@
 <div align="center">
 
-# S.T.A.L.K.E.R. G.A.M.M.A. COMMANDER
+<img alt="S.T.A.L.K.E.R. COMMANDER: an abandoned Pripyat apartment block under a stormy sky." src="docs/readme/banner.svg" width="100%">
 
-**A complete graphical front-end for installing, updating, managing and launching S.T.A.L.K.E.R. Anomaly with the GAMMA modpack on Linux.**
+# S.T.A.L.K.E.R. COMMANDER
 
-[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
-[![Platform](https://img.shields.io/badge/platform-Linux%20x86__64-informational)](#requirements)
-[![Python](https://img.shields.io/badge/python-3.10%2B-blue)](#from-source)
-[![Qt](https://img.shields.io/badge/GUI-PySide6%20%2F%20Qt%206-41cd52)](https://doc.qt.io/qtforpython-6/)
-[![Release](https://img.shields.io/github/v/release/SSH-Kitty/STALKER-GAMMA-COMMANDER?include_prereleases&label=release)](https://github.com/SSH-Kitty/STALKER-GAMMA-COMMANDER/releases)
-[![Discord](https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white)](https://discord.gg/6A9psrtYhh)
+**A complete graphical front-end for installing, updating, managing and launching S.T.A.L.K.E.R. Anomaly modpacks,
+like GAMMA and ROMEO, on Linux and the Steam Deck.**
+
+<a href="https://github.com/SSH-Kitty/STALKER-GAMMA-COMMANDER/releases/latest"><img height="34" alt="Latest stable release" src="https://img.shields.io/github/v/release/SSH-Kitty/STALKER-GAMMA-COMMANDER?label=stable&logo=github&style=for-the-badge&labelColor=141b15&color=5fb548&logoColor=white"></a>
+<a href="https://github.com/SSH-Kitty/STALKER-GAMMA-COMMANDER/releases"><img height="34" alt="Total downloads" src="https://img.shields.io/github/downloads/SSH-Kitty/STALKER-GAMMA-COMMANDER/total?label=downloads&logo=github&style=for-the-badge&labelColor=141b15&color=5fb548&logoColor=white"></a>
+<img height="34" alt="Platform: Linux" src="https://img.shields.io/badge/platform-Linux-5fb548?logo=linux&style=for-the-badge&labelColor=141b15&color=5fb548&logoColor=white">
+<img height="34" alt="Steam Deck" src="https://img.shields.io/badge/Steam%20Deck-ready-5fb548?logo=steamdeck&style=for-the-badge&labelColor=141b15&color=5fb548&logoColor=white">
+<br>
+<img height="34" alt="Ten languages" src="https://img.shields.io/badge/languages-10-5fb548?style=for-the-badge&labelColor=141b15&color=5fb548&logoColor=white">
+<a href="LICENSE"><img height="34" alt="License: GPL v3" src="https://img.shields.io/badge/license-GPLv3-5fb548?logo=gnu&style=for-the-badge&labelColor=141b15&color=5fb548&logoColor=white"></a>
+<a href="https://discord.gg/6A9psrtYhh"><img height="34" alt="Discord" src="https://img.shields.io/badge/discord-join-5fb548?logo=discord&style=for-the-badge&labelColor=141b15&color=5fb548&logoColor=white"></a>
+
+<a href="https://github.com/SSH-Kitty/STALKER-GAMMA-COMMANDER/releases/latest"><img alt="Download the AppImage" src="docs/readme/button-download.svg" width="300"></a>
+&nbsp;
+<a href="https://discord.gg/6A9psrtYhh"><img alt="Join the Discord" src="docs/readme/button-discord.svg" width="300"></a>
+
+<a href="#what-this-is"><img height="30" alt="What this is" src="https://img.shields.io/badge/What%20this%20is-1f2b21?style=for-the-badge"></a>
+<a href="#installation"><img height="30" alt="Installation" src="https://img.shields.io/badge/Installation-1f2b21?style=for-the-badge"></a>
+<a href="#first-run"><img height="30" alt="First run" src="https://img.shields.io/badge/First%20run-1f2b21?style=for-the-badge"></a>
+<a href="#whats-new-in-140"><img height="30" alt="What's new" src="https://img.shields.io/badge/What%27s%20new-1f2b21?style=for-the-badge"></a>
+<a href="#romeo"><img height="30" alt="ROMEO" src="https://img.shields.io/badge/ROMEO-1f2b21?style=for-the-badge"></a>
+<a href="#features"><img height="30" alt="Features" src="https://img.shields.io/badge/Features-1f2b21?style=for-the-badge"></a>
+<a href="#steam-deck-mode"><img height="30" alt="Steam Deck" src="https://img.shields.io/badge/Steam%20Deck-1f2b21?style=for-the-badge"></a>
+<a href="#credits"><img height="30" alt="Credits" src="https://img.shields.io/badge/Credits-1f2b21?style=for-the-badge"></a>
+<a href="https://discord.gg/6A9psrtYhh"><img height="30" alt="Discord" src="https://img.shields.io/badge/Discord-1f2b21?style=for-the-badge"></a>
 
 </div>
 
-<p align="center">
-  <a href="#what-this-is">What this is</a> •
-  <a href="#features">Features</a> •
-  <a href="#installation">Installation</a> •
-  <a href="#first-run">First run</a> •
-  <a href="#contributing-a-translation">Contributing</a> •
-  <a href="#credits">Credits</a> •
-  <a href="#license">License</a> •
-  <a href="https://discord.gg/6A9psrtYhh">Discord</a>
-</p>
+<img alt="COMMANDER's Dashboard" src="docs/readme/screens/dashboard.png" width="100%">
 
-<img width="1342" height="1010" alt="1-dashboard" src="https://github.com/user-attachments/assets/16576eb6-a9e1-4135-bc3d-9a93a59b7202" />
+> [!TIP]
+> **COMMANDER 1.4.0 is out.** ROMEO support, xrRazom co-op, a five-step install wizard, a redesigned Updates page, settings that
+> survive every update, Steam-style launch options, frame generation and Live themes.
+> [See what's new](#whats-new-in-140).
 
 ## What this is
 
-GAMMA is a huge S.T.A.L.K.E.R. Anomaly mod pack, normally installed through a Windows launcher and run through Mod Organizer 2. On Linux, the community solution is [FaithBeam/stalker-gamma-cli](https://github.com/FaithBeam/stalker-gamma-cli) — an excellent but entirely terminal-driven installer.
+S.T.A.L.K.E.R. Anomaly modpacks are made for Windows: they come with a Windows launcher and run through Mod
+Organizer 2. **COMMANDER makes them easy on Linux and the Steam Deck**, from the first install to playing, in one app.
 
-**COMMANDER is a desktop GUI around that CLI.** It doesn't reimplement any installer logic — it drives the real `stalker-gamma` binary as a subprocess and parses its output live. Every download, checksum and extraction is performed by the upstream CLI, so results are identical to using it by hand; you just get progress tables, a mod manager, prefix handling and a Play button instead of a terminal.
-
-On top of the CLI, COMMANDER adds things it doesn't do on its own: launching through Mod Organizer 2 in a Wine/Proton prefix, a GE-Proton installer, a `modlist.txt` editor, dependency setup, and a full integrity check & repair pass.
-
----
-
-## Features
-
-### Dashboard
-The landing page. Shows the active profile, install status for Anomaly and GAMMA, a live dependency count, storage usage across your Anomaly/GAMMA/cache folders, and a background check for GAMMA addon updates. Quick-open buttons jump straight to the Anomaly, GAMMA, cache and log folders, and a **Play GAMMA** shortcut launches the game without leaving the page.
-
-### Install
-Installs S.T.A.L.K.E.R. Anomaly and GAMMA with a **live per-addon progress table** (name, operation, percent) and an overall completion bar. Pick a base folder and hit **Create folders** to auto-generate the Anomaly/GAMMA/cache layout.
-
-<img width="1342" height="1010" alt="2-install" src="https://github.com/user-attachments/assets/bacd6e10-0645-4b80-a3f7-819fc8630254" />
-
-- If a download is interrupted, the next launch offers **Resume GAMMA Installation** — cached archives are hash-verified and reused, only missing or changed ones are re-downloaded.
-- **Minimal mode** deletes addon archives after extraction to save ~50 GB of disk space.
-- **Preserve user.ltx / Preserve MCM settings** checkboxes protect your keybindings, game options and mod configs across a reinstall.
-- **Install Dependencies** sets up everything MO2 and the game need in one click: `umu-run`, `protontricks` (via `pipx` on PEP 668 systems), and eight Visual C++/DirectX runtimes (`d3dcompiler_43`, `d3dcompiler_47`, `d3dx10`, `d3dx11_43`, `d3dx9`, `quartz`, `dx8vb`, `vcrun2022`) — installed through the selected runner's own Wine (`umu-run winetricks` for GE-Proton, the runner's `wine` binary otherwise), never the system `winetricks`/`wine` on PATH. Running a different Wine build against a Proton prefix corrupts its system DLLs and makes the game crash-loop on launch; COMMANDER now refuses to do that.
-
-### Play
-Launch GAMMA through Mod Organizer 2, open MO2 directly, or run Anomaly's executable without the MO2 virtual file system. Targets are read straight from `ModOrganizer.ini`, with `AnomalyLauncher.exe` used as a fallback if none are found.
-
-<img width="1342" height="1010" alt="3-play" src="https://github.com/user-attachments/assets/fb91b2e0-6422-4517-bd1f-f9a3cd401fbe" />
-
-
-- **Auto runner detection** — the newest installed GE-Proton build is picked automatically and launched through `umu-run`.
-- **Built-in GE-Proton installer** — browse recent GE-Proton releases, download with a progress bar and cancel support, and COMMANDER verifies the SHA-512 checksum and installs it into `compatibilitytools.d` for you. No manual downloading or extracting.
-- **Per-runner prefixes** — each runner remembers its own Wine prefix, so switching runners never corrupts a prefix built by a different version.
-- A live command preview with a copy button, a custom launch options field (supports env vars like `PROTON_USE_WINED3D=1`), and status chips showing installed GE-Proton builds, GameMode and MangoHud.
-- The game launches **detached** — closing COMMANDER doesn't kill your session — with output captured to a rotating `launcher.log`. Failed launches are diagnosed automatically: a DXVK/Vulkan problem, a runner/prefix mismatch, or the classic `concrt140.dll` error are called out by name instead of surfacing a raw Wine crash, with a one-click option to bundle a bug report on the spot.
-- One-click **desktop shortcuts** that launch a specific target with the currently selected runner.
-- **Total playtime** is tracked per profile and shown on the Dashboard.
-- Optional **Discord Rich Presence** ("Playing S.T.A.L.K.E.R. GAMMA" with your mod count and total playtime) — off by default; one checkbox in Settings turns it on, no Discord developer setup needed.
-
-### Updates
-Compares your installed GAMMA version and addon list against the latest official data — without hitting the rate-limited GitHub REST API — and shows exactly what changed: Added, Modified, Removed, and archive-name changes.
-
-<img width="1342" height="1010" alt="4-update" src="https://github.com/user-attachments/assets/6d54ad35-921d-46be-9501-454b8d8a2137" />
-
-Applying updates reuses the same live progress UI as a fresh install, respects the Minimal/preserve-settings options, and holds the global install lock so it can never run alongside another install. A **background check runs at most once a day** even if you never open this page, with a desktop notification if one is found. If an update doesn't go well, **Undo Last Update** restores the `modlist.txt` snapshot taken right before it was applied.
-
-### Mod Manager
-Direct, careful editing of the active MO2 profile's `modlist.txt` — search, enable/disable, delete and reorder mods, grouped by the `_separator` categories GAMMA ships.
-
-<img width="1342" height="1010" alt="5-modmanager" src="https://github.com/user-attachments/assets/ebfc0f97-bcdd-447e-a81b-5bd66e4df603" />
-
-- **Drag-and-drop reordering** with multi-selection support, plus Move Up/Down.
-- **Reversed load order detection**: a GAMMA load order that has been flipped end to end (which crashes the game on startup) is flagged in the Mod Manager and before launching, with a one-click fix.
-- Create new categories, install a local ZIP/7Z/RAR/FOMOD mod archive straight into the modlist, and use the active profile as MO2's selected profile without opening MO2.
-- **A backup is taken automatically before your first edit** (`modlist.txt.gammagui.bak`) and can be restored from the UI, alongside a **Restore Original Order** option.
-- **Writes are atomic** — a crash or full disk cannot truncate your load order — and **edits are blocked while Mod Organizer is running**, since MO2 rewrites the file on exit and would silently discard them.
-- **Check for File Conflicts** scans every enabled mod's files for ones shared by more than one mod, so you can see what the current load order is actually overriding.
-- Press **Ctrl+F** anywhere in the app to jump straight to this page's search box.
-
-### Verify Integrity & Repair
-Runs three passes: an Anomaly file check, a GAMMA presence check (every enabled mod must exist on disk), and a full MD5 scan of every file under `gamma/mods` against a saved baseline. Anything missing, corrupted or changed is reported.
-
-If a broken mod matches an entry in the official GAMMA mod list, COMMANDER can **repair it automatically and non-destructively**: the mod folder and its cached archive are set aside (not deleted), then it's redownloaded and MD5-verified against the official checksum. If the reinstall fails or is cancelled, the set-aside copies are restored automatically — nothing is permanently lost until a repair is confirmed successful. Your own added mods and files are never touched, and anything with no known download source is reported instead of touched.
-
-### Profiles
-Create, edit, activate and delete CLI profiles — each with its own Anomaly, GAMMA, cache, MO2 profile, download-thread and repository settings. Creation, activation and deletion are delegated to `stalker-gamma config` so its side effects (MO2's `selected_profile`, modlist downloads) happen exactly as the CLI intends. Advanced fields expose every repo URL and branch the CLI supports, for anyone using a fork or mirror.
-
-- **Export/Import Profile** saves a profile's portable settings (and its `modlist.txt`, if installed) to a file you can back up or hand to a friend — install folders are always chosen fresh on import, since they're specific to each machine.
-
-### System Check
-Checks every dependency GAMMA and MO2 need in one place: the CLI, Wine, Winetricks, Protontricks, `umu-run`, Vulkan (including the 32-bit loader), each individual Winetricks runtime, GE-Proton builds, GameMode and MangoHud. Every check shows its status and a copyable install command for your distro, and manual overrides let you point COMMANDER at tools installed in non-standard locations.
-
-<img width="1342" height="1010" alt="6-systemcheck" src="https://github.com/user-attachments/assets/425ffc07-522d-4a52-a611-3dc0e7c46a4f" />
-
-### Utilities
-A toolbox for maintenance and recovery:
-
-<img width="1342" height="1010" alt="7-utilities" src="https://github.com/user-attachments/assets/114caa0d-24a3-4d56-a38f-c2c1b1890221" />
-
-- **Cache cleanup** — preview which archives are out of date and how much space they'll free, then clean them.
-- **Clear shader cache** and **Remove ReShade** for a clean slate after driver or mod changes.
-- **Fix GOG installation** — repairs `ModOrganizer.ini` paths for a GOG-provided copy of Anomaly.
-- **Repair Wine prefix** — restores the runner's own system DLLs if another Wine has written into the game's prefix (the symptom: every launch immediately crash-loops and can exhaust system memory). COMMANDER also refuses to launch into a prefix it detects as damaged, so this shouldn't come up in normal use — it exists for prefixes touched by something outside COMMANDER (a manual `winetricks`/`wine` command, another launcher). Reinstall dependencies afterward, since verb-installed runtimes are among the files a foreign Wine would have overwritten.
-- **Move installation** — copy Anomaly, GAMMA and cache to another drive, verified before the originals are deleted. An interrupted move is safely detected and resumed on the next launch.
-- **Create Log Dump** and **Export Diagnostics** — bundle logs, settings and system info into one archive for bug reports.
-- **Fresh Reset**, **GAMMA Reset** and **Full Uninstall** — guarded destructive actions that show exactly what will be deleted and what's kept (your Wine prefix always survives) before doing anything.
-- Opens the bundled **COMMANDER ASSISTANT** log analyzer directly from the page.
-
-<img width="1178" height="735" alt="8-assistant" src="https://github.com/user-attachments/assets/ca097673-6b6f-4c5b-92d5-b14632568efb" />
-
-### Settings
-- **10 languages** — English, French, Spanish, German, Romanian, Polish, Russian, Ukrainian, Portuguese and Turkish. Switch anytime; it applies instantly with no restart, unless a background task is running.
-- **6 themes** — GAMMA, GAMMA Black, Dusk, Midnight, Terminal and Reactor, each with its own color palette.
-- Interface font family (6 options) and size (9–22 px), both applied live.
-- Startup page, default runner, an "Always use GameMode" toggle, an Open Winecfg shortcut, and MO2 Display Scale presets (100–200%) for readable text in Mod Organizer.
-- Desktop autostart, launching COMMANDER automatically on login.
-- **Add to Steam** — writes COMMANDER and Deck Mode straight into your Steam library as non-Steam games, no manual "Add a Non-Steam Game" dialog needed.
-
-
-### Steam Deck Mode
-
-A second interface built for the Deck's 1280x800 screen, its controls and its
-touchscreen. Open it from the small Steam Deck icon on the **Dashboard**, next
-to *Quick actions* — COMMANDER closes and reopens in Deck Mode. **Exit Deck
-Mode**, on Deck Mode's Settings screen (or the ☰ Menu button), brings you back
-the same way.
-
-- **First-run setup.** With no profile yet, Deck Mode asks one question —
-  internal storage or SD card — and creates the profile for you, then sends
-  you to Install.
-- Tabs, in handheld order: **Dashboard · Play · Mods · Update · Install ·
-  Utilities · System · Settings**.
-- **Dashboard** answers "can I play?" in one banner with the one button that
-  moves things forward (Play, Install, Resume, Update), with playtime right
-  under it, then Anomaly · GAMMA · Dependencies side by side, updates, mods,
-  storage, and your **profiles**: switch, create, or edit a profile's name
-  and its Anomaly / GAMMA / cache folders with a built-in folder browser.
-- **Play** (launch target, runner, session timer, and **Force Stop Game** for
-  a game that hangs — the Deck has no Alt+F4), **Mods** (the desktop Mod
-  Manager's category tree as a full-screen list, in MO2 order with priority
-  numbers; fold categories, filter, search, enable/disable a whole category),
-  **Update** (every added / modified / removed mod, plus scrollable patch
-  notes), **Install** (Anomaly, GAMMA, dependencies, GE-Proton, install
-  options, and **Resume** after an interrupted install), **Utilities** (cache,
-  shader cache, ReShade, GOG fix, prefix repair, move install, log dump, and
-  the Uninstall / Reinstall resets), **System** check (with a *Copy install
-  command* button on each missing item) and **Settings**.
-- **Handheld-aware.** The Deck is kept awake while an install, update or move
-  runs, you're warned before a long download on battery, the header shows
-  the battery, and the footer shows the active profile and the time.
-- **Any screen size.** On the Deck it fills the panel; on a bigger window —
-  maximised on a monitor, or docked to a TV — the whole interface scales up
-  with it.
-
-**Controls.** The controller works in Game Mode out of the box — COMMANDER
-reads the gamepad directly, so Steam's default layout is fine — and in
-Desktop Mode's keyboard layout as well:
-
-| Button | Action |
+| Modpack | Support |
 |---|---|
-| D-pad / left stick | Move (hold to repeat) |
-| A | Select / toggle |
-| B | Back |
-| X | The screen's main action (below) |
-| Y | The screen's second action / search |
-| L1 / R1 | Previous / next tab |
-| L2 / R2 | Page up / down |
-| ☰ Menu | Exit Deck Mode or quit |
-| ⧉ View | Controls help |
+| **[GAMMA](https://github.com/Grokitach/Stalker_GAMMA)** | Install, update, verify, repair, mod and play. |
+| **[ROMEO](https://clikrad-com.l.ink/)** | Install, update and uninstall CLIKRΔD's repack on top of GAMMA. |
+| More | Other modpacks will be added. |
 
-| Screen | X | Y |
-|---|---|---|
-| Dashboard | What the banner says (Play / Install / Resume / Update) | Re-check |
-| Play | Play GAMMA (Force Stop while running) | Open MO2 |
-| Mods | Category menu | Search |
-| Update | Check / Apply updates | Show changes |
-| Install | Install or resume GAMMA | Install dependencies |
-| System | Re-check | — |
+GAMMA is installed with [FaithBeam/stalker-gamma-cli](https://github.com/FaithBeam/stalker-gamma-cli), which COMMANDER
+bundles and runs, so an install made with COMMANDER is the same as one made with the CLI by hand.
 
-The ☰ Menu button opens a quick menu from anywhere: **Play GAMMA**, **Exit
-Deck Mode** or **Quit**.
-
-Text fields have a built-in on-screen keyboard (Y), touch works everywhere
-(tap to select, drag to scroll), and every screen shows its buttons in the
-footer. All six themes and all ten languages work as they do on the desktop,
-and the text size has its own 80–150% scale.
-
-On a real Steam Deck, COMMANDER offers Deck Mode the first time it starts and
-remembers your answer (changeable later under **Settings → When COMMANDER
-starts**); in Game Mode it opens Deck Mode without asking. On any other machine it
-opens as an ordinary 1280x800 window, so you can try it out.
-
-**Adding Deck Mode to Steam** so it works in Game Mode: in Desktop Mode, use
-**Add COMMANDER to Steam** (desktop **Settings → Steam**, or Deck Mode's
-**Settings**) —
-this writes both **STALKER COMMANDER** and **STALKER COMMANDER DECK**
-straight into your Steam library. If Steam is running it is closed first,
-the shortcuts are written, and Steam is started again. If you'd rather do it by hand,
-or the button can't tell which Steam account to use, the manual route still
-works:
-
-- *AUR / from source*: in Desktop Mode, **Add a Non-Steam Game** and pick
-  **STALKER COMMANDER (Deck Mode)**.
-- *AppImage*: add the `.AppImage` itself, then set its launch options to
-  `--deck`. An AppImage can only publish one desktop entry, so the Deck one
-  cannot ride along with it.
-
-Deck Mode full-screens itself under gamescope, which has no window manager to
-size a window for it.
-
----
+Around the install, COMMANDER adds: launching through Mod Organizer 2 in a Wine or Proton
+prefix, a Proton-GE installer, a mod manager, dependency setup, integrity checks and repair, backups, xrRazom co-op and
+a full Steam Deck Mode.
 
 ## Installation
 
 ### AppImage (recommended)
 
-Download the latest `.AppImage` from [**Releases**](https://github.com/SSH-Kitty/STALKER-GAMMA-COMMANDER/releases):
+Download the latest `.AppImage` from [**Releases**](https://github.com/SSH-Kitty/STALKER-GAMMA-COMMANDER/releases/latest):
 
 ```bash
 chmod +x STALKER-GAMMA-COMMANDER-*-x86_64.AppImage
 ./STALKER-GAMMA-COMMANDER-*-x86_64.AppImage
 ```
 
-Python, Qt and the CLI are all bundled inside. For a menu entry and icon, use [Gear Lever](https://github.com/mijorus/gearlever) or [AppImageLauncher](https://github.com/TheAssassin/AppImageLauncher).
+Python, Qt and the CLI are all bundled inside. The AppImage **updates itself**: it offers new versions when it starts,
+checks them against the published checksum, and restarts. Each release also has a `.sha512sum` file:
+
+```bash
+sha512sum -c STALKER-GAMMA-COMMANDER-*-x86_64.AppImage.sha512sum
+```
 
 ### Arch Linux
 
@@ -250,62 +93,381 @@ cd STALKER-GAMMA-COMMANDER
 ./run.sh
 ```
 
-`run.sh` creates a `.venv/`, installs PySide6, and launches the app. The `stalker-gamma` CLI is already bundled at `cli/usr/bin/stalker-gamma`.
+`run.sh` creates a `.venv/`, installs PySide6 and starts COMMANDER. The `stalker-gamma` CLI is already bundled. Add
+`--deck` to start in [Steam Deck Mode](#steam-deck-mode).
 
-Add `--deck` to start straight in [Steam Deck Mode](#steam-deck-mode):
-`./run.sh --deck`.
+### Unstable builds
 
-**`run.sh` allows several instances at once**, so you can run two builds side
-by side while developing. Every extra window says `[extra instance]` in its
-title bar — they all share `~/.config/stalker-gamma`, so their settings writes
-are last-write-wins, and nothing stops two of them starting an install into
-the same folders. Use `COMMANDER_ALLOW_MULTIPLE=0 ./run.sh` for the shipped
-behaviour. The AppImage and the AUR package are unaffected: both still refuse
-a second instance, and the AppImage does so even if the variable is exported
-in the shell that launches it.
+Want new features before they reach a release? Select **Try the unstable build** under **Settings → General →
+COMMANDER build**. Unstable builds are less tested; **Go back to the stable build** returns you at any time.
 
-### Running the tests
+## First run
+
+1. **System Check** → install anything shown as missing with the copy-command button.
+2. **Install** → follow the wizard: pick a folder, install dependencies, then Anomaly and GAMMA. Expect a large
+   download: about 150 GB, or about 100 GB with Minimal.
+3. **Play** → keep the runner on Auto-detect and press **Launch Game**. The first start is slow while shaders are
+   built.
+
+Already installed GAMMA with the CLI, on Windows, or from GOG? COMMANDER can use that install. Use **Updates** for
+updates afterwards, and **Verify Integrity** if something seems broken.
+
+## What's new in 1.4.0
+
+Everything added since the last stable release, **1.3.1**.
+
+#### Modpacks and co-op
+
+- **xrRazom co-op.** A new **Multiplayer** page with guided install, one-step switching between co-op and
+  singleplayer, Steam or LAN sessions, host settings, and a **Mod check** to compare mod lists with friends.
+- **Co-op for Anomaly, GAMMA and ROMEO.** Play xrRazom co-op on plain Anomaly, GAMMA or ROMEO, and switch
+  between them.
+- **Co-op Steam shortcut** with its own artwork and an animated loading screen.
+- **ROMEO support.** Install, update and uninstall CLIKRΔD's ROMEO repack on top of GAMMA, with its own MO2 profile.
+- **Modded exes.** A new option to update GAMMA's modded engine executables.
+- **Plugins.** COMMANDER can now load plugins. The first one is a **ModDB browser** for finding and downloading mods
+  inside COMMANDER.
+
+#### Install
+
+- **Five-step install wizard**: Folder, Dependencies, Anomaly, GAMMA, Verify.
+- **Resumes after closing COMMANDER**, reopens on the right step, and replaces broken archives in the cache by itself.
+- **Your setup survives installs and updates.** Your mod choices, your own mods, MO2's settings and each executable's
+  arguments are put back, and your own mods keep their place.
+- **Windows installs.** Open a GAMMA install from Windows, or copy one from a Windows drive to Linux.
+- **Offline install** from an offline cache archive (keep the archive until the install is done: CLI 1.41 unpacks it
+  itself), and a **faster Anomaly download** from a mirror.
+- **Reinstall Anomaly** button, a **Switch install** card, and install folders moved to **Settings → Game**.
+- **Steam Machine** support with its own Help guide. Protontricks is no longer needed.
+
+#### Updates and repair
+
+- **Redesigned Updates page** with patch notes for every release you missed, a clear list of mod changes, and
+  **Resume update**.
+- **GOG installs** now get update checks: COMMANDER rebuilds GAMMA's modpack list.
+- **Verify Integrity** checks GAMMA's own files against its repos, and repairs reuse cached archives.
+- **Mod list backup before every launch**, with a restore prompt if every mod has been turned off.
+
+#### Playing
+
+- **Frame generation** with a bundled open-source layer. It needs `Lossless.dll` from
+  [Lossless Scaling](https://store.steampowered.com/app/993090/Lossless_Scaling/) (paid, on Steam), which COMMANDER finds
+  for you.
+- **MangoHud and vkBasalt built in.** Performance overlay and image effects, with changes applied in a running game.
+- **Graphics overlay over the game**: press **Shift+`** to change frame generation, the overlay and image effects
+  while you play. A pop-up tells you when an effect is switched on or off.
+- **Launch options overhaul.** Steam-style `%command%` launch options and quick toggles, including **NTSync** and
+  **Debug mode**.
+- **Crash loop detection** and **Analyze crash**, which opens the logs in ASSISTANT.
+
+#### Steam Deck Mode
+
+- **Catches up with the desktop**: change the active profile, a Graphics screen with frame generation, the in-game
+  overlay on the back grips (**L4 + R4**), Help, co-op, ROMEO, modded exes and self-update.
+- **Multiplayer** in Deck Mode.
+
+#### Look and feel
+
+- **Live themes**: **Red Forest** and **Winter**, which follow the time of day.
+- **System tray icon**: hide to the tray, a quick menu, and start in the tray at login.
+- **COMMANDER's own file picker and right-click menus**, so right-click works on Wayland.
+- **Notification buttons**, click sounds, themed and shorter tooltips, and click the version number to copy debug
+  info.
+- **Fits narrow and tiling windows**, with cards that stack and glide into place, and faster page switches.
+- **Steam library artwork** for every COMMANDER shortcut.
+- **Help and About pages** with the complete documentation, credits and licences.
+- **Stable and unstable builds** you can switch between in Settings.
+
+#### Under the hood
+
+- **stalker-gamma-cli 1.36.1 → 1.41.1**: much faster updates (only changed files are extracted), faster unpacking,
+  timestamped update logs, and no more `unzip` or `tar` needed.
+- Downloads without a known size show MB instead of a wrong percentage.
+- Stopping a long job asks first.
+- The AppImage bundles Python 3.12.15.
+- Log dumps capture more data, and ASSISTANT gives clearer findings.
+- Many bug fixes, memory leak fixes and performance improvements.
+
+## Features
+
+### Dashboard
+
+The landing page. Shows the active profile, install status for Anomaly and GAMMA, a live dependency count, storage
+across your Anomaly, GAMMA and cache folders, updates, playtime and your achievements.
+
+### Install
+
+<img alt="Install page" src="docs/readme/screens/install.png" width="100%">
+
+A five-step wizard: **Folder → Dependencies → Anomaly → GAMMA → Verify**, with a live per-addon progress table and an
+overall progress bar. Start with GAMMA's recommended setup, or choose every folder and option yourself.
+
+- **Resume where it stopped.** If an install is interrupted, even by closing COMMANDER, the next start offers **Resume
+  GAMMA Installation**. Cached archives are checked and reused, mods already unpacked are skipped, and broken
+  archives are replaced by themselves.
+- **Install Dependencies** sets up everything MO2 and the game need in one click: `umu-run`, `winetricks` and eight
+  Visual C++ and DirectX runtimes, installed through your runner's own Wine so the prefix is never damaged.
+- **Faster Anomaly download** from the CLI author's
+  [mirror](https://github.com/FaithBeam/stalker-gamma-cli/wiki/Anomaly-Mirror), on by default. ModDB is used if the
+  mirror fails.
+- **Your setup is kept.** Your mod choices, your own mods (under **Custom Mods**), MO2's settings and each
+  executable's arguments come back after every install and update.
+
+| Install option | What it does |
+|---|---|
+| **Preserve user.ltx** | Keeps your graphics, sound and keybinds. |
+| **Preserve MCM settings** | Keeps every mod's settings from the Mod Configuration Menu. |
+| **Minimal** | Deletes archives after unpacking to save about 50 GB. |
+| **Re-download GitHub addons** | GitHub-hosted archives are reused from the cache unless you tick this. |
+| **Keep my current engine executables** | Keeps engine executables you installed yourself, such as newer or modded builds. |
+| **Offline install** | Installs from an [offline cache archive](https://github.com/FaithBeam/stalker-gamma-cli/wiki/Offline-Install) without downloading anything. Keep the archive file: a cache you unpacked yourself installs with a normal install instead, which downloads only what's missing. |
+
+### Verify Integrity and Repair
+
+Checks every Anomaly file against its official checksums, checks that every enabled mod is on disk, compares GAMMA's
+own files with its git repos, and scans every mod file against a saved snapshot.
+
+If a broken mod is part of the official GAMMA list, COMMANDER can **repair it without losing anything**: the mod
+folder is set aside (not deleted), archives that still match are reused from the cache, and anything that fails to
+reinstall is put back.
+
+### Play
+
+<img alt="Play page" src="docs/readme/screens/play.png" width="100%">
+
+Launch GAMMA through Mod Organizer 2, open MO2 directly, or run Anomaly without mods. Launch targets are read straight
+from `ModOrganizer.ini`.
+
+- **Auto runner detection.** The newest installed GE-Proton is picked by itself and launched through `umu-run`.
+- **Built-in GE-Proton installer.** Browse recent releases, download with progress and cancel, and COMMANDER checks the
+  SHA-512 checksum before installing.
+- **Steam-style launch options.** `NAME=value` sets an environment variable, words before `%command%` wrap the game
+  (for example `mangohud %command%`), and words after it are passed to the game.
+- **Quick toggles.** Gamescope, FSR upscaling, vkBasalt, OpenGL, NTSync, No Esync, No Fsync, Fix audio crackle, No
+  Steam overlay, MangoHud, an FPS counter, Proton log, Quiet Wine logs and Debug mode (`-dbg`).
+- **Frame generation, performance overlay and image effects**, set in **Settings → Graphics**. Changes reach a running
+  game right away. Frame generation needs your own copy of
+  [Lossless Scaling](https://store.steampowered.com/app/993090/Lossless_Scaling/).
+- **Crash help.** Failed launches are explained in plain words. A Wine crash loop is stopped before it uses up your
+  memory, and when Anomaly crashes, **Analyze crash** opens the logs in ASSISTANT.
+- The game launches **detached**, so closing COMMANDER doesn't close it.
+- One-click **desktop shortcuts**, **total playtime** per profile, and optional **Discord Rich Presence**.
+
+### Multiplayer
+
+<img alt="Multiplayer page" src="docs/readme/screens/multiplayer.png" width="100%">
+
+Installs [xrRazom Co-op](https://www.moddb.com/mods/xrrazom-stalker-anomaly-co-op) (Slim edition) and manages it
+alongside your singleplayer install.
+
+- **Guided install.** Download the xrRazom archive from ModDB; COMMANDER finds it in Downloads or on the Desktop.
+- **One-step switching.** **Switch to co-op** backs up the Anomaly files it replaces and enables the mod. **Switch to
+  Singleplayer** puts the originals back. Co-op saves are kept.
+- **Safe launches.** With co-op on, only co-op can be launched, and the other way round. Updates ask you to switch back
+  first, and **Re-apply co-op** fixes it if an update replaced the engine.
+- **Steam or LAN.** Steam sessions use invites through Call of Pripyat if you own it, or Spacewar otherwise.
+  COMMANDER creates the co-op Steam shortcut for you. LAN uses an IP address and port.
+- **Mod check.** Compare mod lists with friends before joining.
+- **Host settings** for player slots, friendly fire, rescue, saving, teleport and fast travel.
+- **Stream-friendly.** Your LAN address is blurred on the invite tab.
+
+<img alt="COMMANDER's co-op loading screen" src="docs/readme/unstable/coop-splash.jpg" width="100%">
+
+### Updates
+
+<img alt="Updates page" src="docs/readme/screens/update.png" width="100%">
+
+Compares your installed GAMMA version and mod list with the latest official one, without hitting GitHub's
+rate-limited API.
+
+- **Every release you missed**, newest first, with releases you haven't installed yet marked **New**.
+- **Every mod change**: added, removed and changed addons, or a note that your list matches the official one.
+- **Before you update**: installed and latest versions, free space, and **Keep my settings** in one place.
+- **Resume update** after a failed or cancelled update, and **Undo last update** to get your mod list back.
+- **GOG installs** work too: COMMANDER rebuilds GAMMA's modpack list from the mods present.
+
+### Mod Manager
+
+<img alt="Mod Manager" src="docs/readme/screens/modmanager.png" width="100%">
+
+Careful editing of the active MO2 profile's mod list: search, enable, disable, delete and reorder mods, grouped by
+GAMMA's categories and shown in the same order as MO2.
+
+- **Drag-and-drop reordering** with multi-selection, plus Move Up and Down.
+- **Install your own mods** from ZIP, 7Z, RAR or FOMOD archives, with a step-by-step FOMOD wizard. New mods go into
+  **Custom Mods**. **Get mods from ModDB** with the optional ModDB plugin.
+- **Reversed load order detection**: a GAMMA load order flipped end to end (which crashes the game) is flagged here and
+  before launching, with a one-click fix.
+- **Backups before your first edit**, **Restore Original Order**, and every change written safely, so a crash can't
+  cut your load order short. Editing is locked while MO2 runs, because MO2 would undo it on exit.
+- **Check for File Conflicts** shows which mods override each other.
+- Press **Ctrl+F** anywhere to jump to the search box.
+
+### ROMEO
+
+Install [CLIKRΔD's ROMEO repack](https://clikrad-com.l.ink/) on top of GAMMA from the **Mod Manager**. COMMANDER adds ROMEO's mods and its own MO2
+profile, so your GAMMA mod list stays as it is, and you can switch between the two. Updating and uninstalling are one
+click too.
+
+### Profiles
+
+<img alt="Profiles page" src="docs/readme/screens/profiles.png" width="100%">
+
+Create, edit, activate and delete profiles, each with its own Anomaly, modpack and cache folders, MO2 profile, download
+threads and repositories. Give a profile a colour and a note, compare the mods of two profiles, and **export** a
+profile to hand to a friend. Folder paths are never included.
+
+### System Check
+
+<img alt="System Check" src="docs/readme/screens/systemcheck.png" width="100%">
+
+Checks everything the game and MO2 need in one place: the CLI, Wine, Winetricks, `umu-run`, Vulkan (including the 32-bit
+loader), each Windows runtime, GE-Proton builds, GameMode, MangoHud and NTSync. For anything missing, it gives you the
+exact install command for your distribution.
+
+### Utilities
+
+<img alt="Utilities page" src="docs/readme/screens/utilities.png" width="100%">
+
+A toolbox for maintenance and recovery:
+
+- **Backups** of your saves, game options, keybinds and MCM settings, also taken automatically before every reset,
+  update and repair.
+- **Cache cleanup**: see which archives are out of date and how much space they free, then clean them.
+- **Clear shader cache** and **Remove ReShade** for a clean slate after driver or mod changes.
+- **Fix GOG installation** and **Repair Wine prefix**.
+- **Move installation** to another drive, verified before the originals are deleted.
+- **Fresh Reset**, **GAMMA Reset** and **Full Uninstall**, each showing exactly what will be deleted and what's kept.
+  Your Wine prefix always survives.
+- **Create Log Dump** for bug reports, and the bundled **COMMANDER ASSISTANT**, which reads your logs and explains what
+  went wrong.
+
+<img alt="COMMANDER ASSISTANT" src="docs/readme/screens/assistant.png" width="100%">
+
+### Settings
+
+<img alt="Settings" src="docs/readme/screens/settings.png" width="100%">
+
+- **10 languages**: English, French, Spanish, German, Romanian, Polish, Russian, Ukrainian, Portuguese and Turkish.
+  Switch any time, no restart.
+- **8 themes**: GAMMA, GAMMA Black, Dusk, Midnight, Terminal, Reactor, and the **Live** themes Red Forest and Winter,
+  which follow the time of day.
+- **Graphics**: frame generation, the performance overlay and image effects.
+- **Add COMMANDER to Steam** writes COMMANDER and Deck Mode straight into your Steam library, with cover, background,
+  logo and wide artwork.
+- **System tray icon**, start at login, update notifications, and **stable or unstable builds**.
+- Font and size, startup page, default runner, GameMode, and MO2 display scale.
+
+<img alt="Steam library artwork for COMMANDER, COMMANDER Deck and the co-op shortcut" src="docs/readme/unstable/steam-artwork.jpg" width="100%">
+
+### Help and About
+
+<table>
+<tr>
+<td width="50%"><img alt="Help page" src="docs/readme/unstable/help.png"></td>
+<td width="50%"><img alt="About page" src="docs/readme/unstable/about.png"></td>
+</tr>
+</table>
+
+**Help** is a complete, searchable manual covering every page and control, in all ten languages. **About** lists the
+credits and every bundled open-source component with its licence.
+
+## Steam Deck Mode
+
+<img alt="Steam Deck Mode Dashboard" src="docs/readme/screens/deck-dashboard.png" width="100%">
+
+A second interface built for the Deck's 1280×800 screen, its controls and its touchscreen. Open it from the Steam Deck
+icon on the **Dashboard**: COMMANDER closes and reopens in Deck Mode. **Exit Deck Mode** in Deck Mode's Settings, or
+the ☰ Menu button, brings you back.
+
+- **First-run setup.** With no profile yet, Deck Mode asks one question, internal storage or SD card, creates the
+  profile and sends you to Install.
+- **Tabs**, in handheld order: **Dashboard · Play · Mods · Update · Install · Utilities · System · Settings**.
+- **Dashboard** answers "can I play?" in one banner, with the one button that moves things forward (Play, Install,
+  Resume, Update), then status, updates, mods, storage and your profiles.
+- **Play** has **Force Stop Game** for a game that hangs, since the Deck has no Alt+F4. **Mods** is the full mod list
+  with categories, search and FOMOD installs. **Update**, **Install**, **Utilities**, **System** and **Settings** do
+  what their desktop pages do.
+- **Graphics over the game**: hold **L4 + R4** while playing to change frame generation, the overlay and image
+  effects.
+- **Handheld-aware.** The Deck stays awake during installs, updates and moves, you're warned before a long download on
+  battery, and it chimes and vibrates when a long job finishes.
+- **Any screen size.** On a monitor or a TV, the whole interface scales up.
+
+**Controls.** The controller works in Game Mode out of the box with Steam's default layout, and in Desktop Mode too.
+
+| Button | Action |
+|---|---|
+| D-pad / left stick | Move (hold to repeat) |
+| A | Select or toggle. Hold on a mod to move it. |
+| B | Back |
+| X | The screen's main action (below) |
+| Y | The screen's second action, or search |
+| L1 / R1 | Previous / next tab |
+| L2 / R2 | Page up / down |
+| L4 + R4 (held) | Graphics over a running game |
+| ☰ Menu | Play GAMMA, Help, Exit Deck Mode or Quit |
+| ⧉ View | Controls help |
+
+| Screen | X | Y |
+|---|---|---|
+| Dashboard | What the banner says (Play / Install / Resume / Update) | Re-check |
+| Play | Play GAMMA (Force Stop while running) | Open MO2 |
+| Mods | Category menu | Search |
+| Update | Check / Apply updates | Show changes |
+| Install | Install or resume GAMMA | Install dependencies |
+| System | Re-check | — |
+
+Text fields have an on-screen keyboard (Y), touch works everywhere, and every theme and language works as on the
+desktop, with its own 80–150% text size. On a real Steam Deck, COMMANDER offers Deck Mode the first time it starts,
+and in Game Mode it opens Deck Mode without asking.
+
+> [!IMPORTANT]
+> **Adding Deck Mode to Steam.** In Desktop Mode, use **Add COMMANDER to Steam** (desktop **Settings → Steam**, or
+> Deck Mode's **Settings**). It writes **STALKER COMMANDER** and **STALKER COMMANDER DECK** into your library and
+> restarts Steam. Then start **STALKER COMMANDER DECK** from Game Mode.
+>
+> Adding it by hand instead? For the AppImage, add the `.AppImage` and set its launch options to `--deck`. For the
+> AUR or a source install, add **STALKER COMMANDER (Deck Mode)**.
+
+## Reporting a problem
+
+1. Note your build number under **Settings → General → COMMANDER build**, or click the version in the status bar.
+2. Create a log dump with **Utilities → Create Log Dump**.
+3. Post both in the [Discord](https://discord.gg/6A9psrtYhh) or as an
+   [issue](https://github.com/SSH-Kitty/STALKER-GAMMA-COMMANDER/issues).
+
+## Contributing a translation
+
+Adding a new language needs no code changes: start from
+[`commander_gui/locales/template.py`](commander_gui/locales/template.py), which lists every translatable string in the
+app, and follow the steps in its header.
+
+## Running the tests
 
 ```bash
 QT_QPA_PLATFORM=offscreen .venv/bin/python -m pytest tests/ -q
 ```
 
-The Qt platform has to be set on the command line — the suite builds real
-widgets, and there is no `pytest.ini` to hold the variable.
-
----
-
-## First run
-
-1. **Profiles** → set your Anomaly, GAMMA and Cache folders (use absolute paths) and create the profile — it activates automatically.
-2. **Install** → **Install GAMMA**. Anomaly is installed first if it's missing. Expect a large download: ~150 GB, or ~100 GB with Minimal mode.
-3. **Install → Install Dependencies** — sets up the Wine/Proton runtimes MO2 needs.
-4. **Play** → pick a runner and launch target, then **Launch Game**.
-
-Use **Updates** for addon updates afterward, and **Verify Integrity** if something seems broken.
-
----
-
-## Contributing a translation
-
-Adding a new language is copy-and-fill-in, no code changes needed: start
-from [`commander_gui/locales/template.py`](commander_gui/locales/template.py),
-which lists every translatable string in the app. See the instructions
-in that file's header for the exact steps.
-
----
-
 ## Credits
 
-- **[FaithBeam](https://github.com/FaithBeam)** — [`stalker-gamma-cli`](https://github.com/FaithBeam/stalker-gamma-cli), the installer this GUI drives and bundles. All installation, download and checksum logic is theirs.
-- **[dnttnd](https://github.com/dnttnd)** — testing implementations, dev builds, bug reports, and helping polish the UI.
-- **[Grokitach](https://github.com/Grokitach)** and the GAMMA team — [the mod pack itself](https://github.com/Grokitach/Stalker_GAMMA).
-- **[GSC Game World](https://www.gsc-game.com/)** and the Anomaly team, for the game.
+- **[FaithBeam](https://github.com/FaithBeam)**: [`stalker-gamma-cli`](https://github.com/FaithBeam/stalker-gamma-cli),
+  the installer COMMANDER runs and bundles.
+- **[dnttnd](https://github.com/dnttnd)**: testing, dev builds, bug reports and UI refinement.
+- **[Grokitach](https://github.com/Grokitach)** and the GAMMA team: [the modpack itself](https://github.com/Grokitach/Stalker_GAMMA).
+- **The Anomaly Team**: the standalone S.T.A.L.K.E.R. Anomaly and its engine.
+- **[GSC Game World](https://www.gsc-game.com/)**: the original S.T.A.L.K.E.R. games.
 
 ## License
 
-Licensed under the **GNU General Public License v3.0** — see [LICENSE](LICENSE). This project bundles and drives `stalker-gamma-cli`, which is GPL-3.0, so this front-end is GPL-3.0 as well.
+Licensed under the **GNU General Public License v3.0**; see [LICENSE](LICENSE). COMMANDER bundles and runs
+`stalker-gamma-cli`, which is GPL-3.0, so COMMANDER is GPL-3.0 as well.
 
-- Copyright for Python/Qt graphical interface: **SSH-Kitty**
+- Copyright for the Python/Qt graphical interface: **SSH-Kitty**
 
-*Not affiliated with GSC Game World or the GAMMA development team.*
+<div align="center">
+
+<sub>Not affiliated with GSC Game World or the teams behind GAMMA, ROMEO or any other modpack.</sub><br>
+<sub><i>Good hunting, stalker.</i></sub>
+
+</div>

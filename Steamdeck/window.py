@@ -52,10 +52,16 @@ from commander_gui import gui_settings
 from commander_gui.deck_launch import in_game_mode, is_steam_deck
 from commander_gui.i18n import tr
 from commander_gui.settings import load_settings
-from commander_gui.themes import build_palette, set_active_theme
+from commander_gui.themes import (
+    active_theme,
+    build_palette,
+    resolve_theme,
+    set_active_theme,
+)
 from commander_gui.ui.common import (
     GAMMA_PROFILE,
     count_active_mods,
+    game_running,
     instance_window_title,
     notify_desktop,
     play_click_sound,
@@ -73,13 +79,14 @@ from commander_gui.ui.title_bar import (
     pin_top_right,
     update_max_button,
 )
+from commander_gui.ui.winter import ChristmasLights
 
 from . import gamepad as pad
 from .deck_theme import build_deck_stylesheet
 from .focus import DeckFocusController
 from .power import SleepInhibitor, battery_state
 from .scale import px, scale, scale_for, set_scale
-from .screens import SCREENS
+from .screens import SCREEN_KEYS, SCREENS
 from .widgets import (
     DECK_H,
     DECK_W,
@@ -109,6 +116,10 @@ _MIN_W, _MIN_H = 1024, 640
 #: lands, and where the Profile screen's "New profile" leads.
 SETUP_KEY = "setup"
 
+#: Screens with no nav tab of their own, opened from another screen: key ->
+#: the tab that stays lit while it shows. B goes back (their on_back).
+SUBPAGES = {"graphics": "settings", "help": None}
+
 #: How often the clock and battery refresh.
 _CLOCK_MS = 30_000
 
@@ -137,9 +148,10 @@ _OPERATION_REASONS = {
     "gamma": "Installing or updating GAMMA",
     "anomaly": "Installing STALKER Anomaly",
     "dependencies": "Installing dependencies",
-    "proton": "Installing GE-Proton",
+    "proton": "Installing Proton-GE",
     "move": "Moving the installation",
     "mod_install": "Installing a mod",
+    "commander_update": "Updating COMMANDER",
 }
 
 
@@ -228,11 +240,26 @@ class DeckWindow(QMainWindow):
             app.installEventFilter(self._focus)
 
         self.gamepad = pad.GamepadMonitor(self)
-        self.gamepad.action.connect(self._focus.on_pad_action)
+        # While the in-game overlay is up the back-grip reader drives it
+        # instead: Steam's virtual pad follows the game's layout then.
+        self.gamepad.action.connect(
+            lambda action: None if self.back_grips.navigating else self._focus.on_pad_action(action)
+        )
         self.gamepad.scroll_axis.connect(self._focus.on_pad_scroll)
         self.gamepad.hold_gate = self._accept_hold_wanted
         if os.environ.get(NO_GAMEPAD_ENV) != "1":
             self.gamepad.start()
+
+        # The in-game overlay: the back grips held, read from hidraw.
+        from .back_grips import BackGripMonitor
+
+        self.back_grips = BackGripMonitor(self)
+        self.back_grips.shortcut.connect(self.toggle_game_overlay)
+        self.back_grips.action.connect(self._focus.on_pad_action)
+        self._game_overlay_from: str | None = None
+        self._hint_wait = None
+        self._grips_allowed = os.environ.get(NO_GAMEPAD_ENV) != "1" and is_steam_deck()
+        self.apply_overlay_shortcut()
 
         # A stuck user needs a keyboard escape hatch that does not depend on
         # reaching the Settings screen.
@@ -264,7 +291,7 @@ class DeckWindow(QMainWindow):
 
         #: The newest release tag if COMMANDER is out of date, "" if up to
         #: date, None until the startup check answers.
-        self._commander_update: str | None = None
+        self._commander_update: str | bool | None = None
         self._render_update_badge()
         if fatal is None:
             self._check_commander_update()
@@ -281,7 +308,7 @@ class DeckWindow(QMainWindow):
     # ------------------------------------------------------------ styling
     @property
     def _screen_keys(self) -> list[str]:
-        return [key for key, _title, _glyph in SCREENS]
+        return SCREEN_KEYS
 
     def start_screen(self) -> str:
         start = gui_settings.load_gui_settings().get("deck_start_screen", "play")
@@ -290,7 +317,7 @@ class DeckWindow(QMainWindow):
     def apply_style(self) -> None:
         """Apply the Deck stylesheet and palette for the saved theme."""
         state = gui_settings.load_gui_settings()
-        theme = state.get("theme") or "gamma"
+        theme = state.get("theme") or "black"
         set_active_theme(theme)
         app = QApplication.instance()
         if app is None:
@@ -307,6 +334,7 @@ class DeckWindow(QMainWindow):
         if sheet != self._last_sheet:
             self._last_sheet = sheet
             app.setStyleSheet(sheet)
+        self.sync_animations()
 
     def apply_style_later(self) -> None:
         """Restyle once things stop changing (see _RESTYLE_DEBOUNCE_MS)."""
@@ -324,7 +352,8 @@ class DeckWindow(QMainWindow):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        root.addWidget(self._build_header())
+        header = self._build_header()
+        root.addWidget(header)
 
         self.stack = QStackedWidget()
         self.stack.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -340,6 +369,10 @@ class DeckWindow(QMainWindow):
         # The widget tree used for overlay geometry, the toast, and
         # DeckFocusController's scope.
         self._deck_root = central
+
+        # Winter's fairy lights under the header, twinkling off the snow.
+        central.snowfall.lights = ChristmasLights(header, central)
+        self.sync_animations()
 
         self.toast = DeckToast(central)
         self._status_shim = _DeckStatusBar(self.toast)
@@ -509,8 +542,11 @@ class DeckWindow(QMainWindow):
         # Imported lazily and per-key so one screen failing to import cannot
         # stop the window from opening on the others.
         from .screens.dashboard import DashboardScreen
+        from .screens.graphics import GraphicsScreen
+        from .screens.help import HelpScreen
         from .screens.install import InstallScreen
         from .screens.mods import ModsScreen
+        from .screens.multiplayer import MultiplayerScreen
         from .screens.play import PlayScreen
         from .screens.settings import SettingsScreen
         from .screens.setup import SetupScreen
@@ -521,6 +557,7 @@ class DeckWindow(QMainWindow):
         classes = {
             "dashboard": DashboardScreen,
             "play": PlayScreen,
+            "multiplayer": MultiplayerScreen,
             "install": InstallScreen,
             "update": UpdateScreen,
             "mods": ModsScreen,
@@ -528,6 +565,8 @@ class DeckWindow(QMainWindow):
             "utilities": UtilitiesScreen,
             "settings": SettingsScreen,
             SETUP_KEY: SetupScreen,
+            "graphics": GraphicsScreen,
+            "help": HelpScreen,
         }
         return classes[key](self)
 
@@ -543,6 +582,9 @@ class DeckWindow(QMainWindow):
             return page
         page = self._create_page(key)
         self._pages[key] = page
+        if key == "play":
+            # The key hint as a game starts, Deck Mode back when it ends.
+            page.controller.state_changed.connect(self._on_session_state)
         self.stack.addWidget(page)
         page.on_busy_changed(self.install_busy)
         page.on_install_activity_changed(self.install_operation)
@@ -552,20 +594,27 @@ class DeckWindow(QMainWindow):
         """Switch to a screen by nav key (or the setup wizard)."""
         if self._fatal is not None:
             return
-        if key not in self._screen_keys and key != SETUP_KEY:
+        if key not in self._screen_keys and key != SETUP_KEY and key not in SUBPAGES:
             return
         page = self._ensure_page(key)
+        if key in SUBPAGES and self._current_key not in SUBPAGES:
+            page.came_from = self._current_key
         self._current_key = key
         self.stack.setCurrentWidget(page)
+        lit = (SUBPAGES.get(key) or getattr(page, "came_from", None)) if key in SUBPAGES else key
         for nav_key, button in self._nav_buttons.items():
-            button.setProperty("current", "true" if nav_key == key else "false")
+            button.setProperty("current", "true" if nav_key == lit else "false")
             button.style().unpolish(button)
             button.style().polish(button)
         self.update_mod_counter()
         self.update_hints()
         # Refresh after Qt has laid the new screen out, so anything sized
-        # from its own contents measures correctly.
-        QTimer.singleShot(0, page.refresh)
+        # from its own contents measures correctly - and only if it is still
+        # the screen shown: holding R1 passes screens faster than that, and
+        # each refresh starts CLI and network checks.
+        QTimer.singleShot(
+            0, page, lambda page=page: page is self.stack.currentWidget() and page.refresh()
+        )
         QTimer.singleShot(0, self._focus_new_page)
 
     def _focus_new_page(self) -> None:
@@ -778,8 +827,31 @@ class DeckWindow(QMainWindow):
         self.settings = load_settings()
         self.update_mod_counter()
 
+    def profile_changed(self) -> None:
+        """Another profile, or other folders: every screen's cached results
+        belong to the old ones. Only the shown screen refreshes now - each
+        refresh starts CLI and network checks, and the rest refresh anyway
+        when set_page() shows them."""
+        for page in self._pages.values():
+            forget = getattr(page, "forget_cached_checks", None)
+            if callable(forget):
+                forget()
+        page = self._pages.get(self._current_key)
+        if page is not None:
+            page.refresh()
+        self.update_mod_counter()
+
     def update_clock(self) -> None:
         self.clock_label.setText(time.strftime("%H:%M"))
+        # The Live themes move on to dawn, day, dusk and night with the clock.
+        # Not while the game runs: its overlay keeps the look it started with,
+        # so this catches up once it closes.
+        phase = resolve_theme(active_theme())
+        if phase == getattr(self, "_painted_phase", phase):
+            self._painted_phase = phase
+        elif not (game_running() or self.session_active()):
+            self.apply_style()
+            self._painted_phase = phase
         state = battery_state()
         if state is None:
             self.battery_label.hide()
@@ -993,8 +1065,11 @@ class DeckWindow(QMainWindow):
         )
         buttons = []
         if self._fatal is None and self.settings.active_profile is not None:
-            buttons.append(("\u25b6  " + tr("Play GAMMA"), self._quick_play, "primary"))
+            from .screens.play import play_label
+
+            buttons.append(("\u25b6  " + play_label(self.settings.active_profile), self._quick_play, "primary"))
         buttons += [
+            (tr("Help"), self._quick_help, "normal"),
             (tr("Exit Deck Mode"), self.exit_deck_mode, "normal"),
             (tr("Quit COMMANDER"), self._quit, "danger"),
             (tr("Back"), self.dismiss_overlay, "normal"),
@@ -1002,6 +1077,73 @@ class DeckWindow(QMainWindow):
         self.show_overlay(
             DeckOverlay(tr("Menu"), body, buttons, default_index=len(buttons) - 1)
         )
+
+    # ------------------------------------------------- in-game overlay
+    def apply_overlay_shortcut(self) -> None:
+        from .back_grips import SHORTCUTS
+
+        key = gui_settings.load_gui_settings().get("deck_overlay_shortcut")
+        self.back_grips.chord = SHORTCUTS.get(key, 0)
+        # Off means no reads at all: the controller sends hundreds of
+        # reports a second, games included.
+        if not self.back_grips.chord:
+            self.back_grips.stop()
+        elif getattr(self, "_grips_allowed", False) and not self.back_grips.listening():
+            self.back_grips.start()
+
+    def toggle_game_overlay(self) -> None:
+        """The back grips held: Graphics over the running game, or back to it."""
+        if self._game_overlay_from is not None:
+            self.close_game_overlay()
+            return
+        if self._fatal is not None or not self.session_active():
+            return
+        self._game_overlay_from = self._current_key
+        self.dismiss_overlay()
+        self.set_page("graphics")
+        self.back_grips.navigating = True
+        # Mapped again so gamescope, which shows the newest window of the
+        # running app, puts this one over the game.
+        # ponytail: unverified on hardware; if gamescope keeps the game in
+        # front, switch focus through gamescope's own atoms instead.
+        self.hide()
+        self.show_for_environment()
+        self.raise_()
+        self.activateWindow()
+
+    def close_game_overlay(self) -> None:
+        key, self._game_overlay_from = self._game_overlay_from, None
+        self.back_grips.navigating = False
+        self.dismiss_overlay()
+        self.set_page(key or self.start_screen())
+        if self.session_active():
+            self.hide()  # the game takes the screen back
+
+    def _on_session_state(self, active: bool) -> None:
+        from .back_grips import SHORTCUTS
+        from .key_hint import show_when_game_is_up
+
+        if self._hint_wait is not None:
+            self._hint_wait.stop()
+            self._hint_wait = None
+        profile = self.settings.active_profile
+        play = self._pages.get("play")
+        shortcut = gui_settings.load_gui_settings().get("deck_overlay_shortcut") or "l4r4"
+        if (
+            active and profile is not None and profile.anomaly and self.back_grips.listening()
+            and shortcut in SHORTCUTS and not (play and play.controller.mo2_only())
+        ):
+            key = {"l4r4": "L4 + R4", "l5r5": "L5 + R5", "l4l5": "L4 + L5", "r4r5": "R4 + R5"}[shortcut]
+            self._hint_wait = show_when_game_is_up(self, profile.anomaly, profile.gamma, key)
+        if not active:
+            self._game_overlay_from = None
+            self.back_grips.navigating = False
+            if not self.isVisible():
+                self.show_for_environment()
+
+    def _quick_help(self) -> None:
+        self.dismiss_overlay()
+        self.set_page("help")
 
     # ------------------------------------------------ welcome and updates
     def show_welcome(self) -> None:
@@ -1025,7 +1167,7 @@ class DeckWindow(QMainWindow):
             check_commander_update, __version__, channel=channel, parent=self
         )
         task.result.connect(self._on_commander_update)
-        task.error.connect(lambda _m: None)
+        task.error.connect(self._on_commander_update_failed)
         self._update_task = task
         task.start()
 
@@ -1034,13 +1176,21 @@ class DeckWindow(QMainWindow):
         self._commander_update = tag if isinstance(tag, str) and tag else ""
         self._render_update_badge()
 
+    def _on_commander_update_failed(self, _message: str) -> None:
+        self._update_task = None
+        self._commander_update = False  # checked, but GitHub didn't answer
+        self._render_update_badge()
+
     def _render_update_badge(self) -> None:
         badge = getattr(self, "update_badge", None)
         if badge is None:
             return
         tag = getattr(self, "_commander_update", None)
         if tag is None:
-            badge.setText(tr("Checking for updates..."))
+            badge.setText(tr("Checking for updates"))
+            badge.setObjectName("deckHint")
+        elif tag is False:
+            badge.setText(tr("Couldn't check for updates"))
             badge.setObjectName("deckHint")
         elif tag:
             badge.setText(tr("COMMANDER update available"))
@@ -1058,18 +1208,133 @@ class DeckWindow(QMainWindow):
         tag = getattr(self, "_commander_update", None)
         if not tag:
             return
+        from commander_gui.self_update import commander_appimage_path
+
         from .welcome import RELEASES_URL, open_url
 
+        if commander_appimage_path() is None:
+            # A source checkout or the AUR package can't swap itself.
+            self.confirm(
+                tr("COMMANDER update available"),
+                tr(
+                    "COMMANDER {tag} is available. Open the Releases page to "
+                    "download it?",
+                    tag=tag,
+                ),
+                lambda: open_url(self, RELEASES_URL),
+                confirm_text=tr("Open Releases"),
+            )
+            return
         self.confirm(
             tr("COMMANDER update available"),
-            tr(
-                "COMMANDER {tag} is available. Open the Releases page to "
-                "download it?",
-                tag=tag,
-            ),
-            lambda: open_url(self, RELEASES_URL),
-            confirm_text=tr("Open Releases"),
+            tr("COMMANDER {tag} is out.", tag=tag) + "\n\n"
+            + tr("COMMANDER downloads the build and restarts."),
+            lambda: self._run_commander_update(tag),
+            confirm_text=tr("Update"),
         )
+
+    def switch_commander_build(self, target: str, tag: str | None = None) -> None:
+        """Settings' build switch: the newest ``target`` build ("unstable" or
+        "stable") over this AppImage, then a restart."""
+        from commander_gui.self_update import switch_commander_build
+
+        if target == "unstable":
+            title = tr("Try the unstable build?")
+            message = tr("New features arrive here first, but they may have bugs.") + "\n\n" + tr(
+                "COMMANDER restarts when it's done. You can switch back in Settings."
+            )
+            install = tr("Install unstable build")
+        else:
+            title = tr("Go back to the stable build?")
+            message = "\n\n".join((
+                tr("The stable build may be older than the unstable one you're using now."),
+                tr("COMMANDER downloads the build and restarts."),
+                tr("Some settings changed by the newer build may not carry over."),
+            ))
+            install = tr("Install stable build")
+
+        def work(cancel, progress):
+            return switch_commander_build(target, cancel_event=cancel, progress_cb=progress)[0]
+
+        self.confirm(
+            title, message,
+            lambda: self._run_commander_update(
+                tag or "", work,
+                # The update channel follows the build that is now installed.
+                on_installed=lambda: gui_settings.save_gui_settings(update_channel=target),
+            ),
+            confirm_text=install,
+        )
+
+    def _run_commander_update(self, tag: str, work=None, on_installed=None) -> None:
+        """Download and swap in the new AppImage (``work(cancel, progress)``,
+        by default the update to ``tag``), then restart into it."""
+        from commander_gui.self_update import download_and_install_commander_update
+        from commander_gui.ui.common import BackgroundTask, human_size
+        from commander_gui.ui.deck_switch import restart_into_appimage
+
+        from .welcome import RELEASES_URL, open_url
+
+        self.dismiss_overlay()
+        if self.install_busy:
+            self.notify(tr("An install, update or download is still running. Wait for it to finish, then update COMMANDER."), 6000)
+            return
+        if work is None:
+            def work(cancel, progress):
+                return download_and_install_commander_update(tag, cancel_event=cancel, progress_cb=progress)
+
+        heading = tr("Downloading COMMANDER {tag}", tag=tag) if tag else tr("Updating COMMANDER")
+        status = deck_label(heading, role="body", wrap=True)
+        task = BackgroundTask(lambda: work(task.cancel_event, report), parent=self)
+
+        def report(done: int, total: int) -> None:
+            # Runs on the worker thread: hand the text to the GUI thread.
+            text = (
+                tr("Checking and installing the new version") if total > 1 and done >= total
+                else f"{human_size(done)} / {human_size(total)}" if total > 1 else human_size(done)
+            )
+            QTimer.singleShot(0, status, lambda: status.setText(heading + "\n" + text))
+
+        overlay = DeckOverlay(
+            tr("Updating COMMANDER"), status, [(tr("Cancel"), task.cancel_event.set, "normal")],
+        )
+        # B keeps the panel: closing it would hide Cancel and the progress
+        # while the download carries on.
+        overlay.back_handler = lambda: True
+
+        def close_panel() -> None:
+            # Only this panel: another one may have replaced it since.
+            if self.current_overlay() is overlay:
+                self.dismiss_overlay()
+
+        def done(path: object) -> None:
+            self.set_install_busy(False)
+            close_panel()
+            if on_installed is not None:
+                on_installed()
+            self.confirm(
+                tr("{tag} is ready", tag=tag) if tag else tr("The new version is ready"),
+                tr("Restart COMMANDER now to start using it?"),
+                lambda: restart_into_appimage(self, path),
+                confirm_text=tr("Restart now"),
+            )
+
+        def failed(message: str) -> None:
+            self.set_install_busy(False)
+            close_panel()
+            if not task.cancel_event.is_set():
+                self.confirm(
+                    tr("COMMANDER couldn't update"),
+                    message + "\n\n" + tr("You can download the new version yourself from the releases page."),
+                    lambda: open_url(self, RELEASES_URL),
+                    confirm_text=tr("Open releases page"),
+                )
+
+        task.result.connect(done)
+        task.error.connect(failed)
+        self.set_install_busy(True, "commander_update")
+        self.show_overlay(overlay)
+        task.start()
 
     def _quick_play(self) -> None:
         self.dismiss_overlay()
@@ -1084,6 +1349,16 @@ class DeckWindow(QMainWindow):
 
     def _quit(self) -> None:
         self.dismiss_overlay()
+        if self.session_active():
+            # The game outlives COMMANDER (it runs detached), but the timer
+            # counting its playtime does not - say so, as switch_mode does.
+            self.confirm(
+                tr("Quit COMMANDER"),
+                tr("Your game keeps running, but this session's playtime won't be counted."),
+                self.close,
+                confirm_text=tr("Quit"),
+            )
+            return
         self.close()
 
     # ----------------------------------------------------------- lifecycle
@@ -1099,9 +1374,11 @@ class DeckWindow(QMainWindow):
         # size scan, system checks, ...) run on a QThread owned by that
         # screen. Deleting a screen while one is still running destroys a
         # live QThread, which Qt answers by aborting the whole process -
-        # so cancel them first, detaching any that won't stop in time, the
-        # same way MainWindow.switch_language() does.
-        shutdown_active_runners(timeout_ms=2000)
+        # so cancel them first and detach them, the same way
+        # MainWindow.switch_language() does. No wait: the new screens start
+        # their checks again anyway, and waiting froze the UI for up to 2s
+        # (the Deck rescales right after starting, mid-checks).
+        shutdown_active_runners(timeout_ms=0)
         # An overlay that knows how to re-open itself (the Welcome screen)
         # survives the rebuild; the rest are dropped as before. Read before
         # _overlay is cleared below - reading it after always found None,
@@ -1199,6 +1476,16 @@ class DeckWindow(QMainWindow):
         elif event.type() == QEvent.Type.WindowStateChange:
             update_max_button(self)
             self._sync_title_bar()
+        if event.type() in (QEvent.Type.ActivationChange, QEvent.Type.WindowStateChange):
+            self.sync_animations()
+
+    def sync_animations(self) -> None:
+        """The Live themes' animations run only while Deck Mode is in front."""
+        central = getattr(self, "_deck_root", None)
+        if central is not None:
+            visible = self.isActiveWindow() and not self.isMinimized()
+            central.snowfall.sync(visible)
+            central.redforest.sync(visible)
 
     def _sync_gamepad(self) -> None:
         """Read the controller only while this window can use it.
@@ -1286,6 +1573,7 @@ class DeckWindow(QMainWindow):
         if app is not None:
             app.removeEventFilter(self._focus)
         self.gamepad.stop()
+        self.back_grips.stop()
         self._clock_timer.stop()
         self._inhibitor.release()
         super().closeEvent(event)

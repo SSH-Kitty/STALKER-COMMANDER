@@ -4,7 +4,9 @@ The Anomaly side is handled by the CLI's ``anomaly check`` command (hash
 verification against ``anomaly/tools/checksums.md5``). The GAMMA side has no
 CLI command, so it is verified here: every enabled mod in the profile's
 ``modlist.txt`` must have a non-empty folder under ``gamma/mods``, and the
-core Mod Organizer files must be present.
+core Mod Organizer files must be present. GAMMA's own files (copied out of
+its git repositories in the download cache) are checked against those
+repositories exactly; everything else is compared with a snapshot.
 """
 
 from __future__ import annotations
@@ -14,20 +16,31 @@ import os
 import re
 import stat
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Container, Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from .atomic import write_text
+from .i18n import tr
 from .modlist import entries, read_lines
 from .network import read_response_bytes
 from .network import urlopen_with_retry as urlopen
 
 GAMMA_MARKERS = ("ModOrganizer.exe", "ModOrganizer.ini")
+#: Entries GAMMA's modlist.txt enables but GAMMA never installs, so their
+#: folder can't exist. "DarkasleQif's" is a typo there: the addon GAMMA ships
+#: is "Darkasleif's and iTheon's Parts Condition Color Thresholds Changes".
+# ponytail: hand-kept list; derive from GAMMA's addon folders if more appear.
+NOT_SHIPPED_BY_GAMMA = frozenset({
+    "DarkasleQif's and iTheon's Parts Condition Color Thresholds Changes",
+})
 MANIFEST_FILENAME = "gamma-md5.txt"
 
 _ANOMALY_STATUS_RE = re.compile(r"\|\s*(OK|CORRUPT|NOT FOUND)\s*$")
-_ANOMALY_LINE_RE = re.compile(r"^(?P<path>.*?)\s*\|\s*(?P<status>OK|CORRUPT|NOT FOUND)\s*$")
+# Greedy path (callers strip it): the lazy "(.*?)\s*\|" form retried the
+# whitespace run from every position - quadratic on a long blank line, and
+# this runs on every line of every CLI log the Assistant reads.
+_ANOMALY_LINE_RE = re.compile(r"^(?P<path>.*)\|\s*(?P<status>OK|CORRUPT|NOT FOUND)\s*$")
 
 #: Files GAMMA's own install deliberately overwrites with patched
 #: versions (its replacement engine executables, plus its own
@@ -128,68 +141,53 @@ class GammaVerifyResult:
         return len(self.marker_missing) + len(self.missing) + len(self.empty)
 
     def lines(self) -> list[str]:
-        out: list[str] = []
-        for name in self.marker_missing:
-            out.append(f"MISSING  {name}")
+        """The technical log for this check (plain English, pasteable)."""
+        out: list[str] = [f"Not found: {name}" for name in self.marker_missing]
         if self.used_official_list:
-            out.append(
-                self._section_line(
-                    "Official GAMMA mods",
-                    self.official,
-                    self.official_missing,
-                    self.official_empty,
+            out.extend(
+                self._section(
+                    "GAMMA mods", self.official, self.official_missing, self.official_empty
                 )
             )
-            for name in self.official_missing:
-                out.append(f"  MISSING  {name}")
-            for name in self.official_empty:
-                out.append(f"  EMPTY    {name}")
-            out.append(
-                self._section_line(
-                    "Extra Mods",
-                    self.extra,
-                    self.extra_missing,
-                    self.extra_empty,
+            if self.extra or self.extra_missing or self.extra_empty:
+                out.extend(
+                    self._section(
+                        "Your own mods (not part of GAMMA)",
+                        self.extra,
+                        self.extra_missing,
+                        self.extra_empty,
+                        list_present=True,
+                    )
                 )
-            )
-            for name in self.extra:
-                out.append(f"  EXTRA  {name}")
-            for name in self.extra_missing:
-                out.append(f"  MISSING  {name}")
-            for name in self.extra_empty:
-                out.append(f"  EMPTY    {name}")
         else:
-            for name in self.missing:
-                out.append(f"MISSING  mods/{name}")
-            for name in self.empty:
-                out.append(f"EMPTY    mods/{name}")
-            if self.problems == 0:
-                out.append("GAMMA: all enabled mods are present and non-empty")
+            out.extend(self._section("Mods", [], self.missing, self.empty))
         out.append(self.summary)
         out.extend(self.notes)
         return out
 
     @staticmethod
-    def _section_line(
-        label: str, ok: list[str], missing: list[str], empty: list[str]
-    ) -> str:
-        if not ok and not missing and not empty:
-            return f"{label}: 0"
-        text = f"{label}: {len(ok)} verified"
-        if missing:
-            text += f", {len(missing)} missing"
-        if empty:
-            text += f", {len(empty)} empty"
-        return text
+    def _section(
+        label: str,
+        present: list[str],
+        missing: list[str],
+        empty: list[str],
+        *,
+        list_present: bool = False,
+    ) -> list[str]:
+        out = [f"{label}: {len(present)} present"] if present or list_present else []
+        out.extend(f"  {name}" for name in present if list_present)
+        out.extend(f"  Folder missing: {name}" for name in missing)
+        out.extend(f"  Folder empty: {name}" for name in empty)
+        return out
 
     @property
     def summary(self) -> str:
-        parts = [f"{self.ok_mods} mod(s) OK"]
+        parts = [f"{self.ok_mods} mods present"]
         if self.missing:
-            parts.append(f"{len(self.missing)} missing")
+            parts.append(f"{len(self.missing)} folders missing")
         if self.empty:
-            parts.append(f"{len(self.empty)} empty")
-        parts.append(f"{self.disabled_mods} disabled")
+            parts.append(f"{len(self.empty)} folders empty")
+        parts.append(f"{self.disabled_mods} optional mods turned off")
         return "GAMMA: " + ", ".join(parts)
 
 
@@ -304,6 +302,8 @@ def verify_gamma(
         if name.endswith("_separator"):
             result.separators += 1
             continue
+        if name in NOT_SHIPPED_BY_GAMMA:
+            continue
         is_official = official_mods is not None and name in official_mods
         mod_path = mods_dir / name
         try:
@@ -347,18 +347,48 @@ def _format_duration(seconds: float) -> str:
 
 def _md5_file(path: Path) -> tuple[str, int] | None:
     """Return (md5, size) for a file, or None if it cannot be read."""
+    hashed = _hash_file(path, git_blob=False)
+    return None if hashed is None else hashed[:2]
+
+
+def _md5_and_blob(path: Path) -> tuple[str, int, str] | None:
+    """(md5, size, git blob id) in one read - the blob id is what a git
+    repository stores the file under, so it compares with ``ls-tree``."""
+    return _hash_file(path, git_blob=True)
+
+
+def _git_blob_id(data: bytes) -> str:
+    # Header and data fed separately: concatenating them copied a large
+    # texture's whole blob a second time.
+    digest = hashlib.sha1(b"blob %d\0" % len(data), usedforsecurity=False)
+    digest.update(data)
+    return digest.hexdigest()
+
+
+def _hash_file(path: Path, git_blob: bool) -> tuple[str, int, str] | None:
     digest = hashlib.md5(usedforsecurity=False)
     try:
-        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
+        # O_NONBLOCK: opening a FIFO left in mods/ would otherwise wait for
+        # a writer forever, past any Cancel. Regular files ignore it.
+        fd = os.open(
+            path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+        )
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
             os.close(fd)
             return None
+        # The blob id hashes the size first, so it needs it up front.
+        blob = hashlib.sha1(b"blob %d\0" % info.st_size, usedforsecurity=False) if git_blob else None
         with os.fdopen(fd, "rb") as f:
             size = 0
             for chunk in iter(lambda: f.read(1 << 16), b""):
                 digest.update(chunk)
+                if blob is not None:
+                    blob.update(chunk)
                 size += len(chunk)
-        return digest.hexdigest(), size
+        # A file that changed size while being read matches nothing.
+        blob_id = blob.hexdigest() if blob is not None and size == info.st_size else ""
+        return digest.hexdigest(), size, blob_id
     except OSError:
         return None
 
@@ -383,23 +413,22 @@ class CacheArchiveVerifyResult:
             return ["GAMMA cache verification cancelled"]
         lines = [
             (
-                "GAMMA cache: "
-                f"{len(self.verified)} reusable, "
-                f"{len(self.missing)} missing, "
-                f"{len(self.mismatched)} outdated, "
+                "Download cache: "
+                f"{len(self.verified)} archives ready to reuse, "
+                f"{len(self.missing)} not downloaded, "
+                f"{len(self.mismatched)} older versions, "
                 f"{len(self.unreadable)} unreadable"
             )
         ]
-        if self.mismatched:
+        if self.missing or self.mismatched:
             lines.append(
-                "  Outdated archives just differ from the current official "
-                "list (e.g. after a GAMMA update) - not evidence anything "
-                "is broken. They will be redownloaded automatically the "
-                "next time they're needed."
+                "  Archives that are not downloaded or are an older version "
+                "do not affect the installed game. They are downloaded "
+                "automatically the next time an install or repair needs them."
             )
         for label, values in (
-            ("Missing", self.missing),
-            ("Outdated", self.mismatched),
+            ("Not downloaded", self.missing),
+            ("Older version", self.mismatched),
             ("Unreadable", self.unreadable),
         ):
             if values:
@@ -497,6 +526,8 @@ class Md5ScanResult:
 
     manifest_path: str = ""
     created: bool = False
+    #: The baseline predated a GAMMA update and was replaced, not compared.
+    stale: bool = False
     files_scanned: int = 0
     bytes_scanned: int = 0
     changed: list[str] = field(default_factory=list)
@@ -505,6 +536,11 @@ class Md5ScanResult:
     errors: list[str] = field(default_factory=list)
     cancelled: bool = False
     elapsed: float = 0.0
+    #: relpath -> md5 of every file hashed, so a caller can record exactly
+    #: this state as the baseline without hashing the whole tree again.
+    digests: dict[str, str] = field(default_factory=dict, repr=False)
+    #: relpath -> git blob id, for the files asked for with ``git_blobs``.
+    blobs: dict[str, str] = field(default_factory=dict, repr=False)
 
     @property
     def problems(self) -> int:
@@ -523,39 +559,315 @@ class Md5ScanResult:
             f"{_format_duration(self.elapsed)}"
         )
         if self.created:
+            if self.stale:
+                out.append(
+                    "  GAMMA was updated since the last snapshot (e.g. from "
+                    "the terminal), so the old snapshot was replaced"
+                )
             out.append(
-                f"  baseline saved to {Path(self.manifest_path).name} - "
-                "run Verify Integrity again to detect changes"
+                f"  Snapshot saved to {Path(self.manifest_path).name}. This run "
+                "had nothing to compare mod files against; later runs will "
+                "report any file that changes from this snapshot"
             )
             return out
         if self.problems == 0:
-            out.append("All mod files unchanged since baseline")
+            out.append("  Every mod file matches the last snapshot")
             return out
         for label, items in (
-            ("Changed", self.changed),
-            ("Added", self.added),
-            ("Removed", self.removed),
+            ("Changed since snapshot", self.changed),
+            ("New since snapshot", self.added),
+            ("Deleted since snapshot", self.removed),
+            ("Could not be read", self.errors),
         ):
             if not items:
                 continue
             out.append(f"{label}: {len(items)}")
-            for rel in items:
-                out.append(f"  {rel}")
-        if self.errors:
-            out.append(f"Errors (unreadable): {len(self.errors)}")
-            for rel in self.errors:
-                out.append(f"  {rel}")
+            out.extend(f"  {rel}" for rel in items)
         return out
 
     @property
     def summary(self) -> str:
         if self.created:
-            return f"MD5 baseline created ({self.files_scanned} files)"
+            if self.stale:
+                return f"Mod file snapshot replaced after a GAMMA update ({self.files_scanned} files)"
+            return f"Mod file snapshot saved ({self.files_scanned} files)"
         if self.cancelled:
             return "MD5 scan cancelled"
         if self.problems == 0:
-            return f"MD5: {self.files_scanned} files unchanged"
-        return f"MD5: {self.problems} change(s) since baseline"
+            return f"MD5: {self.files_scanned} files match the snapshot"
+        return f"MD5: {self.problems} file changes since the snapshot"
+
+
+# ------------------------------------------------- plain-language results
+
+
+@dataclass
+class Finding:
+    """One plain-language result row on the Verify Integrity card.
+
+    ``level`` is "ok", "info", "warn" or "problem". Only "problem" means
+    something is broken and a repair would help; "info" is never shown in
+    an error colour.
+    """
+
+    level: str
+    title: str
+    detail: str = ""
+    items: list[str] = field(default_factory=list)
+    count: int = 0
+
+
+_LEVEL_ORDER = {"ok": 0, "problem": 1, "warn": 2, "info": 3}
+
+
+def _anomaly_paths(lines: Iterable[str], status: str, anomaly_root: str) -> list[str]:
+    root = ""
+    if anomaly_root:
+        root = str(Path(anomaly_root).expanduser()).replace("\\", "/").rstrip("/") + "/"
+    out: list[str] = []
+    for line in lines:
+        match = _ANOMALY_LINE_RE.match(line.strip())
+        if match is None or match.group("status") != status:
+            continue
+        path = match.group("path").strip().replace("\\", "/")
+        if root and path.lower().startswith(root.lower()):
+            path = path[len(root) :]
+        out.append(path)
+    return out
+
+
+def build_findings(
+    *,
+    anomaly_checked: bool,
+    extra: Iterable[Finding] = (),
+    anomaly_problem_lines: Iterable[str] = (),
+    anomaly_root: str = "",
+    presence: GammaVerifyResult | None = None,
+    scan: Md5ScanResult | None = None,
+    cache: CacheArchiveVerifyResult | None = None,
+    plan=None,
+    official_missing: bool = False,
+    gamma_skipped: bool = False,
+    repo: RepoCheckResult | None = None,
+) -> list[Finding]:
+    """Turn the raw check results into plain-language rows, worst first.
+
+    Nothing here is checked again: this only explains what the Anomaly
+    check, ``verify_gamma``, ``scan_mods_md5``, ``verify_cache_archives``,
+    ``compare_repo_files`` (``repo``) and ``classify_problems`` (``plan``)
+    already found.
+    """
+    found: list[Finding] = list(extra)
+
+    def add(level, title, detail="", items=()):
+        items = list(items)
+        found.append(Finding(level, title, detail, items, len(items)))
+
+    lines = list(anomaly_problem_lines)
+    if not anomaly_checked:
+        add(
+            "problem",
+            tr("Anomaly could not be checked"),
+            tr("The Anomaly checker returned no results. Make sure the Anomaly folder in Step 3 is correct and Anomaly is installed. The technical log has the details."),
+        )
+    add_missing = _anomaly_paths(lines, "NOT FOUND", anomaly_root)
+    if add_missing:
+        add(
+            "problem",
+            tr("Anomaly files are missing"),
+            tr("Repair re-installs Anomaly, then puts GAMMA's own files back on top."),
+            add_missing,
+        )
+    differ = _anomaly_paths(lines, "CORRUPT", anomaly_root)
+    if differ:
+        add(
+            "problem",
+            tr("Anomaly files don't match the originals"),
+            tr("These files are damaged or were replaced. Repair re-installs Anomaly, then puts GAMMA's own files back on top."),
+            differ,
+        )
+
+    if gamma_skipped:
+        add("info", tr("GAMMA isn't installed"), tr("Only Anomaly was checked."))
+
+    broken: set[str] = set()
+    official: set[str] = set()
+    if presence is not None:
+        broken = set(presence.missing) | set(presence.empty)
+        official = (
+            set(presence.official)
+            | set(presence.official_missing)
+            | set(presence.official_empty)
+        )
+        if presence.marker_missing:
+            add(
+                "problem",
+                tr("GAMMA's core files weren't found"),
+                tr("Mod Organizer or the GAMMA profile is missing from the GAMMA folder. Check the folder in Step 4, or run Install GAMMA."),
+                presence.marker_missing,
+            )
+        gamma_broken = (
+            presence.official_missing + presence.official_empty
+            if presence.used_official_list
+            else presence.missing + presence.empty
+        )
+        if gamma_broken:
+            add(
+                "problem",
+                tr("GAMMA mods are missing or empty"),
+                tr("Their mod folders are gone or have no files in them. Repair downloads them again."),
+                gamma_broken,
+            )
+        own_broken = presence.extra_missing + presence.extra_empty
+        if presence.used_official_list and own_broken:
+            add(
+                "warn",
+                tr("Some of your own mods have no files"),
+                tr("These mods aren't part of GAMMA, so COMMANDER can't download them again. Reinstall them yourself, or turn them off in the Mod Manager."),
+                own_broken,
+            )
+
+    if repo is not None:
+        if repo.broken:
+            add(
+                "problem",
+                tr("GAMMA's own files are damaged or missing"),
+                tr("These files come from GAMMA's own repositories in the download cache. Repair copies the originals back from there - nothing is downloaded. If you edited them on purpose, you don't need to repair."),
+                [rel.removeprefix("mods/") for rel in repo.broken],
+            )
+        elif repo.checked:
+            found.append(
+                Finding(
+                    "ok",
+                    tr("GAMMA's own files match the originals"),
+                    tr("{count} files were checked against GAMMA's repositories in the download cache.", count=repo.checked),
+                )
+            )
+        if repo.unreadable_repos:
+            add(
+                "info",
+                tr("Some of GAMMA's own files couldn't be checked"),
+                tr("Their repository isn't in the download cache, or git isn't installed. Those files were still compared with the snapshot."),
+                repo.unreadable_repos,
+            )
+
+    if plan is not None:
+        changed = []
+        for folder in plan.repairable:
+            if folder in broken:
+                continue
+            edited, deleted = plan.file_counts.get(folder, (0, 0))
+            parts = [tr("{count} changed", count=edited)] if edited else []
+            if deleted:
+                parts.append(tr("{count} deleted", count=deleted))
+            changed.append(f"{folder} ({', '.join(parts)})" if parts else folder)
+        if changed:
+            add(
+                "problem",
+                tr("GAMMA mods changed since the last check"),
+                tr("Files in these mods were changed or deleted since the snapshot. Repair downloads fresh copies. If you edited them on purpose, you don't need to repair."),
+                changed,
+            )
+        stuck = [name for name in plan.unrepairable if name not in broken]
+        no_source = [name for name in stuck if name in official]
+        if no_source:
+            add(
+                "info",
+                tr("Changed GAMMA mods with no download source"),
+                tr("These ship with GAMMA itself rather than as a download, so there's no fresh copy to fetch. If you changed them on purpose (MCM values, for example), there's nothing to do. Otherwise, Install GAMMA restores them."),
+                no_source,
+            )
+        own = [name for name in stuck if name not in official]
+        if own:
+            add(
+                "info",
+                tr("Changed files in your own mods"),
+                tr("These aren't part of GAMMA, so there's no official copy to compare with. They're left exactly as they are."),
+                own,
+            )
+        if plan.added_only:
+            add(
+                "info",
+                tr("Mods with new files since the last check"),
+                tr("Usually your own tweaks or files the game created. Nothing is removed."),
+                plan.added_only,
+            )
+
+    if scan is not None:
+        if scan.created:
+            add(
+                "info",
+                tr("GAMMA was updated - new snapshot of your mod files saved")
+                if scan.stale
+                else tr("Snapshot of your mod files saved"),
+                tr("This was the first check since your last install or change, so there was nothing to compare mod file contents against yet. Mod folders and Anomaly's files were checked against the originals. From now on, any change to a mod file is caught by the next check."),
+            )
+        unreadable = [rel for rel in scan.errors if rel not in scan.removed]
+        if unreadable:
+            add(
+                "warn",
+                tr("Some mod files couldn't be read"),
+                tr("Usually a permissions problem. These files were skipped, not changed."),
+                unreadable,
+            )
+
+    if official_missing and not gamma_skipped:
+        add(
+            "warn",
+            tr("Couldn't download GAMMA's mod list"),
+            tr("Mods were only checked for being present, and your own mods couldn't be told apart from GAMMA's. Check your internet connection and try again."),
+        )
+
+    if cache is not None and not cache.cancelled:
+        if cache.missing:
+            add(
+                "info",
+                tr("Archives not in the download cache"),
+                tr("Your game is not affected. They're downloaded automatically the next time an install or repair needs them."),
+                cache.missing,
+            )
+        if cache.mismatched:
+            add(
+                "info",
+                tr("Older archive versions in the download cache"),
+                tr("GAMMA's list has a newer version. Your game is not affected; the new one is downloaded when needed."),
+                cache.mismatched,
+            )
+        if cache.unreadable:
+            add(
+                "warn",
+                tr("Cached archives that couldn't be read"),
+                tr("They'll be downloaded again when needed."),
+                cache.unreadable,
+            )
+
+    if not any(f.level in ("problem", "warn") for f in found) and not (
+        scan is not None and scan.created
+    ):
+        add(
+            "ok",
+            tr("Everything checks out"),
+            tr("Anomaly's files match the originals.")
+            if scan is None
+            else tr("Anomaly's files match the originals and every GAMMA mod is in place.")
+            if scan.changed or scan.removed or scan.added
+            else tr("Anomaly's files match the originals, every GAMMA mod is in place, and no mod file changed since the last check."),
+        )
+    found.sort(key=lambda finding: _LEVEL_ORDER.get(finding.level, 9))
+    return found
+
+
+def overall_verdict(findings: Iterable[Finding], scan: Md5ScanResult | None) -> str:
+    """"attention", "snapshot" or "healthy" for the card's status pill.
+
+    A run that only saved the snapshot never counts as "healthy": it had
+    nothing to compare mod file contents against.
+    """
+    if any(finding.level == "problem" for finding in findings):
+        return "attention"
+    if scan is not None and scan.created:
+        return "snapshot"
+    return "healthy"
 
 
 #: Must match repair.py's _QUARANTINE_DIRNAME - not imported directly to
@@ -564,8 +876,12 @@ _QUARANTINE_DIRNAME = ".verify-quarantine"
 
 
 def _iter_mod_files(mods: Path):
-    """Yield safe mod files in stable order without materializing the tree."""
-    root_path = mods.resolve()
+    """Yield safe mod files in stable order without materializing the tree.
+
+    os.walk never descends into a symlinked folder and every symlinked file
+    is skipped below, so what is yielded is inside ``mods`` - without a
+    resolve() (an lstat per path component) for each of ~100k files.
+    """
     for root, dirs, names in os.walk(mods):
         if root == str(mods) and _QUARANTINE_DIRNAME in dirs:
             # repair.py's own quarantine holding area, sitting directly
@@ -579,13 +895,32 @@ def _iter_mod_files(mods: Path):
         for name in names:
             candidate = Path(root) / name
             try:
-                if candidate.is_symlink() or not candidate.resolve().is_relative_to(
-                    root_path
-                ):
+                if candidate.is_symlink():
                     continue
-            except (OSError, RuntimeError):
+            except OSError:
                 continue
             yield candidate
+
+
+def _updated_since(base: Path, manifest: Path) -> bool:
+    """Whether a GAMMA install or update ran after *manifest* was written.
+
+    Every ``full-install``/``update apply`` rewrites the CLI's modpack list
+    in the MO2 profile. COMMANDER drops the baseline itself after the runs
+    it starts (``invalidate_baseline``), but an update run from the
+    terminal does not, and the old baseline then flags every updated or
+    renumbered mod as broken.
+    """
+    try:
+        written = manifest.stat().st_mtime
+        for profile in (base / "profiles").iterdir():
+            for name in ("modpack_maker_list.txt", "modpack_maker_list.json"):
+                path = profile / name
+                if path.is_file() and path.stat().st_mtime > written:
+                    return True
+    except OSError:
+        return False
+    return False
 
 
 def scan_mods_md5(
@@ -593,6 +928,8 @@ def scan_mods_md5(
     on_progress: Callable[[int, int, str], None] | None = None,
     cancel=None,
     rebaseline: bool = False,
+    trust_baseline: bool = False,
+    git_blobs: Container[str] = (),
 ) -> Md5ScanResult:
     """Hash every file under ``gamma/mods`` and compare against a baseline.
 
@@ -602,6 +939,11 @@ def scan_mods_md5(
     is reported. ``cancel`` (a ``threading.Event``) aborts the scan between
     files if set. ``rebaseline`` re-records the current state as the new
     baseline (used after a repair so fixed mods do not show as changed).
+    ``trust_baseline`` compares against the baseline even when a GAMMA
+    install ran after it: the repair's own ``full-install`` rewrites the
+    modpack list, and its re-check must still compare, not start over.
+    Files listed in ``git_blobs`` also get their git blob id (``blobs``),
+    from the same read.
     """
     result = Md5ScanResult()
     base = Path(gamma_dir)
@@ -642,17 +984,20 @@ def scan_mods_md5(
             # unreadable rather than ever writing it into the baseline.
             result.errors.append(rel)
             continue
-        digest = _md5_file(path)
+        digest = _md5_and_blob(path) if rel in git_blobs else _md5_file(path)
         if digest is None:
             result.errors.append(rel)
         else:
             current[rel] = digest[0]
             bytes_total += digest[1]
+            if len(digest) > 2:
+                result.blobs[rel] = digest[2]
         if on_progress is not None and (index % 5000 == 0 or index == total):
             on_progress(index, total, format_size(bytes_total))
 
     result.files_scanned = len(current)
     result.bytes_scanned = bytes_total
+    result.digests = current
     result.elapsed = time.monotonic() - started
 
     if result.cancelled:
@@ -663,11 +1008,17 @@ def scan_mods_md5(
         except OSError as exc:
             result.errors.append(f"Failed to write manifest: {exc}")
         return result
-    if manifest_path.is_file():
+    if (
+        not trust_baseline
+        and manifest_path.is_file()
+        and _updated_since(base, manifest_path)
+    ):
+        result.stale = True
+    if manifest_path.is_file() and not result.stale:
         baseline = _read_manifest(manifest_path)
         if baseline is None:
             result.errors.append(
-                f"Baseline manifest '{manifest_path.name}' is empty or corrupt"
+                f"Snapshot file '{manifest_path.name}' is empty or unreadable"
             )
         else:
             for rel, digest in current.items():
@@ -692,6 +1043,38 @@ def scan_mods_md5(
     return result
 
 
+def write_baseline(gamma_dir: str, scan: Md5ScanResult) -> None:
+    """Record a finished scan's hashes as the new baseline (raises OSError).
+
+    The same file ``scan_mods_md5(..., rebaseline=True)`` writes, without
+    hashing tens of GB a second time.
+    """
+    _write_manifest(Path(gamma_dir) / MANIFEST_FILENAME, scan.digests)
+
+
+def accept_reinstalled(gamma_dir: str, scan: Md5ScanResult, folders: list[str]) -> None:
+    """Make freshly reinstalled mod folders the snapshot's reference.
+
+    A repair unpacks each mod from an archive the CLI checked by MD5, so
+    that copy is the right one - even where it differs from the snapshot
+    (taken from another installer's layout, or an older archive). Compared
+    against the old snapshot it never matched, and every Verify offered
+    the same repair again. Drops those folders' changes from *scan* too.
+    """
+    prefixes = tuple(f"mods/{folder}/" for folder in folders)
+    if not prefixes:
+        return
+    manifest = Path(gamma_dir) / MANIFEST_FILENAME
+    baseline = _read_manifest(manifest)
+    if baseline is None:
+        return
+    kept = {rel: digest for rel, digest in baseline.items() if not rel.startswith(prefixes)}
+    kept.update({rel: digest for rel, digest in scan.digests.items() if rel.startswith(prefixes)})
+    _write_manifest(manifest, kept)
+    for name in ("changed", "added", "removed"):
+        setattr(scan, name, [rel for rel in getattr(scan, name) if not rel.startswith(prefixes)])
+
+
 def reverted_gamma_overlay(anomaly_dir: str) -> list[str]:
     """GAMMA-patched Anomaly files that are currently back to vanilla.
 
@@ -706,7 +1089,10 @@ def reverted_gamma_overlay(anomaly_dir: str) -> list[str]:
     root = Path(anomaly_dir).expanduser()
     reverted: list[str] = []
     for key, (name, digest) in _vanilla_md5s(root).items():
-        if key not in GAMMA_OVERLAY_FILES:
+        # Only the engine executables: GAMMA's repo carries those, so they
+        # can be put back. fsgame.ltx is never written by the CLI install;
+        # a vanilla one is normal on Linux and flagging it looped Verify.
+        if key not in GAMMA_OVERLAY_FILES or not key.endswith(".exe"):
             continue
         result = _md5_file(root / name)
         if result is not None and result[0].lower() == digest:
@@ -820,9 +1206,389 @@ def restore_gamma_overlay(
             continue
         try:
             # Keeps the replaced file's permissions (an executable stays one).
-            write_bytes(root / name, data, lock=False)
+            write_bytes(root / name.replace("\\", "/"), data, lock=False)
         except OSError:
             result.failed.append(name)
             continue
         result.restored.append(name)
     return result
+
+
+# ---------------------------------------- GAMMA's own files (git repositories)
+
+#: GAMMA's own repositories, cloned into the download cache by full-install
+#: and copied from there into gamma/mods - listed in the order it copies
+#: them, each with the profile field holding its branch.
+GAMMA_REPOS = (
+    ("gamma_setup", "gamma_setup_repo_branch"),
+    ("gamma_large_files_v2", "gamma_large_files_repo_branch"),
+    ("teivaz_anomaly_gunslinger", "teivaz_anomaly_gunslinger_repo_branch"),
+    ("Stalker_GAMMA", "stalker_gamma_repo_branch"),
+)
+_TEIVAZ_MOD = "312- Gunslinger Guns for Anomaly - Teivazcz & Gunslinger Team"
+#: MCM's saved settings ship in a GAMMA repo, but players change them.
+_USER_EDITED_NAMES = frozenset({"axr_options.ltx"})
+
+
+def _repo_mod_path(repo: str, path: str) -> str | None:
+    """Where full-install copies repo file ``path``: ``mods/...``, or None.
+
+    Mirrors GetDestinationPath of each special repo in stalker-gamma-cli
+    (Stalker.Gamma/GammaInstallerServices/SpecialRepos). GAMMA's patches
+    over Anomaly land outside gamma/mods and are left to ``anomaly check``.
+    """
+    parts = path.split("/")
+    rest: list[str] = []
+    if repo == "gamma_setup" and parts[0] == "modpack_addons":
+        rest = parts[1:]
+    elif repo == "gamma_large_files_v2":
+        rest = parts
+    elif repo == "teivaz_anomaly_gunslinger" and "gamedata" in parts[:-1]:
+        rest = [_TEIVAZ_MOD, "gamedata", *parts[parts.index("gamedata") + 1 :]]
+    elif repo == "Stalker_GAMMA" and parts[:2] == ["G.A.M.M.A", "modpack_addons"]:
+        rest = parts[2:]
+    if not rest or any(part in ("", ".", "..") for part in rest):
+        return None
+    rel = "mods/" + "/".join(rest)
+    return None if "\n" in rel or "\r" in rel else rel
+
+
+@dataclass
+class RepoFile:
+    repo: str
+    blob: str
+
+
+def repo_branches(profile) -> dict[str, str]:
+    """Repo name -> the branch the CLI profile installs it from."""
+    return {name: getattr(profile, attr, "") or "main" for name, attr in GAMMA_REPOS}
+
+
+def _git_command(git: str, repo: Path, *args: str) -> list[str]:
+    return [git, "-c", f"safe.directory={repo}", "--git-dir", str(repo), *args]
+
+
+def _git_env() -> dict[str, str]:
+    from .config import child_environment
+
+    env = child_environment()
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    return env
+
+
+def _installed_commit(git: str, repo: Path, branch: str) -> str | None:
+    """The commit full-install last copied out of ``repo``.
+
+    ``update apply`` records it next to the repo; without that record it is
+    the branch tip (the CLI's GitService.LookupCommit).
+    """
+    import subprocess
+
+    applied = repo.with_suffix(".applied-commit")
+    if applied.is_file():
+        try:
+            candidates = [applied.read_text(encoding="utf-8").strip()]
+        except OSError:
+            return None
+    else:
+        ref = f"refs/remotes/origin/{branch}" if branch in ("main", "dev2") else branch
+        candidates = [ref, f"refs/remotes/Grokitach/{branch}"]
+    for candidate in candidates:
+        if not candidate or candidate.startswith("-"):
+            continue
+        try:
+            done = subprocess.run(
+                _git_command(git, repo, "rev-parse", "--verify", "--quiet", f"{candidate}^{{commit}}"),
+                capture_output=True, text=True, timeout=30, env=_git_env(), check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if done.returncode == 0 and re.fullmatch(r"[0-9a-f]{40}", done.stdout.strip()):
+            return done.stdout.strip()
+    return None
+
+
+def gamma_repo_files(
+    gamma_dir: str, branches: Mapping[str, str]
+) -> tuple[dict[str, RepoFile], list[str]]:
+    """GAMMA's own files in gamma/mods, and the git blob each must match.
+
+    Returns ``{"mods/<folder>/...": RepoFile}`` and the repos that could not
+    be read (not cloned, git missing). Read from ``gamma/downloads``, the
+    link full-install keeps to the cache. A path two repos write with
+    different contents is left out: which one is current depends on what an
+    update touched last. So are MCM's saved settings.
+    """
+    import shutil
+    import subprocess
+
+    git = shutil.which("git")
+    downloads = Path(gamma_dir) / "downloads"
+    claims: dict[str, list[RepoFile]] = {}
+    unreadable: list[str] = []
+    for name, _attr in GAMMA_REPOS:
+        repo = downloads / f"{name}.git"
+        commit = (
+            _installed_commit(git, repo, branches.get(name, "main"))
+            if git is not None and (repo / "HEAD").is_file()
+            else None
+        )
+        try:
+            if commit is None:
+                raise ValueError(name)
+            listing = subprocess.run(
+                _git_command(git, repo, "ls-tree", "-r", "-z", commit),
+                capture_output=True, timeout=120, env=_git_env(), check=True,
+            ).stdout
+        except (OSError, subprocess.SubprocessError, ValueError):
+            unreadable.append(name)
+            continue
+        for entry in listing.split(b"\0"):
+            meta, _tab, path = entry.partition(b"\t")
+            fields = meta.split()
+            # Regular files only: no symlinks (120000) or submodules.
+            if len(fields) != 3 or fields[0] not in (b"100644", b"100755"):
+                continue
+            try:
+                rel = _repo_mod_path(name, path.decode("utf-8"))
+            except UnicodeDecodeError:
+                continue
+            if rel is None or rel.rsplit("/", 1)[-1].lower() in _USER_EDITED_NAMES:
+                continue
+            claims.setdefault(rel, []).append(RepoFile(name, fields[2].decode()))
+    files = {
+        rel: found[-1] for rel, found in claims.items() if len({f.blob for f in found}) == 1
+    }
+    return files, unreadable
+
+
+_SCRIPTS_DIR = "gamedata/scripts/"
+
+
+def stray_anomaly_scripts(anomaly_dir: str, gamma_dir: str, branch: str = "main") -> list[str]:
+    """Loose scripts in ``anomaly/gamedata/scripts`` that neither Anomaly nor
+    GAMMA put there.
+
+    A GAMMA Reset leaves the Anomaly folder alone, so scripts from newer
+    modded exes installed by hand outlive it and crash the game against
+    GAMMA's older exes ("attempt to call method ... (a nil value)"). Known
+    scripts: Anomaly's checksums.md5, GAMMA's modpack_patches at the
+    installed commit, and co-op's loose files. Empty when GAMMA's repo can't
+    be read (nothing to compare with) or COMMANDER installed the exes itself
+    (their scripts belong there).
+    """
+    import shutil
+    import subprocess
+
+    from . import coop, modded_exes
+
+    anomaly = Path(anomaly_dir).expanduser()
+    scripts = anomaly / _SCRIPTS_DIR
+    git = shutil.which("git")
+    repo = Path(gamma_dir).expanduser() / "downloads" / f"{_GAMMA_REPO}"
+    if not scripts.is_dir() or git is None or modded_exes.load_state(anomaly):
+        return []
+    commit = _installed_commit(git, repo, branch) if (repo / "HEAD").is_file() else None
+    if commit is None:
+        return []
+    patches = _GAMMA_PATCH_ROOT + _SCRIPTS_DIR
+    try:
+        listing = subprocess.run(
+            _git_command(git, repo, "ls-tree", "-r", "--name-only", "-z", commit, "--", patches),
+            capture_output=True, timeout=120, env=_git_env(), check=True,
+        ).stdout.decode("utf-8", "replace")
+    except (OSError, subprocess.SubprocessError):
+        return []
+    known = {p[len(_GAMMA_PATCH_ROOT):].lower() for p in listing.split("\0") if p}
+    known |= {k for k in _vanilla_md5s(anomaly) if k.startswith(_SCRIPTS_DIR)}
+    known |= {k.lower() for k in (coop.load_state(anomaly) or {}).get("files", {})}
+    stray = []
+    for path in scripts.rglob("*"):
+        rel = path.relative_to(anomaly).as_posix()
+        if path.is_file() and rel.lower() not in known:
+            stray.append(rel)
+    return sorted(stray)
+
+
+@dataclass
+class RepoCheckResult:
+    """GAMMA's own files compared with its repositories."""
+
+    checked: int = 0
+    changed: list[str] = field(default_factory=list)
+    missing: list[str] = field(default_factory=list)
+    unreadable_repos: list[str] = field(default_factory=list)
+
+    @property
+    def broken(self) -> list[str]:
+        return sorted(self.changed + self.missing)
+
+    def lines(self) -> list[str]:
+        out = [
+            (
+                f"GAMMA's own files: {self.checked} match GAMMA's repositories, "
+                f"{len(self.changed)} differ, {len(self.missing)} missing"
+            )
+        ]
+        if self.unreadable_repos:
+            out.append(
+                "  Not checked (repository not in the download cache): "
+                + ", ".join(self.unreadable_repos)
+            )
+        for label, items in (("Differ", self.changed), ("Missing", self.missing)):
+            out.extend(f"  {label}: {rel}" for rel in items)
+        return out
+
+
+def compare_repo_files(
+    files: Mapping[str, RepoFile], scan: Md5ScanResult, unreadable_repos: Iterable[str] = ()
+) -> RepoCheckResult:
+    """Judge GAMMA's own files from the blob ids ``scan_mods_md5`` took."""
+    result = RepoCheckResult(unreadable_repos=list(unreadable_repos))
+    errors = set(scan.errors)
+    for rel, expected in files.items():
+        if rel in errors:
+            continue  # reported as unreadable already
+        actual = scan.blobs.get(rel)
+        if actual is None:
+            result.missing.append(rel)
+            continue
+        result.checked += 1
+        if actual != expected.blob:
+            result.changed.append(rel)
+    result.changed.sort()
+    result.missing.sort()
+    return result
+
+
+def _mods_destination(mods_root: Path, rel: str) -> Path | None:
+    """``mods_root``/rel, unless a part is a symlink (which a write would
+    follow out of gamma/mods)."""
+    parts = rel.split("/")
+    if parts[0] != "mods" or len(parts) < 2:
+        return None
+    path = mods_root
+    for part in parts[1:]:
+        if part in ("", ".", ".."):
+            return None
+        path = path / part
+        if path.is_symlink():
+            return None
+    return path
+
+
+@dataclass
+class RepoRepairResult:
+    restored: list[str] = field(default_factory=list)
+    failed: list[str] = field(default_factory=list)
+    reason: str = ""
+
+
+def restore_repo_files(
+    gamma_dir: str, files: Mapping[str, RepoFile], rels: Iterable[str], cancel=None
+) -> RepoRepairResult:
+    """Write GAMMA's own copy of each file back from the download cache.
+
+    Read with ``git cat-file`` from the repositories full-install cloned, so
+    nothing is downloaded. Each copy is checked against its blob id before
+    it is written (atomically), and the snapshot is told about it, so the
+    next check doesn't report the repaired file as changed.
+    """
+    import shutil
+    import subprocess
+
+    from .atomic import write_bytes
+
+    result = RepoRepairResult()
+    rels = [rel for rel in rels if rel in files]
+    git = shutil.which("git")
+    if git is None:
+        result.failed, result.reason = rels, "git is not installed"
+        return result
+    base = Path(gamma_dir)
+    try:
+        mods_root = (base / "mods").resolve()
+    except OSError as exc:
+        result.failed, result.reason = rels, str(exc)
+        return result
+    by_repo: dict[str, list[str]] = {}
+    for rel in rels:
+        by_repo.setdefault(files[rel].repo, []).append(rel)
+    new_digests: dict[str, str] = {}
+    for name, group in by_repo.items():
+        repo = base / "downloads" / f"{name}.git"
+        try:
+            proc = subprocess.Popen(
+                _git_command(git, repo, "cat-file", "--batch"),
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL, env=_git_env(),
+            )
+        except OSError as exc:
+            result.failed.extend(group)
+            result.reason = str(exc)
+            continue
+        try:
+            for index, rel in enumerate(group):
+                if cancel is not None and cancel.is_set():
+                    result.failed.extend(group[index:])
+                    break
+                blob = files[rel].blob
+                destination = _mods_destination(mods_root, rel)
+                current = _md5_and_blob(destination) if destination is not None else None
+                if current is not None and current[2] == blob:
+                    # Already right again (an earlier repair step reinstalled it).
+                    result.restored.append(rel)
+                    new_digests[rel] = current[0]
+                    continue
+                proc.stdin.write(f"{blob}\n".encode())
+                proc.stdin.flush()
+                header = proc.stdout.readline().split()
+                if len(header) != 3 or header[1] != b"blob":
+                    result.failed.append(rel)  # "<id> missing"
+                    continue
+                data = proc.stdout.read(int(header[2]))
+                proc.stdout.read(1)  # the newline after each object
+                if destination is None or _git_blob_id(data) != blob:
+                    result.failed.append(rel)
+                    continue
+                try:
+                    write_bytes(destination, data, lock=False)
+                except OSError:
+                    result.failed.append(rel)
+                    continue
+                result.restored.append(rel)
+                new_digests[rel] = hashlib.md5(data, usedforsecurity=False).hexdigest()
+        except (OSError, ValueError) as exc:
+            # git died mid-stream: whatever wasn't answered isn't restored.
+            done = set(result.restored) | set(result.failed)
+            result.failed.extend(rel for rel in group if rel not in done)
+            result.reason = str(exc)
+        finally:
+            try:
+                proc.stdin.close()
+            except OSError:
+                pass
+            try:
+                proc.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()  # reaped, not left a zombie
+    _update_baseline(base / MANIFEST_FILENAME, new_digests)
+    return result
+
+
+def _update_baseline(manifest: Path, digests: Mapping[str, str]) -> None:
+    """Record repaired files in an existing snapshot, keeping its date:
+    ``_updated_since`` reads that date to spot updates run from a terminal."""
+    if not digests or not manifest.is_file():
+        return
+    baseline = _read_manifest(manifest)
+    if baseline is None:
+        return
+    baseline.update(digests)
+    try:
+        times = manifest.stat()
+        _write_manifest(manifest, baseline)
+        os.utime(manifest, ns=(times.st_atime_ns, times.st_mtime_ns))
+    except OSError:
+        pass

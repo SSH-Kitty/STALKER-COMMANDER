@@ -1,6 +1,6 @@
 """Deck settings: look, language, runner, startup behaviour, Steam, exit.
 
-Still shorter than the desktop page - launch options, MO2 DPI, autostart
+Still shorter than the desktop page - typed launch options, MO2 DPI, autostart
 and Discord presence stay there - but everything a Deck owner plausibly
 changes while holding the device is here, including the two that used to
 send people back to Desktop Mode: whether COMMANDER opens straight into
@@ -11,18 +11,27 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt, QTimer
 
-from commander_gui import __version_label__, gui_settings
+from commander_gui import (
+    __version__,
+    __version_label__,
+    coop,
+    gui_settings,
+    launch_options,
+)
 from commander_gui.deck_launch import in_game_mode, steam_deck_model
 from commander_gui.i18n import LANGUAGE_INFO, set_active_language, tr
+from commander_gui.launcher import available_commands
+from commander_gui.self_update import commander_appimage_path
 from commander_gui.steam_shortcuts import (
     add_to_steam,
     find_shortcuts_vdf,
     list_steam_accounts,
     steam_is_running,
 )
-from commander_gui.themes import THEME_INFO
-from commander_gui.ui.common import BackgroundTask, mo2_running, play_click_sound
+from commander_gui.themes import LIVE_TIME_CHOICES, THEME_INFO
+from commander_gui.ui.common import BackgroundTask, game_running, play_click_sound
 from commander_gui.ui.deck_switch import switch_mode
+from commander_gui.updates import is_unstable_version, newer_unstable_tag
 
 from ..launch import runner_label, runner_options
 from ..scale import px
@@ -50,6 +59,24 @@ _SCALE_MIN, _SCALE_MAX, _SCALE_STEP = 80, 150, 10
 #: short labels the inline switcher shows. "ask" is still a stored value
 #: (the default, and what a Deck's first launch asks about) but not a
 #: choice here: the switcher shows what "ask" currently resolves to.
+#: deck_overlay_shortcut values, as gui_settings validates them.
+_OVERLAY_SHORTCUTS = (
+    ("L4 + R4 (upper back grips)", "l4r4"),
+    ("L5 + R5 (lower back grips)", "l5r5"),
+    ("L4 + L5 (left back grips)", "l4l5"),
+    ("R4 + R5 (right back grips)", "r4r5"),
+    ("Off", "off"),
+)
+
+#: Download threads, as the desktop Dashboard offers them.
+_THREADS = (
+    (1, "1 (One at a time)"),
+    (2, "2 (Slow connection)"),
+    (4, "4 (Safe)"),
+    (6, "6 (Balanced)"),
+    (8, "8 (Fast)"),
+)
+
 _STARTUP_CHOICES = (
     ("always", "Steam Deck"),
     ("never", "Desktop"),
@@ -64,6 +91,15 @@ class SettingsScreen(DeckScreen):
         self.theme_row = DeckRow(tr("Theme"))
         self.theme_row.activated.connect(self._pick_theme)
         self.body.addWidget(self.theme_row)
+        self.live_animation_row = DeckToggleRow(tr("Live theme animation"), True)
+        self.live_animation_row.toggled.connect(self._toggle_live_animation)
+        self.body.addWidget(self.live_animation_row)
+        self.lights_row = DeckToggleRow(tr("Christmas lights"), True)
+        self.lights_row.toggled.connect(self._toggle_lights)
+        self.body.addWidget(self.lights_row)
+        self.live_time_row = DeckRow(tr("Live theme time of day"))
+        self.live_time_row.activated.connect(self._pick_live_time)
+        self.body.addWidget(self.live_time_row)
 
         self.language_row = DeckRow(tr("Language"))
         self.language_row.activated.connect(self._pick_language)
@@ -91,6 +127,32 @@ class SettingsScreen(DeckScreen):
         self.runner_row = DeckRow(tr("Runner"))
         self.runner_row.activated.connect(self._pick_runner)
         self.body.addWidget(self.runner_row)
+        self.gamemode_row = DeckToggleRow(tr("Always use GameMode"))
+        self.gamemode_row.toggled.connect(
+            lambda on: gui_settings.save_gui_settings(always_gamemoderun=bool(on))
+        )
+        self.body.addWidget(self.gamemode_row)
+        # Frame generation, the performance overlay and image effects.
+        self.graphics_row = DeckRow(tr("Graphics"))
+        self.graphics_row.activated.connect(lambda: self.window.set_page("graphics"))
+        self.body.addWidget(self.graphics_row)
+        # The desktop Dashboard's "just pick a speed" choice, per profile.
+        self.threads_row = DeckRow(tr("Download threads"))
+        self.threads_row.activated.connect(self._pick_threads)
+        self.body.addWidget(self.threads_row)
+
+        # The desktop Play page's one-click launch options, as switches.
+        self.body.addWidget(deck_label(tr("Launch options"), role="rowTitle"))
+        self.option_rows: list[tuple[DeckToggleRow, str]] = []
+        for heading, options in launch_options.GROUPS:
+            self.body.addWidget(deck_label(tr(heading), role="caption"))
+            for label, option, _tip in options:
+                row = DeckToggleRow(tr(label))
+                row.toggled.connect(
+                    lambda on, option=option: self._toggle_launch_option(option, on)
+                )
+                self.body.addWidget(row)
+                self.option_rows.append((row, option))
 
         self.body.addWidget(deck_label(tr("Deck Mode"), role="rowTitle"))
         self.start_row = DeckRow(tr("Start screen"))
@@ -110,6 +172,14 @@ class SettingsScreen(DeckScreen):
         self.startup_row.setFixedHeight(px(ROW_H))
         self.body.addWidget(self.startup_row)
 
+        self.overlay_row = DeckRow(tr("In-game overlay shortcut"))
+        self.overlay_row.activated.connect(self._pick_overlay_shortcut)
+        self.body.addWidget(self.overlay_row)
+        self.body.addWidget(deck_label(
+            tr("Hold it for half a second while a game runs to open Graphics over the game. Hold it again, or press B, to go back to the game."),
+            role="caption", wrap=True,
+        ))
+
         self.steam_row = DeckRow(tr("Add COMMANDER to Steam"))
         self.steam_row.activated.connect(self._add_to_steam)
         self.body.addWidget(self.steam_row)
@@ -126,6 +196,23 @@ class SettingsScreen(DeckScreen):
         )
         self.body.addWidget(self.welcome_row)
 
+
+        # Stable or Unstable COMMANDER, and the way to the other one. Only
+        # the AppImage can swap itself.
+        self._unstable_offer: str | None = None
+        self._unstable_task: BackgroundTask | None = None
+        self.build_row = DeckRow(tr("COMMANDER build"))
+        self.build_row.activated.connect(self._switch_build)
+        self._appimage = commander_appimage_path() is not None
+        self.build_row.setVisible(self._appimage)
+        self.body.addWidget(self.build_row)
+        self.build_note = deck_label("", role="caption", wrap=True)
+        self.build_note.setVisible(self._appimage)
+        self.body.addWidget(self.build_note)
+
+        self.help_row = DeckRow(tr("Help"))
+        self.help_row.activated.connect(lambda: self.window.set_page("help"))
+        self.body.addWidget(self.help_row)
 
         self.body.addSpacing(16)
         self.body.addWidget(
@@ -170,7 +257,7 @@ class SettingsScreen(DeckScreen):
 
     def refresh(self) -> None:
         state = gui_settings.load_gui_settings()
-        theme = state.get("theme") or "gamma"
+        theme = state.get("theme") or "black"
         self.theme_row.set_value(
             next((label for key, label, _d, _s in THEME_INFO if key == theme), theme)
         )
@@ -193,12 +280,86 @@ class SettingsScreen(DeckScreen):
             # in Game Mode; anywhere else it opens the desktop interface.
             preference = "always" if steam_deck_model() is not None else "never"
         self.startup_choice.set_value(preference)
+        shortcut = state.get("deck_overlay_shortcut") or "l4r4"
+        self.overlay_row.set_value(next((tr(label) for label, key in _OVERLAY_SHORTCUTS if key == shortcut), ""))
+        self.gamemode_row.set_checked(bool(state.get("always_gamemoderun")))
+        # Not installed: nothing to switch on, but a switch left on can go off.
+        self.gamemode_row.setEnabled(
+            bool(state.get("always_gamemoderun") or available_commands().get("gamemoderun"))
+        )
         self.chime_row.set_checked(state.get("deck_finish_sound", True) is not False)
         self.rumble_row.set_checked(state.get("deck_finish_rumble", True) is not False)
         self.welcome_row.set_checked(not state.get("welcome_hidden", False))
-        self.steam_row.set_value(
-            tr("Adding...") if self._steam_task is not None else ""
+        self.live_animation_row.set_checked(state.get("live_animation", True) is not False)
+        live_time = state.get("live_time", "")
+        self.live_time_row.set_value(
+            next((tr(label) for value, label in LIVE_TIME_CHOICES if value == live_time), "")
         )
+        # Only the Live themes animate and follow the clock.
+        for row in (self.live_animation_row, self.live_time_row):
+            row.setVisible(theme in ("winter", "redforest"))
+        self.lights_row.set_checked(state.get("christmas_lights", True) is not False)
+        self.lights_row.setVisible(theme == "winter")
+        options = state.get("custom_launch_options") or ""
+        for row, option in self.option_rows:
+            row.set_checked(launch_options.is_on(options, option))
+            # Co-op leaves "No Steam overlay" out (see coop_shortcut_fields).
+            if option == launch_options.NO_STEAM_OVERLAY:
+                profile = self.profile()
+                row.setEnabled(profile is None or not coop.is_active(profile.anomaly))
+        self.steam_row.set_value(
+            tr("Adding") if self._steam_task is not None else ""
+        )
+        profile = self.profile()
+        self.threads_row.setVisible(profile is not None)
+        if profile is not None:
+            self.threads_row.set_value(
+                next(
+                    (tr(label) for value, label in _THREADS if value == profile.download_threads),
+                    str(profile.download_threads),
+                )
+            )
+        self._render_build()
+
+    # -- COMMANDER build --------------------------------------------------
+    def _render_build(self) -> None:
+        if not self._appimage:
+            return
+        unstable = is_unstable_version(__version__)
+        self.build_row.set_value(tr("Unstable") if unstable else tr("Stable"))
+        if unstable:
+            note = tr("You're on an unstable build: new features sooner, less tested. Going back installs the latest stable release.")
+        elif self._unstable_offer:
+            note = tr(
+                "Unstable build {tag} is available: new features sooner, less "
+                "tested. You can go back to the stable build at any time.",
+                tag=self._unstable_offer.removeprefix("v"),
+            )
+        elif self._unstable_task is None and not getattr(self, "_unstable_checked", False):
+            note = tr("Checking for an unstable build")
+            self._unstable_task = BackgroundTask(newer_unstable_tag, __version__, parent=self)
+            self._unstable_task.result.connect(self._unstable_found)
+            self._unstable_task.error.connect(lambda _m: self._unstable_found(None))
+            self._unstable_task.start()
+        elif self._unstable_task is not None:
+            note = tr("Checking for an unstable build")
+        else:
+            note = tr("There's no unstable build newer than the stable one right now.")
+        self.build_note.setText(note)
+
+    def _unstable_found(self, tag: object) -> None:
+        self._unstable_task = None
+        self._unstable_checked = True
+        self._unstable_offer = tag if isinstance(tag, str) and tag else None
+        self._render_build()
+
+    def _switch_build(self) -> None:
+        if is_unstable_version(__version__):
+            self.window.switch_commander_build("stable")
+        elif self._unstable_offer:
+            self.window.switch_commander_build("unstable", self._unstable_offer)
+        else:
+            self.window.notify(self.build_note.text(), 5000)
 
     # -- theme ------------------------------------------------------------
     # Switching one of these on plays what it will do, so the choice is
@@ -208,13 +369,39 @@ class SettingsScreen(DeckScreen):
         if on:
             play_click_sound()
 
+    def _toggle_lights(self, on: bool) -> None:
+        gui_settings.save_gui_settings(christmas_lights=bool(on))
+        self.window.sync_animations()
+
+    def _toggle_live_animation(self, on: bool) -> None:
+        gui_settings.save_gui_settings(live_animation=bool(on))
+        self.window.sync_animations()
+
+    def _toggle_launch_option(self, option: str, on: bool) -> None:
+        options = gui_settings.load_gui_settings().get("custom_launch_options") or ""
+        options = launch_options.toggle(options, option, on)
+        gui_settings.save_gui_settings(custom_launch_options=options)
+        # One switch can turn another off (Quiet Wine logs and Proton log).
+        for row, other in self.option_rows:
+            row.set_checked(launch_options.is_on(options, other))
+
     def _toggle_rumble(self, on: bool) -> None:
         gui_settings.save_gui_settings(deck_finish_rumble=bool(on))
         if on:
             self.window.gamepad.rumble(strength=0.55, length_ms=300)
 
+    def _game_holds_look(self) -> bool:
+        """The overlay read the look when the game started: changing it now
+        would leave the two different, as the desktop UI refuses too."""
+        if game_running() or self.window.session_active():
+            self.window.notify(tr("Close the game first"))
+            return True
+        return False
+
     def _pick_theme(self) -> None:
-        current = gui_settings.load_gui_settings().get("theme") or "gamma"
+        if self._game_holds_look():
+            return
+        current = gui_settings.load_gui_settings().get("theme") or "black"
         picker = DeckPicker(
             "",
             [(label, key) for key, label, _d, _s in THEME_INFO],
@@ -228,6 +415,23 @@ class SettingsScreen(DeckScreen):
         gui_settings.save_gui_settings(theme=str(key))
         # Theme is pure QSS plus a palette, so it takes effect immediately -
         # no widget rebuild needed, unlike a language change.
+        self.window.apply_style()
+        self.refresh()
+
+    def _pick_live_time(self) -> None:
+        if self._game_holds_look():
+            return
+        picker = DeckPicker(
+            "",
+            [(tr(label), value) for value, label in LIVE_TIME_CHOICES],
+            gui_settings.load_gui_settings().get("live_time", ""),
+        )
+        picker.chosen.connect(self._apply_live_time)
+        self.window.show_overlay(self._overlay_for(picker, tr("Live theme time of day")))
+
+    def _apply_live_time(self, value: object) -> None:
+        self.window.dismiss_overlay()
+        gui_settings.save_gui_settings(live_time=str(value))
         self.window.apply_style()
         self.refresh()
 
@@ -269,8 +473,8 @@ class SettingsScreen(DeckScreen):
         if self.window.install_busy:
             self.window.notify(tr("An install is already running."))
             return True
-        if mo2_running() or self.window.session_active():
-            self.window.notify(tr("Mod Organizer is running"))
+        if game_running(force=True) or self.window.session_active():
+            self.window.notify(tr("Close the game first"))
             return True
         return False
 
@@ -290,6 +494,33 @@ class SettingsScreen(DeckScreen):
         )
         self.refresh()
 
+    # -- download threads -------------------------------------------------
+    def _pick_threads(self) -> None:
+        profile = self.profile()
+        if profile is None:
+            return
+        picker = DeckPicker("", [(tr(label), value) for value, label in _THREADS], profile.download_threads)
+        picker.chosen.connect(self._apply_threads)
+        self.window.show_overlay(self._overlay_for(picker, tr("Download threads")))
+
+    def _apply_threads(self, value: object) -> None:
+        self.window.dismiss_overlay()
+        profile = self.profile()
+        if profile is None or profile.download_threads == value:
+            return
+        if self.window.install_busy:
+            # A running install already read the old value.
+            self.window.notify(tr("An install is already running."))
+            return
+        old = profile.download_threads
+        profile.download_threads = int(value)
+        try:
+            self.window.settings.save()
+        except OSError as exc:
+            profile.download_threads = old
+            self.window.notify(tr("Could not write settings.json:\n{exc}", exc=exc), 8000)
+        self.refresh()
+
     # -- startup ----------------------------------------------------------
     def _pick_start_screen(self) -> None:
         current = gui_settings.load_gui_settings().get("deck_start_screen") or "play"
@@ -300,6 +531,18 @@ class SettingsScreen(DeckScreen):
     def _apply_start_screen(self, key: object) -> None:
         self.window.dismiss_overlay()
         gui_settings.save_gui_settings(deck_start_screen=str(key))
+        self.refresh()
+
+    def _pick_overlay_shortcut(self) -> None:
+        current = gui_settings.load_gui_settings().get("deck_overlay_shortcut") or "l4r4"
+        picker = DeckPicker("", [(tr(label), key) for label, key in _OVERLAY_SHORTCUTS], current)
+        picker.chosen.connect(self._apply_overlay_shortcut)
+        self.window.show_overlay(self._overlay_for(picker, tr("In-game overlay shortcut")))
+
+    def _apply_overlay_shortcut(self, key: object) -> None:
+        self.window.dismiss_overlay()
+        gui_settings.save_gui_settings(deck_overlay_shortcut=str(key))
+        self.window.apply_overlay_shortcut()
         self.refresh()
 
     def _apply_startup(self, key: object) -> None:
@@ -360,7 +603,7 @@ class SettingsScreen(DeckScreen):
         self._steam_task.error.connect(self._steam_done)
         self._steam_task.start()
         self.window.notify(
-            tr("Restarting Steam...") if restart else tr("Adding..."), 0
+            tr("Restarting Steam") if restart else tr("Adding"), 0
         )
         self.refresh()
 

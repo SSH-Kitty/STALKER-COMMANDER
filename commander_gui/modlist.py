@@ -7,23 +7,22 @@ allowing per-mod status changes and deletion.
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 from datetime import datetime
 from itertools import pairwise
 from pathlib import Path
 
-from .atomic import write_text
+from .atomic import split_lines, write_bytes, write_text
+
+#: Path separators and control characters - one regex search instead of a
+#: per-character loop, which made parsing a ~1000-line modlist slow.
+_BAD_NAME_CHARS = re.compile(r"[/\\\x00-\x1f\x7f]")
 
 
 def _valid_name(name: str) -> bool:
-    return (
-        bool(name)
-        and name not in {".", ".."}
-        and "/" not in name
-        and "\\" not in name
-        and not any(ord(char) < 32 or ord(char) == 127 for char in name)
-    )
+    return bool(name) and name not in {".", ".."} and not _BAD_NAME_CHARS.search(name)
 
 
 def _reject_status_prefix(name: str) -> None:
@@ -40,7 +39,7 @@ def read_lines(path: str | Path) -> list[str]:
         # Strict decode: silently replacing invalid bytes with U+FFFD would
         # permanently corrupt a non-UTF-8 mod name (e.g. a legacy Latin-1
         # modlist.txt) the moment this file is next saved.
-        return path.read_text(encoding="utf-8-sig").splitlines()
+        return split_lines(path.read_text(encoding="utf-8-sig"))
     except UnicodeDecodeError as exc:
         raise ValueError(
             f"{path} is not valid UTF-8 ({exc}). Fix the file's encoding "
@@ -176,11 +175,12 @@ def count_mods(lines: list[str], mods_dir: str | Path | None = None) -> tuple[in
     """
     total = enabled = 0
     seen: set[str] = set()
-    base = Path(mods_dir) if mods_dir is not None else None
+    # One directory listing instead of a stat per mod.
+    folders = _mod_folders(mods_dir) if mods_dir is not None else None
     for status, name in entries(lines):
         if separator_name(name) is not None:
             continue
-        if base is not None and not (base / name).is_dir():
+        if folders is not None and name not in folders:
             continue
         if name in seen:
             continue
@@ -189,6 +189,15 @@ def count_mods(lines: list[str], mods_dir: str | Path | None = None) -> tuple[in
         if status == "Enabled":
             enabled += 1
     return enabled, total
+
+
+def _mod_folders(mods_dir: str | Path) -> set[str]:
+    """Names of the folders (or links to folders) in ``mods_dir``."""
+    try:
+        with os.scandir(mods_dir) as it:
+            return {entry.name for entry in it if entry.is_dir()}
+    except OSError:
+        return set()
 
 
 #: Only these top-level subfolders of a mod are actually virtualized into
@@ -430,31 +439,6 @@ def reorder_to_original(lines: list[str], original: list[str]) -> list[str]:
     return out
 
 
-def rename_mod(lines: list[str], old_name: str, new_name: str) -> list[str]:
-    """Rename a mod in the modlist without touching its folder on disk.
-
-    Keeps the mod's enabled/disabled status.  Raises ``ValueError`` if the new
-    name is invalid, duplicates an existing entry, or would turn the entry into
-    an MO2 separator.  Returns the original list when the mod is not found.
-    """
-    if not _valid_name(new_name):
-        raise ValueError("Mod names cannot contain path separators or control characters")
-    _reject_status_prefix(new_name)
-    if new_name.endswith("_separator"):
-        raise ValueError("A mod name cannot end in '_separator'")
-    if new_name == old_name:
-        return list(lines)
-    if any(mod_name == new_name for _, mod_name in entries(lines)):
-        raise ValueError(f"Mod {new_name!r} is already in the modlist")
-    out = list(lines)
-    for index, line in enumerate(out):
-        info = _line_info(line)
-        if info is not None and info[1] == old_name:
-            prefix = "+" if info[0] == "Enabled" else "-"
-            out[index] = f"{prefix}{new_name}"
-    return out
-
-
 def save_lines(path: str | Path, lines: list[str]) -> None:
     """Write the modlist atomically.
 
@@ -605,7 +589,7 @@ def seed_new_mo2_profile(
         dest_file = dest_dir / name
         if src_file.is_file() and (replace or not dest_file.exists()):
             try:
-                shutil.copy2(src_file, dest_file)
+                write_bytes(dest_file, src_file.read_bytes())
             except OSError:
                 pass
     return True
@@ -946,6 +930,53 @@ def backup_before_change(modlist: Path) -> None:
     backup = modlist.with_name(modlist.name + BACKUP_SUFFIX)
     if not backup.exists():
         shutil.copy2(modlist, backup)
+    snapshot_modlist_backup(modlist)
+
+
+def enabled_mod_count(lines: list[str]) -> int:
+    """Enabled mods in ``lines``, separators not counted."""
+    return sum(
+        1
+        for status, name in entries(lines)
+        if status == "Enabled" and separator_name(name) is None
+    )
+
+
+def _backups_newest_first(modlist: Path) -> list[Path]:
+    def _mtime(path: Path) -> float:
+        try:
+            return path.stat().st_mtime
+        except OSError:
+            return 0.0
+
+    found = [p for p in modlist.parent.glob(f"{modlist.stem}-*.bak") if p.is_file()]
+    pristine = modlist.with_name(modlist.name + BACKUP_SUFFIX)
+    if pristine.is_file():
+        found.append(pristine)
+    return sorted(found, key=_mtime, reverse=True)
+
+
+def newest_backup_with_mods(modlist: Path) -> Path | None:
+    """The newest backup of ``modlist`` that has at least one mod enabled.
+
+    What to offer when modlist.txt comes back with every mod switched off -
+    reported after a PC crash mid-game: Mod Organizer found its list empty
+    or cut short and rewrote it with every mod disabled.
+    """
+    for backup in _backups_newest_first(modlist):
+        try:
+            if enabled_mod_count(read_lines(backup)):
+                return backup
+        except (OSError, ValueError):
+            continue
+    return None
+
+
+def snapshot_if_changed(modlist: Path) -> None:
+    """Take a timestamped backup unless the newest one already matches."""
+    backups = [p for p in _backups_newest_first(modlist) if p.stem.startswith(f"{modlist.stem}-")]
+    if backups and backups[0].read_bytes() == modlist.read_bytes():
+        return
     snapshot_modlist_backup(modlist)
 
 
@@ -1301,3 +1332,83 @@ def custom_mod_names(lines: list[str]) -> set[str]:
         if name.strip().lower() == _CUSTOM_MODS_CATEGORY:
             return {mod_name for _status, mod_name, _idx in mods}
     return set()
+
+
+def merge_after_update(
+    old: list[str],
+    new: list[str],
+    *,
+    official_before: set[str],
+    mods_dir: str | Path,
+) -> list[str]:
+    """Carry the user's own choices from *old* into the CLI-written *new* list.
+
+    ``update apply`` and ``full-install`` replace modlist.txt with GAMMA's
+    stock list, which drops every mod the user installed themselves and
+    resets every enable/disable choice. This puts both back:
+
+    * A mod in both lists gets its old enabled state back. GAMMA folder
+      names start with a list counter that shifts between versions, so the
+      match ignores that counter (and is skipped when it is ambiguous).
+    * A mod only in *old* is re-added with its old state when its folder is
+      still in *mods_dir* and it was not one of GAMMA's own mods before the
+      update (*official_before*: folder names from the pre-update modpack
+      list) - those were dropped or renamed on purpose. It goes back where
+      it was: right above the next entry that followed it in *old* and is
+      still in the list. A mod the user kept under "Custom Mods" goes back
+      there instead, since the CLI's list has no such category.
+
+    ponytail: the user's own separators are not carried over; a mod filed
+    under one lands next to the entry that followed that separator.
+    """
+    from .repair import _name_only
+
+    old_states: dict[str, list[bool]] = {}
+    for status, name in entries(old):
+        if separator_name(name) is None:
+            old_states.setdefault(_name_only(name), []).append(status == "Enabled")
+    out = list(new)
+    for index, line in enumerate(out):
+        info = _line_info(line)
+        if info is None or separator_name(info[1]) is not None:
+            continue
+        states = old_states.get(_name_only(info[1]), [])
+        if len(states) == 1:
+            out = set_status_at(out, index, states[0])
+    present = {_name_only(name) for _status, name in entries(out)}
+    official = {_name_only(name) for name in official_before}
+    mods = Path(mods_dir)
+    custom = custom_mod_names(old)
+    old_entries = entries(old)
+
+    def wanted(name: str) -> bool:
+        key = _name_only(name)
+        return (
+            separator_name(name) is None
+            and key not in present
+            and key not in official
+            and (mods / name).is_dir()
+        )
+
+    for status, name in old_entries:
+        if name in custom and wanted(name):
+            out = add_custom_mod(out, name, enabled=status == "Enabled")
+            present.add(_name_only(name))
+    # Bottom-up, so a mod re-added here can anchor the one above it.
+    for position in range(len(old_entries) - 1, -1, -1):
+        status, name = old_entries[position]
+        if not wanted(name):
+            continue
+        later = (_name_only(n) for _s, n in old_entries[position + 1 :])
+        anchor = next((k for k in later if k in present), None)
+        index = next(
+            (
+                i
+                for i, line in enumerate(out)
+                if (info := _line_info(line)) and _name_only(info[1]) == anchor
+            ),
+            len(out),
+        )
+        out.insert(index, ("+" if status == "Enabled" else "-") + name)
+        present.add(_name_only(name))
+    return out

@@ -12,17 +12,22 @@ timer and reports through signals, so the Play screen stays a layout.
 
 from __future__ import annotations
 
+import os
+import shlex
+import signal
 import time
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
-from commander_gui import gui_settings
+from commander_gui import applog, coop, gui_settings, launch_options
 from commander_gui.config import logs_dir
 from commander_gui.i18n import tr
 from commander_gui.launcher import (
-    LaunchError,
+    PTRACE_FIX_COMMAND,
     ProcessGroupRegistry,
+    anomaly_launcher_target,
+    available_commands,
     build_command,
     build_direct_command,
     default_launch_target,
@@ -31,14 +36,21 @@ from commander_gui.launcher import (
     kill_stray_debuggers,
     launch_detached,
     parse_mo2_executables,
+    ptrace_scope,
     read_log_tail,
     resolve_runner,
     runner_crash_loop,
     runner_graphics_error,
     runner_prefix_error,
+    runner_unsupported_error,
 )
-from commander_gui.ui.common import crash_dump_names, exe_pids, mo2_pids
-from commander_gui.ui.play_page import _CRASH_POLL_INTERVAL_MS, _CRASH_POLL_MAX_ATTEMPTS
+from commander_gui.ui import game_splash
+from commander_gui.ui.common import BackgroundTask, crash_dump_names, exe_pids, mo2_pids
+from commander_gui.ui.play_page import (
+    _CRASH_POLL_INTERVAL_MS,
+    _CRASH_POLL_MAX_ATTEMPTS,
+    engine_log_summary,
+)
 
 #: How often the launch watchdog looks at the log and the process table:
 #: fast while the game is starting (a crash loop must be caught within
@@ -60,7 +72,7 @@ def runner_options() -> list[tuple[str, str]]:
     a choice made in either interface means the same thing in the other.
     """
     options: list[tuple[str, str]] = [
-        (tr("Auto-detect (latest GE-Proton)"), "auto")
+        (tr("Auto-detect (installed Proton-GE)"), "auto")
     ]
     for label, path in find_extra_protons():
         options.append((tr("{label} (Installed)", label=label), f"umup:{path}"))
@@ -75,6 +87,53 @@ def runner_label(kind: str) -> str:
     if kind.startswith(("umup:", "proton:")):
         return Path(kind.split(":", 1)[1]).name
     return kind
+
+
+def _prepare_launch(profile, kind, prefix, target, direct, watch_exe, arguments) -> dict:
+    """The disk-bound half of a launch, run on a worker thread."""
+    runner = resolve_runner(kind, prefix)
+    if gui_settings.load_gui_settings().get("always_gamemoderun"):
+        # Settings' Always use GameMode, as the desktop Play page applies it.
+        gamemoderun = available_commands().get("gamemoderun")
+        if gamemoderun and (not runner.wrapper or runner.wrapper[0] != gamemoderun):
+            runner.wrapper.insert(0, gamemoderun)
+    if direct is not None:
+        command, env, cwd = build_direct_command(direct, runner)
+    else:
+        command, env, cwd = build_command(
+            profile.gamma,
+            runner,
+            target=target or None,
+            profile=profile.mo2_profile or None,
+            arguments=arguments,
+        )
+    # The same launch options the desktop Play page edits; co-op keeps the
+    # Steam overlay (a launch here is co-op whenever co-op is on).
+    options = gui_settings.load_gui_settings().get("custom_launch_options") or ""
+    if coop.is_active(profile.anomaly):
+        options = launch_options.for_coop(options)
+    if direct is None:
+        try:
+            coop.prepare_launch(profile.anomaly, profile.gamma, profile.mo2_profile)
+        except (OSError, coop.CoopError):
+            pass  # MO2 shows its own error then.
+    if direct is None and not target and "%command%" in (tokens := launch_options.split(options)):
+        # MO2 on its own: no game to hand the words after %command% to,
+        # and MO2 quits on a word it doesn't know.
+        options = shlex.join(tokens[: tokens.index("%command%") + 1])
+    command = launch_options.apply(command, env, options)
+    ensure_runner_prefix(runner)
+    return {
+        "runner_env": dict(runner.env),
+        "command": command,
+        "env": env,
+        "cwd": cwd,
+        "watch_exe": watch_exe,
+        "splash": arguments is not None,
+        "pre_pids": exe_pids(watch_exe) if watch_exe else set(),
+        "pre_mo2": mo2_pids(),
+        "crash_baseline": crash_dump_names(profile.anomaly) if profile.anomaly else set(),
+    }
 
 
 class DeckLaunchController(QObject):
@@ -110,12 +169,17 @@ class DeckLaunchController(QObject):
         # own executable for exactly this reason.
         self._watch_exe: str | None = None
         self._pre_launch_pids: set[int] = set()
+        self._pre_launch_mo2: set[int] = set()
+        #: The launch being prepared on a worker thread, if any.
+        self._launch_task: BackgroundTask | None = None
         #: True for Open MO2 (Mod Organizer's own window, no game target):
         #: the session is MO2 itself, so the screen says so instead of
         #: "Quit Game".
         self._mo2_only = False
         #: The launched runner's environment, to find its prefix's winedbg.
         self._runner_env: dict[str, str] = {}
+        #: The session was started by Steam (co-op shortcut), not by us.
+        self._steam_launch = False
         #: Crash dumps that already existed at launch, and the bounded poll
         #: that looks for a new one after the session ends (X-Ray can take
         #: tens of seconds to finish writing it).
@@ -126,6 +190,8 @@ class DeckLaunchController(QObject):
         self._crash_timer.setSingleShot(True)
         self._crash_timer.setInterval(_CRASH_POLL_INTERVAL_MS)
         self._crash_timer.timeout.connect(self._poll_crash)
+        #: COMMANDER's splash process for a co-op launch (see game_splash).
+        self._splash = None
 
     def is_active(self) -> bool:
         return self._active
@@ -154,6 +220,18 @@ class DeckLaunchController(QObject):
             return
         seen = self._game_seen
         elapsed = self.session_seconds()
+        if self._steam_launch:
+            # Steam's reaper owns the process group, and killing that group
+            # could take Steam's own helpers with it - only this launch's
+            # MO2 and game processes go (same as the desktop Play page).
+            pids = mo2_pids() - self._pre_launch_mo2
+            if self._watch_exe:
+                pids |= exe_pids(self._watch_exe) - self._pre_launch_pids
+            for pid in pids:
+                try:
+                    os.kill(pid, signal.SIGTERM)
+                except OSError:
+                    pass
         self._registry.cleanup_all()
         self._kill_stray_debuggers()
         self._stop_watching()
@@ -166,7 +244,32 @@ class DeckLaunchController(QObject):
         """Start the game. ``direct`` bypasses MO2 with an Mo2Executable."""
         if self._active:
             return
+        # Co-op on means co-op only (the engine on disk is co-op's), off
+        # means single-player only. A launch here follows the installed
+        # mode; the Multiplayer screen is where it is changed.
+        reason = coop.launch_block_reason(
+            profile.anomaly, coop_launch=coop.is_active(profile.anomaly), direct=direct is not None
+        )
+        if reason:
+            self.failed.emit(tr("Couldn't start the game"), tr(reason))
+            return
+        scope = ptrace_scope()
+        if direct is None and scope >= 2:
+            self.failed.emit(
+                tr("A Linux setting is blocking GAMMA"),
+                tr(
+                    "A security setting on your computer (ptrace_scope = {scope}) stops Mod Organizer "
+                    "from loading GAMMA's mods, so the game can't start. Setting it to 1 fixes this.",
+                    scope=scope,
+                )
+                + "\n\n"
+                + tr("Open a terminal, run this command, then restart your computer:")
+                + "\n"
+                + PTRACE_FIX_COMMAND,
+            )
+            return
         self._crash_timer.stop()
+        self._steam_launch = False
         state = gui_settings.load_gui_settings()
         kind = state.get("runner") or "auto"
         # The raw saved prefix, as the desktop Play page passes it. Not
@@ -177,60 +280,108 @@ class DeckLaunchController(QObject):
 
         # Set before _set_active(), whose state_changed the screen labels from.
         self._mo2_only = direct is None and not target
-        # Announce before the synchronous work below: resolving a runner and
-        # creating a Wine prefix touch the disk, and on a Deck's storage that
-        # is long enough to look like a freeze if nothing has been said yet.
+        # Active from here, so a second press can't start a second launch
+        # while the first is still being prepared.
         self._set_active(True)
-        self.status.emit(tr("Starting..."))
+        name = direct.title if direct is not None else target or "Mod Organizer 2"
+        self.status.emit(tr("Launching {name}", name=name))
 
+        # Resolving the runner, checking its prefix and listing processes
+        # touch the disk: off the GUI thread, so the screen keeps painting
+        # (and says "Launching") on slow Deck storage.
+        if direct is not None:
+            watch_exe = Path(direct.binary).name if direct.binary else None
+        else:
+            watch_exe = self._target_exe_name(profile, target)
+        if direct is None:
+            arguments = self._splash_arguments(profile, target)
+        else:
+            # Plain Anomaly co-op runs the game with the no-splash switch
+            # (Multiplayer.start_coop), so ours stands in for the engine's.
+            arguments = direct.arguments if game_splash.SPLASH_FLAG in direct.arguments.split() else None
+        task = BackgroundTask(
+            _prepare_launch, profile, kind, prefix, target, direct, watch_exe, arguments,
+            parent=self,
+        )
+        self._launch_task = task
+        task.result.connect(lambda prepared, task=task: self._start_prepared(task, profile, prepared))
+        task.error.connect(lambda message, task=task: self._launch_failed(task, message))
+        task.start()
+
+    def track_steam_session(self, profile, target: str) -> None:
+        """Watch a co-op session Steam was just asked to start.
+
+        Nothing of ours is spawned (Steam runs the co-op shortcut), so the
+        session is followed by process name only, and launcher.log - which
+        this launch never writes - is not read for a diagnosis.
+        """
+        if self._active:
+            return
+        self._crash_timer.stop()
+        self._steam_launch = True
+        self._mo2_only = False
+        plain = coop.install_kind(profile.anomaly) == coop.KIND_ANOMALY
+        # Plain Anomaly: Steam runs the game exe AnomalyLauncher.cfg picks
+        # (play_page.plain_game_exe); any renderer's exe ("AnomalyDX...") is the session.
+        self._watch_exe = "AnomalyDX" if plain else self._target_exe_name(profile, target)
+        self._pre_launch_pids = exe_pids(self._watch_exe) if self._watch_exe else set()
+        self._pre_launch_mo2 = mo2_pids()
+        self._anomaly = profile.anomaly or ""
+        self._crash_baseline = crash_dump_names(profile.anomaly) if profile.anomaly else set()
+        self._runner_env = {}
+        self._profile_name = profile.profile_name or ""
+        self._started_at = time.time()
+        self._game_started_at = 0.0
+        self._game_seen = False
+        self._set_active(True)
+        self.status.emit(tr("Starting Anomaly through Steam") if plain else tr("Starting GAMMA through Steam"))
+        # Plain Anomaly's shortcut hides the engine's splash too (coop_shortcut_fields).
+        if plain or self._splash_arguments(profile, target) is not None:
+            self._start_splash(profile)
+        self._timer.setInterval(_POLL_MS)
+        self._timer.start()
+
+    def _launch_failed(self, task, message: str) -> None:
+        if task is not self._launch_task:
+            return  # stopped meanwhile
+        self._launch_task = None
+        self._set_active(False)
+        self.failed.emit(tr("Couldn't start the game"), message)
+
+    def _start_prepared(self, task, profile, prepared: dict) -> None:
+        if task is not self._launch_task:
+            return  # stopped meanwhile: never start the game after that
+        self._launch_task = None
+        self._runner_env = prepared["runner_env"]
+        self._watch_exe = prepared["watch_exe"]
+        # Anything already running under these names belongs to an earlier
+        # session (or the desktop instance) and must not be mistaken for the
+        # one starting now.
+        self._pre_launch_pids = prepared["pre_pids"]
+        self._pre_launch_mo2 = prepared["pre_mo2"]
+        self._anomaly = profile.anomaly or ""
+        self._crash_baseline = prepared["crash_baseline"]
         try:
-            runner = resolve_runner(kind, prefix)
-            self._runner_env = dict(runner.env)
-            if direct is not None:
-                command, env, cwd = build_direct_command(direct, runner)
-                self._watch_exe = Path(direct.binary).name if direct.binary else None
-            else:
-                self._watch_exe = self._target_exe_name(profile, target)
-                command, env, cwd = build_command(
-                    profile.gamma,
-                    runner,
-                    target=target or None,
-                    profile=profile.mo2_profile or None,
-                )
-            ensure_runner_prefix(runner)
-            # Anything already running under this name belongs to an earlier
-            # session and must not be mistaken for the one starting now.
-            self._pre_launch_pids = (
-                exe_pids(self._watch_exe) if self._watch_exe else set()
-            )
-            self._anomaly = profile.anomaly or ""
-            self._crash_baseline = crash_dump_names(self._anomaly) if self._anomaly else set()
             launch_detached(
-                command,
-                env,
-                cwd,
+                prepared["command"],
+                prepared["env"],
+                prepared["cwd"],
                 log_path=self._log_path,
                 registry=self._registry,
             )
-        except LaunchError as exc:
-            self._set_active(False)
-            self.failed.emit(tr("Launch Failed"), str(exc))
-            return
-        except OSError as exc:
-            self._set_active(False)
-            self.failed.emit(tr("Launch Failed"), str(exc))
-            return
         except Exception as exc:  # noqa: BLE001 - never leave the session stuck "active"
             self._set_active(False)
-            self.failed.emit(tr("Launch Failed"), str(exc))
+            self.failed.emit(tr("Couldn't start the game"), str(exc))
             return
+        if prepared["splash"]:
+            self._start_splash(profile)
 
         self._profile_name = profile.profile_name or ""
         self._started_at = time.time()
         self._game_started_at = 0.0
         self._game_seen = False
         self._timer.setInterval(_POLL_MS)
-        self.status.emit(tr("Waiting for Mod Organizer..."))
+        self.status.emit(tr("Waiting for Mod Organizer 2 to open"))
         self._timer.start()
 
     def _target_exe_name(self, profile, target: str | None) -> str | None:
@@ -242,13 +393,38 @@ class DeckLaunchController(QObject):
                 return Path(executable.binary).name
         return None
 
+    def _splash_arguments(self, profile, target: str | None) -> str | None:
+        """The target's arguments plus the engine's no-splash switch, for a
+        co-op launch of the game itself (see game_splash)."""
+        if not target or not coop.is_active(profile.anomaly):
+            return None
+        exe = next((e for e in parse_mo2_executables(profile.gamma) if e.title == target), None)
+        return game_splash.splash_arguments(exe)
+
+    def _start_splash(self, profile) -> None:
+        self._close_splash()
+        try:
+            self._splash = game_splash.start(profile.anomaly, profile.gamma)
+        except OSError:
+            self._splash = None  # cosmetic; the launch goes on without it
+
+    def _close_splash(self) -> None:
+        if self._splash is not None:
+            if self._splash.poll() is None:
+                self._splash.terminate()
+            self._splash = None
+
     def targets(self, profile) -> tuple[list[str], str]:
         """Launch target titles from ModOrganizer.ini, and the default one."""
-        titles = [exe.title for exe in parse_mo2_executables(profile.gamma)]
-        return titles, default_launch_target(titles)
+        titles = [exe.title for exe in self.executables(profile)]
+        saved = gui_settings.load_gui_settings().get("target") or ""
+        return titles, default_launch_target(titles, profile.gamma, saved)
 
     def executables(self, profile):
-        return parse_mo2_executables(profile.gamma)
+        """MO2's launch targets, or plain Anomaly's launcher without MO2."""
+        found = parse_mo2_executables(profile.gamma)
+        launcher = None if found else anomaly_launcher_target(profile.anomaly)
+        return [launcher] if launcher is not None else found
 
     # -- watchdog ---------------------------------------------------------
     def _poll(self) -> None:
@@ -259,12 +435,12 @@ class DeckLaunchController(QObject):
         # process faults too. Left alone that exhausts memory in about two
         # minutes and freezes the machine, so it is checked on every tick
         # and killed the moment it is recognisable.
-        if runner_crash_loop(read_log_tail(self._log_path)):
+        if not self._steam_launch and runner_crash_loop(read_log_tail(self._log_path)):
             self._registry.cleanup_all()
             self._kill_stray_debuggers()
             self._stop_watching()
             self.failed.emit(
-                tr("Launch Failed"),
+                tr("Couldn't start the game"),
                 tr(
                     "Wine crashed repeatedly while starting Mod Organizer, and "
                     "COMMANDER stopped it before it could exhaust memory. This "
@@ -279,7 +455,7 @@ class DeckLaunchController(QObject):
             running = bool(exe_pids(self._watch_exe) - self._pre_launch_pids)
         else:
             # Launching MO2 itself: MO2's own window is the session.
-            running = bool(mo2_pids())
+            running = bool(mo2_pids() - self._pre_launch_mo2)
         if running:
             if not self._game_seen:
                 self._game_seen = True
@@ -287,7 +463,7 @@ class DeckLaunchController(QObject):
                 self._timer.setInterval(_RUNNING_POLL_MS)
             self.status.emit(tr("Running"))
             return
-        if not self._game_seen and mo2_pids():
+        if not self._game_seen and mo2_pids() - self._pre_launch_mo2:
             # MO2 is up and about to hand off to the game. The runner clearly
             # works, so nothing below needs to diagnose a failure yet.
             self.status.emit(tr("Mod Organizer is running"))
@@ -300,12 +476,18 @@ class DeckLaunchController(QObject):
 
         if elapsed < 6.0:
             return  # still starting up
+        if self._steam_launch:
+            # Steam may restart first; no log of ours to diagnose from.
+            if elapsed > _WATCH_TIMEOUT_S:
+                self._stop_watching()
+                self.status.emit(tr("Ready"))
+            return
 
         log = read_log_tail(self._log_path)
         if runner_prefix_error(log):
             self._stop_watching()
             self.failed.emit(
-                tr("Launch Failed"),
+                tr("Couldn't start the game"),
                 tr(
                     "The selected runner could not use this Wine prefix. "
                     "Pick a different runner, or let the full interface "
@@ -316,10 +498,21 @@ class DeckLaunchController(QObject):
         if runner_graphics_error(log):
             self._stop_watching()
             self.failed.emit(
-                tr("Launch Failed"),
+                tr("Couldn't start the game"),
                 tr(
                     "The game could not start its graphics backend. Check "
                     "the Vulkan entries on the System screen."
+                ),
+            )
+            return
+        if runner_unsupported_error(log):
+            self._stop_watching()
+            self.failed.emit(
+                tr("This runner can't run the game"),
+                tr(
+                    "The selected runner is missing something the game needs, "
+                    "so it stopped right away. Pick an older Proton-GE in "
+                    "Settings and try again."
                 ),
             )
             return
@@ -333,6 +526,9 @@ class DeckLaunchController(QObject):
         self.status.emit(tr("Ready"))
         # Only a natural exit: a Force Stop is the user's own doing.
         if self._anomaly:
+            applog.get_logger().info(
+                "deck: engine log %s", engine_log_summary(self._anomaly, self._game_started_at - 60)
+            )
             self._crash_attempts_left = _CRASH_POLL_MAX_ATTEMPTS
             self._poll_crash()
 
@@ -370,7 +566,10 @@ class DeckLaunchController(QObject):
         kill_stray_debuggers(self._runner_env)
 
     def _stop_watching(self) -> None:
+        self._close_splash()
         self._timer.stop()
+        # A launch still being prepared must not start after a stop.
+        self._launch_task = None
         self._set_active(False)
 
     def _set_active(self, active: bool) -> None:
@@ -380,5 +579,7 @@ class DeckLaunchController(QObject):
         self.state_changed.emit(active)
 
     def shutdown(self) -> None:
+        self._close_splash()
+        self._launch_task = None
         self._timer.stop()
         self._crash_timer.stop()

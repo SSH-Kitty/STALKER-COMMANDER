@@ -4,48 +4,58 @@ The check is performed GUI-side (see ``commander_gui.updates``) against the
 official modpack maker list and the raw GAMMA version marker, so it never hits
 the rate-limited GitHub API the bundled CLI depends on. Applying still shells
 out to ``update apply``, whose output is surfaced in the progress log.
+
+Layout follows the Multiplayer page: a status card (version tiles and one
+hero button that does the next step), then a tabbed card with the release
+notes, the per-addon changes and the update options.
 """
 
 from __future__ import annotations
 
+import re
 import shutil
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor, QTextDocument
+from PySide6.QtGui import QColor, QTextCursor
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QButtonGroup,
     QCheckBox,
-    QComboBox,
     QFrame,
-    QGridLayout,
     QHBoxLayout,
     QLabel,
-    QMessageBox,
     QPushButton,
     QScrollArea,
     QTableWidget,
     QTableWidgetItem,
-    QTextEdit,
+    QTextBrowser,
     QVBoxLayout,
     QWidget,
 )
 
-from ..cli_runner import cli_command
+from .. import gui_settings, modded_exes
+from ..atomic import write_bytes
+from ..cli_runner import cli_command, cli_resume_args
 from ..game_backup import backup_settings_before
 from ..integrity import invalidate_baseline
+from ..keep_state import capture, discard, restore
 from ..modlist import modlist_path_for
 from ..parsers import UpdateDiff
 from ..settings import cli_ok
 from ..updates import (
     UpdateStatus,
-    changelog_web_url,
+    adopt_modpack_list,
     check_updates,
     format_version,
+    new_releases,
     parse_patchnotes_sections,
+    release_title,
     status_summary,
 )
+from . import reflow
 from .common import (
     ACCENT,
     LIGHT_GREY,
@@ -56,21 +66,38 @@ from .common import (
     ProgressArea,
     clear_layout,
     free_space_bytes,
+    game_running,
     human_size,
     info_label,
+    install_hover_grow_text,
     make_card,
-    make_header_row,
-    mo2_running,
+    notice,
     notify_desktop,
-    open_url,
+    open_web_links,
+    play_click_sound,
     section_label,
+    set_hover_grow_text,
+    tint,
     tr,
+)
+from .dashboard import _TITLE_ROW_H, _card_title
+from .dialogs import MessageBox as QMessageBox
+from .exes_card import ModdedExesCard
+from .multiplayer_page import (
+    _columns,
+    _divider,
+    _hint,
+    _pills,
+    _section,
+    _Stat,
+    _tab,
+    confirm_singleplayer,
 )
 
 _STATUS_COLORS = {
-    "Added": OK_GREEN.name(),
-    "Modified": ACCENT.name(),
-    "Removed": WARN.name(),
+    "Added": OK_GREEN,
+    "Modified": ACCENT,  # read at use: follows the active theme
+    "Removed": WARN,
 }
 
 _STATUS_ICONS = {
@@ -85,78 +112,92 @@ _STATUS_ICONS = {
 #: is a coarse, skippable warning rather than a hard block.
 _LOW_DISK_SPACE_WARNING_BYTES = 5 * 1024**3
 
-#: Height of one expanded release's own notes body - Patchnotes.md holds
-#: the full release history (confirmed against the real file: 7 releases
-#: back to 0.9.1), and a single release's own section can run to
-#: thousands of words, so each body scrolls within a fixed height rather
-#: than growing the card to match whichever entry happens to be open.
-_RELEASE_BODY_HEIGHT = 320
+#: Releases listed under What's new (Patchnotes.md holds the whole history).
+_MAX_RELEASES = 8
+#: Tallest a release's notes get before they scroll inside their tile.
+_NOTES_MAX_HEIGHT = 440
+_TABLE_MAX_HEIGHT = 480
+
+_MD_IMAGE = re.compile(r"!\[[^\]]*\]\([^)]*\)")
+_MD_HEADING = re.compile(r"^[ \t]*#{1,6}[ \t]*", re.MULTILINE)
+
+
+def _notes_markdown(body: str) -> str:
+    """Patch notes for a QLabel: no remote images, headings at text size."""
+    return _MD_HEADING.sub("#### ", _MD_IMAGE.sub("", body)).strip()
 
 
 def _format_relative_time(checked_at: datetime) -> str:
-    """Render a UTC datetime as "just now"/"N minute(s) ago"/etc."""
+    """Render a UTC datetime as "just now"/"5 minutes ago"/"1 day ago"/etc."""
     seconds = (datetime.now(timezone.utc) - checked_at).total_seconds()
     if seconds < 60:
         return tr("just now")
     minutes = int(seconds // 60)
     if minutes < 60:
-        return tr("{minutes} minute(s) ago", minutes=minutes)
+        return tr("1 minute ago") if minutes == 1 else tr("{minutes} minutes ago", minutes=minutes)
     hours = minutes // 60
     if hours < 24:
-        return tr("{hours} hour(s) ago", hours=hours)
+        return tr("1 hour ago") if hours == 1 else tr("{hours} hours ago", hours=hours)
     days = hours // 24
-    return tr("{days} day(s) ago", days=days)
+    return tr("1 day ago") if days == 1 else tr("{days} days ago", days=days)
 
 
-class _ReleaseNotesSection(QWidget):
-    """One collapsible release's notes: a click-to-expand title, then its body.
+class _Release(QFrame):
+    """One release in What's new: title, badge, and notes that fold away."""
 
-    Patchnotes.md is the whole GAMMA release history, not just the
-    latest one - this renders each release as its own collapsed-by-
-    default entry (the caller expands the first/latest one) instead of
-    dumping every past release's full notes into view at once.
-    """
-
-    def __init__(
-        self, title: str, body: str, *, expanded: bool = False, parent=None
-    ) -> None:
-        super().__init__(parent)
+    def __init__(self, title: str, body: str, badge: str, *, opened: bool) -> None:
+        super().__init__()
+        self.setObjectName("statTile")
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(4)
-
-        self._title = title
-        self.toggle_button = QPushButton(self)
-        self.toggle_button.setObjectName("releaseNotesToggle")
-        self.toggle_button.setCheckable(True)
-        self.toggle_button.setChecked(expanded)
+        layout.setContentsMargins(16, 10, 16, 12)
+        layout.setSpacing(8)
+        header = QHBoxLayout()
+        header.setSpacing(10)
+        title_label = section_label(release_title(title), level=2)
+        title_label.setWordWrap(True)  # a long title wraps in a narrow window
+        header.addWidget(title_label, 1)
+        if badge:
+            chip = QLabel(badge)
+            chip.setObjectName("chip")
+            chip.setProperty("state", "ok")
+            header.addWidget(chip)
+        header.addStretch(1)
+        self.toggle_button = QPushButton()
+        self.toggle_button.setObjectName("pillButton")
+        self.toggle_button.setFixedHeight(_TITLE_ROW_H)
         self.toggle_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.toggle_button.toggled.connect(self._on_toggled)
-        layout.addWidget(self.toggle_button)
-
-        self.body = QTextEdit(self)
-        self.body.setReadOnly(True)
-        # Patch notes come from a repo the profile points at; render their
-        # Markdown but not raw HTML embedded in it (spoofed content, remote
-        # or local image loads).
-        self.body.document().setMarkdown(
-            body,
-            QTextDocument.MarkdownFeature.MarkdownDialectGitHub
-            | QTextDocument.MarkdownFeature.MarkdownNoHTML,
-        )
-        self.body.setFixedHeight(_RELEASE_BODY_HEIGHT)
-        self.body.setVisible(expanded)
+        self.toggle_button.clicked.connect(lambda: self.set_open(not self.body.isVisible()))
+        header.addWidget(self.toggle_button)
+        layout.addLayout(header)
+        # A browser, not a label: long notes scroll inside their tile instead
+        # of stretching the page, and paragraphs get room between them.
+        self.body = QTextBrowser()
+        # Notes come from the profile's repo URL: only http(s) links open.
+        open_web_links(self.body)
+        self.body.setFrameShape(QFrame.Shape.NoFrame)
+        self.body.setStyleSheet("background: transparent; border: none;")
+        self.body.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.body.setMarkdown(_notes_markdown(body) or tr("No patch notes."))
+        block = self.body.document().begin()
+        while block.isValid():
+            fmt = block.blockFormat()
+            fmt.setBottomMargin(6)
+            QTextCursor(block).setBlockFormat(fmt)
+            block = block.next()
         layout.addWidget(self.body)
+        self.set_open(opened)
 
-        self._update_toggle_text()
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        # As tall as the notes, up to a cap; past that they scroll.
+        document = self.body.document()
+        document.setTextWidth(self.body.viewport().width())
+        height = int(document.size().height()) + 8
+        self.body.setFixedHeight(min(height, _NOTES_MAX_HEIGHT))
 
-    def _update_toggle_text(self) -> None:
-        arrow = "▾" if self.toggle_button.isChecked() else "▸"
-        self.toggle_button.setText(f"{arrow}  {self._title}")
-
-    def _on_toggled(self, checked: bool) -> None:
-        self.body.setVisible(checked)
-        self._update_toggle_text()
+    def set_open(self, opened: bool) -> None:
+        self.body.setVisible(opened)
+        self.toggle_button.setText(tr("Hide notes") if opened else tr("Show notes"))
 
 
 class UpdatePage(QWidget):
@@ -167,14 +208,21 @@ class UpdatePage(QWidget):
         self._check_task: BackgroundTask | None = None
         self._apply_runner: CommandRunner | None = None
         self._diffs: list[UpdateDiff] = []
+        self._focus_changes = False  # open on Mod changes once the check reports them
         self._checking = False
         self._applying = False
+        self._up_to_date = False
+        #: No gamma/version.txt (GOG or hand-made install): one update syncs it.
+        self._needs_sync = False
+        self._filter = "All"
+        self._new_count = 0
         self._check_generation = 0
         #: In-memory only (not persisted) - the moment the "Last checked"
         #: label refers to; matches the existing ephemeral
         #: _check_generation pattern.
         self._last_checked_at: datetime | None = None
 
+        # Same frame as the Multiplayer page.
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         scroll = QScrollArea()
@@ -184,43 +232,193 @@ class UpdatePage(QWidget):
         content = QWidget()
         content.setObjectName("pageContent")
         root = QVBoxLayout(content)
-        root.setContentsMargins(24, 24, 24, 24)
+        root.setContentsMargins(32, 24, 32, 24)
         root.setSpacing(16)
         scroll.setWidget(content)
 
-        # ---------- available addon changes card (top) ----------
-        updates_card, updates_layout = make_card()
-        root.addWidget(updates_card)
+        root.addWidget(self._status_card())
+        root.addWidget(self._details_card())
+        root.addStretch(1)
 
-        # Title centered on its own row, rather than pinned to the left
-        # edge - the count/filter controls (only shown once there are
-        # actual diffs) get their own row below instead of crowding it.
-        updates_header = QHBoxLayout()
-        updates_header.addStretch(1)
-        updates_header.addWidget(section_label(tr("Available addon changes"), level=2))
-        updates_header.addStretch(1)
-        updates_layout.addLayout(updates_header)
+        self._render(UpdateStatus())
+        self._update_button_states()
 
-        controls_row = QHBoxLayout()
-        controls_row.addStretch(1)
+    # ---------------------------------------------------------- status card
+    def _status_card(self) -> QWidget:
+        card, layout = make_card()
+        layout.setSpacing(14)
+
+        header = QHBoxLayout()
+        header.setSpacing(12)
+        header.addWidget(_card_title(tr("GAMMA updates")))
+        header.addStretch(1)
+        self.status_pill = QLabel("")
+        self.status_pill.setObjectName("verifyPill")
+        header.addWidget(self.status_pill)
+        self.check_button = QPushButton(tr("Check for updates"))
+        self.check_button.setObjectName("pillButton")
+        self.check_button.setFixedHeight(_TITLE_ROW_H)
+        self.check_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.check_button.clicked.connect(self._check)
+        header.addWidget(self.check_button)
+        layout.addLayout(header)
+
+        status_row = QHBoxLayout()
+        status_row.setSpacing(10)
+        self.status_label = info_label(
+            tr("Open this page to check the active GAMMA installation."), wrap=False
+        )
+        status_row.addWidget(self.status_label, 0, Qt.AlignmentFlag.AlignVCenter)
+        self.status_separator = QFrame()
+        self.status_separator.setObjectName("installDivider")
+        self.status_separator.setFrameShape(QFrame.Shape.NoFrame)
+        self.status_separator.setFixedWidth(1)
+        self.status_separator.setFixedHeight(14)
+        # Shown once a check completes and last_checked_label has text.
+        self.status_separator.setVisible(False)
+        status_row.addWidget(self.status_separator, 0, Qt.AlignmentFlag.AlignVCenter)
+        self.last_checked_label = info_label("", wrap=False)
+        self.last_checked_label.setObjectName("dim")
+        status_row.addWidget(self.last_checked_label, 0, Qt.AlignmentFlag.AlignVCenter)
+        status_row.addStretch(1)
+        layout.addLayout(status_row)
+        # Why the mod list was rebuilt (GOG/manual install); long, so it wraps.
+        self.note_label = info_label("")
+        self.note_label.setVisible(False)
+        layout.addWidget(self.note_label)
+
+        tiles = reflow.row(12)
+        self.installed_stat = _Stat(tr("Installed version"))
+        self.latest_stat = _Stat(tr("Latest version"))
+        self.changes_stat = _Stat(tr("Mod changes"))
+        self.space_stat = _Stat(tr("Free space"))
+        self.space_stat.setToolTip(
+            tr("Free space on the drive with your download cache. Updates can need several GB.")
+        )
+        for tile in (self.installed_stat, self.latest_stat, self.changes_stat, self.space_stat):
+            tiles.addWidget(tile, 1)
+        layout.addLayout(tiles)
+
+        # The one next step, like Play and Multiplayer: install the updates,
+        # or say there's nothing to do.
+        self.apply_button = QPushButton(tr("Install updates"))
+        self.apply_button.setObjectName("hero")
+        install_hover_grow_text(self.apply_button, "hero_text")
+        self.apply_button.setEnabled(False)
+        # With nothing to install it stays green and checks again instead.
+        self.apply_button.clicked.connect(
+            lambda: self._apply()
+            if self._diffs or self._needs_sync or self._resume_args()
+            else self._check()
+        )
+        self.apply_button.clicked.connect(play_click_sound)
+        layout.addWidget(self.apply_button)
+
+        # show_table=False: a handful of addon updates, not a full install.
+        # The bar and Show Console appear only while an update runs (see
+        # _set_console_visible()).
+        self.apply_progress = ProgressArea(
+            show_table=False,
+            show_log=True,
+            log_max_height=180,
+        )
+        self.apply_progress.cancel_button.clicked.connect(self._cancel_apply)
+        layout.addWidget(self.apply_progress)
+        self._set_console_visible(False)
+        return card
+
+    # --------------------------------------------------------- details card
+    def _details_card(self) -> QWidget:
+        card, layout = make_card()
+        layout.setSpacing(14)
+        header = QHBoxLayout()
+        header.setSpacing(4)
+        self.tab_group = QButtonGroup(self)
+        self._pages: list[QWidget] = []
+        body = QVBoxLayout()
+        body.setSpacing(0)
+        for index, page in enumerate((self._options_tab(), self._notes_tab(), self._changes_tab())):
+            button = _tab("", "subTab")
+            self.tab_group.addButton(button, index)
+            header.addWidget(button)
+            body.addWidget(page)
+            self._pages.append(page)
+        self.tab_group.idClicked.connect(self._show_tab)
+        header.addStretch(1)
+        tabs = QVBoxLayout()
+        tabs.setSpacing(0)
+        tabs.addLayout(header)
+        tabs.addWidget(_divider())
+        layout.addLayout(tabs)
+        layout.addLayout(body)
+        self._set_tab_titles(0, 0)
+        self.tab_group.button(0).setChecked(True)
+        self._show_tab(0)
+        return card
+
+    def _set_tab_titles(self, new_count: int, change_count: int) -> None:
+        notes = tr("What's new")
+        changes = tr("Mod changes")
+        self.tab_group.button(0).setText(tr("Update options"))
+        self.tab_group.button(1).setText(f"{notes} ({new_count})" if new_count else notes)
+        self.tab_group.button(2).setText(f"{changes} ({change_count})" if change_count else changes)
+
+    def _show_changes_if_any(self) -> None:
+        if self._diffs:
+            self.tab_group.button(2).setChecked(True)
+            self._show_tab(2)
+
+    def _show_tab(self, index: int) -> None:
+        # Hidden pages take no room, so each tab is exactly as tall as it needs.
+        for i, page in enumerate(self._pages):
+            page.setVisible(i == index)
+
+    @staticmethod
+    def _page() -> tuple[QWidget, QVBoxLayout]:
+        widget = QWidget()
+        widget.setObjectName("panelTransparent")
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
+        return widget, layout
+
+    def _notes_tab(self) -> QWidget:
+        page, layout = self._page()
+        layout.addWidget(
+            _hint(tr("GAMMA's patch notes, newest first. Releases you haven't installed yet are marked New."))
+        )
+        self.releases_box = QVBoxLayout()
+        self.releases_box.setSpacing(10)
+        layout.addLayout(self.releases_box)
+        self._releases: list[_Release] = []
+        self.notes_empty = _hint(tr("Patch notes show here after the update check."))
+        layout.addWidget(self.notes_empty)
+        return page
+
+    def _changes_tab(self) -> QWidget:
+        page, layout = self._page()
+        controls = QHBoxLayout()
+        controls.setSpacing(12)
+        self._filter_buttons: dict[str, QPushButton] = {}
+        for kind, label in (
+            ("All", tr("All")),
+            ("Added", tr("Added")),
+            ("Modified", tr("Modified")),
+            ("Removed", tr("Removed")),
+        ):
+            button = _tab(label)
+            button.clicked.connect(lambda _c=False, k=kind: self._set_filter(k))
+            self._filter_buttons[kind] = button
+        self._filter_buttons["All"].setChecked(True)
+        self.filter_row = _pills(*self._filter_buttons.values())
+        controls.addWidget(self.filter_row, 1)
         self.count_summary = QLabel("")
         self.count_summary.setTextFormat(Qt.TextFormat.RichText)
-        controls_row.addWidget(self.count_summary)
-        self.filter_combo = QComboBox()
-        self.filter_combo.addItems(["All", "Added", "Modified", "Removed"])
-        self.filter_combo.setMinimumWidth(110)
-        self.filter_combo.currentTextChanged.connect(self._apply_filter)
-        self.filter_combo.setVisible(False)
-        controls_row.addWidget(self.filter_combo)
-        updates_layout.addLayout(controls_row)
-
-        self.no_updates_label = info_label(tr("No addon changes. GAMMA is up to date."))
-        self.no_updates_label.setObjectName("accent")
-        self.no_updates_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-        updates_layout.addWidget(self.no_updates_label)
+        controls.addWidget(self.count_summary)
+        layout.addLayout(controls)
 
         self.table = QTableWidget(0, 3, self)
-        self.table.setHorizontalHeaderLabels(["", "Addon", "Archive change"])
+        self.table.setHorizontalHeaderLabels(["", tr("Addon"), tr("Archive change")])
         self.table.verticalHeader().setVisible(False)
         self.table.setAlternatingRowColors(True)
         self.table.setShowGrid(False)
@@ -233,214 +431,88 @@ class UpdatePage(QWidget):
         self.table.horizontalHeader().setSectionResizeMode(
             1, self.table.horizontalHeader().ResizeMode.Stretch
         )
-        updates_layout.addWidget(self.table)
-
-        # ---------- version card: Installed | Latest Available ----------
-        # Installed hugs the card's left edge, Latest Available hugs its
-        # right edge - no vertical divider between them (removed: with
-        # the columns this far apart it read as a stray, misaligned mark
-        # rather than a meaningful separator).
-        version_card, version_layout = make_card()
-        root.addWidget(version_card)
-
-        version_grid = QGridLayout()
-        version_grid.setHorizontalSpacing(32)
-        version_grid.setVerticalSpacing(6)
-        version_grid.setColumnStretch(0, 1)
-        version_grid.setColumnStretch(1, 1)
-        version_layout.addLayout(version_grid)
-
-        version_grid.addLayout(make_header_row("Installed"), 0, 0)
-        # Right-aligned mirror of make_header_row(): title flush with the
-        # card's right edge, matching the value below it.
-        latest_header = QHBoxLayout()
-        latest_header.addStretch(1)
-        latest_header.addWidget(section_label(tr("Latest Available"), level=2))
-        version_grid.addLayout(latest_header, 0, 1)
-
-        # #modCounter (the same style as the topbar's mod-count badge) -
-        # bold, accent-colored, no border/background - instead of the
-        # previous #mono boxed style, whose bordered box stretched to
-        # fill the whole grid column and looked like a long empty bar
-        # around a couple of short digits.
-        self.installed_value = QLabel(tr("-"))
-        self.installed_value.setObjectName("modCounter")
-        version_grid.addWidget(
-            self.installed_value, 1, 0, alignment=Qt.AlignmentFlag.AlignLeft
+        layout.addWidget(self.table)
+        self.changes_empty = _hint(
+            tr("No mod changes. Your mod list matches the official one.")
         )
-        self.latest_value = QLabel(tr("-"))
-        self.latest_value.setObjectName("modCounter")
-        version_grid.addWidget(
-            self.latest_value, 1, 1, alignment=Qt.AlignmentFlag.AlignRight
-        )
+        layout.addWidget(self.changes_empty)
+        return page
 
-        # Full-width hero button, same shape as Play page's Launch Game.
-        self.check_button = QPushButton(tr("Check for updates"))
-        self.check_button.setObjectName("hero")
-        self.check_button.clicked.connect(self._check)
-        version_layout.addWidget(self.check_button)
+    def _options_tab(self) -> QWidget:
+        page, layout = self._page()
 
-        # Status + "Last checked" centered on one line under the button.
-        # The separator reuses the exact same #installDivider QFrame as
-        # the Installed/Latest column divider above (not a "|" text
-        # glyph) so both are the identical color and both sit vertically
-        # centered on their own row, instead of a text pipe's off-center,
-        # differently-shaded look next to the divider bar.
-        status_row = QHBoxLayout()
-        status_row.addStretch(1)
-        # wrap=False on both labels: word-wrap made either one grow to 2
-        # lines depending on available width, which made the row taller
-        # than a single line and threw off the fixed-height separator's
-        # vertical centering against it. Neither string runs long enough
-        # to need wrapping.
-        self.status_label = info_label(
-            tr("Open this page to check the active GAMMA installation."), wrap=False
-        )
-        status_row.addWidget(self.status_label, 0, Qt.AlignmentFlag.AlignVCenter)
-        self.status_separator = QFrame()
-        self.status_separator.setObjectName("installDivider")
-        self.status_separator.setFrameShape(QFrame.Shape.NoFrame)
-        self.status_separator.setFixedWidth(1)
-        self.status_separator.setFixedHeight(14)
-        # Nothing to separate from yet - shown once a check completes and
-        # last_checked_label actually has text (see _on_check_done()).
-        self.status_separator.setVisible(False)
-        status_row.addSpacing(10)
-        status_row.addWidget(self.status_separator, 0, Qt.AlignmentFlag.AlignVCenter)
-        status_row.addSpacing(10)
-        self.last_checked_label = info_label("", wrap=False)
-        self.last_checked_label.setObjectName("dim")
-        status_row.addWidget(self.last_checked_label, 0, Qt.AlignmentFlag.AlignVCenter)
-        status_row.addStretch(1)
-        version_layout.addLayout(status_row)
-
-        # ---------- apply card ----------
-        # Between "Installed" and "What's New" - the options/actions for
-        # the version comparison right above, read before the (often
-        # long) release notes below.
-        apply_card, apply_layout = make_card()
-        root.addWidget(apply_card)
-        apply_layout.setSpacing(8)
-        apply_layout.addWidget(section_label(tr("Update options"), level=2))
-        options_row = QHBoxLayout()
-        options_row.setSpacing(18)
-        self.minimal_cb = QCheckBox(tr("Minimal (delete archives after extraction)"))
-        self.preserve_user_cb = QCheckBox(tr("Keep user.ltx settings"))
-        self.preserve_user_cb.setToolTip(
-            tr("Keep your existing user.ltx (game options) across the update. If unchecked, controls, keybindings and mod-specific settings will be reset.")
-        )
-        self.preserve_mcm_cb = QCheckBox(tr("Keep MCM settings"))
-        self.preserve_mcm_cb.setToolTip(
-            tr("Keep your Mod Configuration Menu (MCM) settings across the update. If unchecked, all mod configurations (axr_options.ltx) will be lost.")
-        )
+        keep, keep_layout = _section(tr("Keep my settings"))
+        self.preserve_user_cb = QCheckBox(tr("Keep my game settings (user.ltx)"))
+        self.preserve_mcm_cb = QCheckBox(tr("Keep my MCM settings"))
+        self.keep_exes_cb = QCheckBox(tr("Keep my current engine executables"))
         self.preserve_user_cb.setChecked(True)
         self.preserve_mcm_cb.setChecked(True)
-        for cb in (self.minimal_cb, self.preserve_user_cb, self.preserve_mcm_cb):
-            options_row.addWidget(cb)
-        options_row.addStretch(1)
-        apply_layout.addLayout(options_row)
+        for box, hint in (
+            (self.preserve_user_cb, tr("Keep your game options (user.ltx). Unchecked resets controls and keybindings.")),
+            (self.preserve_mcm_cb, tr("Keep your MCM settings (axr_options.ltx). Unchecked resets them.")),
+            (self.keep_exes_cb, tr("Keep your current Anomaly executables instead of GAMMA's bundled ones.")),
+        ):
+            keep_layout.addWidget(box)
+            keep_layout.addWidget(_hint(hint))
+        keep_layout.addStretch(1)
 
-        # Apply stays a full-width standalone hero button, same shape as
-        # Play page's own hero button (its proven pattern) - squeezing it
-        # into a shared row with Undo previously fought the QSS's own
-        # padding/font-size for vertical space and clipped the text top
-        # and bottom.
-        self.apply_button = QPushButton(tr("Apply updates"))
-        self.apply_button.setObjectName("hero")
-        self.apply_button.setEnabled(False)
-        self.apply_button.clicked.connect(self._apply)
-        apply_layout.addWidget(self.apply_button)
-
-        # Built before apply_progress so it can be handed in as the
-        # console-toggle row's extra widget below - folds Undo onto the
-        # same line as "Show Console" instead of a separate row, keeping
-        # this card shorter.
-        self.undo_button = QPushButton(tr("Undo Last Update"))
-        self.undo_button.setObjectName("tertiary")
-        self.undo_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.undo_button.setToolTip(
-            tr("Restore the modlist.txt saved right before the last update was applied.")
+        disk, disk_layout = _section(tr("Downloads"))
+        self.minimal_cb = QCheckBox(tr("Delete downloads after unpacking"))
+        disk_layout.addWidget(self.minimal_cb)
+        disk_layout.addWidget(
+            _hint(tr("Saves disk space, but the next update has to download everything it needs again."))
         )
+        disk_layout.addStretch(1)
+
+        undo, undo_layout = _section(tr("Undo last update"))
+        undo_layout.addWidget(
+            _hint(tr("Restore the modlist.txt saved right before the last update was applied."))
+        )
+        self.undo_hint = info_label("")
+        undo_layout.addWidget(self.undo_hint)
+        undo_layout.addStretch(1)
+        self.undo_button = QPushButton(tr("Undo last update"))
+        self.undo_button.setObjectName("secondary")
+        self.undo_button.setMinimumHeight(34)
         self.undo_button.clicked.connect(self._undo_last_update)
         self.undo_button.setEnabled(False)
+        undo_layout.addWidget(self.undo_button)
 
-        # show_table=False: the per-addon progress table makes sense for
-        # a full GAMMA install (hundreds of mods downloading in
-        # parallel), not a handful of addon updates - it otherwise sat
-        # permanently visible above the actual (collapsible) console,
-        # reading as a second, un-closeable "console" box.
-        # auto_expand_log=False: stays collapsed by default, even once
-        # an update starts - a plain install-page precedent none of this
-        # page's users need open by default the way a full install's
-        # live per-addon log does.
-        # bar_follows_log=True: the bar (and idle status line) stay
-        # hidden until "Show Console" is clicked too, right under this
-        # button - an update here is a handful of small downloads, not
-        # something that needs an always-visible progress bar the way a
-        # full install does.
-        self.apply_progress = ProgressArea(
-            show_table=False,
-            show_log=True,
-            log_max_height=180,
-            auto_expand_log=False,
-            bar_follows_log=True,
-            toggle_row_extra=self.undo_button,
-        )
-        self.apply_progress.cancel_button.clicked.connect(self._cancel_apply)
-        apply_layout.addWidget(self.apply_progress)
-
-        # ---------- what's new card ----------
-        whats_new_card, whats_new_layout = make_card()
-        root.addWidget(whats_new_card)
-        whats_new_layout.setSpacing(6)
-
-        whats_new_header = QHBoxLayout()
-        whats_new_header.addWidget(section_label(tr("What's New"), level=2), 1)
-        self.changelog_link = QPushButton(tr("View full changelog on GitHub"))
-        self.changelog_link.setObjectName("githubLink")
-        self.changelog_link.setFlat(True)
-        self.changelog_link.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.changelog_link.clicked.connect(self._open_changelog)
-        whats_new_header.addWidget(self.changelog_link)
-        whats_new_layout.addLayout(whats_new_header)
-
-        # One collapsible _ReleaseNotesSection per release found in
-        # Patchnotes.md (see parse_patchnotes_sections()) - rebuilt fresh
-        # on every successful check, latest release expanded by default.
-        self.whats_new_sections = QWidget()
-        self.whats_new_sections_layout = QVBoxLayout(self.whats_new_sections)
-        self.whats_new_sections_layout.setContentsMargins(0, 0, 0, 0)
-        self.whats_new_sections_layout.setSpacing(4)
-        whats_new_layout.addWidget(self.whats_new_sections)
-
-        self.no_patchnotes_label = info_label(
-            tr("Patch notes aren't available yet - check for updates first.")
-        )
-        self.no_patchnotes_label.setObjectName("dim")
-        whats_new_layout.addWidget(self.no_patchnotes_label)
-
-        # Without this, a window taller than the page's natural content
-        # forces the scroll area's content widget taller too - with
-        # nothing else in root claiming that leftover space, it leaked
-        # into apply_progress's own internal layout instead (its empty
-        # status label quietly stretching to absorb it), pushing "Show
-        # Console" far down below a large gap. Same fix Play page already
-        # uses for its own last card.
-        root.addStretch(1)
-
-        self._render(UpdateStatus())
-        self._update_button_states()
+        _columns(layout, keep, disk, undo)
+        layout.addWidget(_hint(tr("Your saves are never touched by an update.")))
+        self.exes_card = ModdedExesCard(self.window, lambda: self.keep_exes_cb.setChecked(True))
+        layout.addWidget(self.exes_card.frame)
+        return page
 
     def refresh(self) -> None:
         """Called every time the page is shown; auto-check updates."""
         self._check_generation += 1
+        self._focus_changes = True
+        self._show_changes_if_any()
         self.window.refresh_settings()
         self._update_button_states()
-        self._check()
+        profile = self.window.settings.active_profile
+        if profile is not None and str(profile.anomaly).strip() and modded_exes.load_state(profile.anomaly):
+            # Exes COMMANDER installed: a GAMMA update must not swap them back.
+            self.keep_exes_cb.setChecked(True)
+        self.exes_card.refresh()
+        # Checked again on a visit only after a while, or for another
+        # profile: each check is a fetch, and the card flashed "Checking".
+        key = (
+            (profile.profile_name, profile.anomaly, profile.gamma, profile.cache)
+            if profile is not None
+            else None
+        )
+        last = getattr(self, "_auto_checked", None)
+        if last is None or last[1] != key or time.monotonic() - last[0] > 600:
+            self._auto_checked = (time.monotonic(), key)
+            self._check()
 
     def on_busy_changed(self, _busy: bool) -> None:
         """Global install lock changed; re-evaluate this page's controls."""
+        self._auto_checked = None  # an install or update changes the result
         self._update_button_states()
+        self.exes_card.refresh()
 
     def _update_button_states(self) -> None:
         """Gate this page on the global install lock.
@@ -455,8 +527,37 @@ class UpdatePage(QWidget):
             not self.window.install_busy and not self._checking and not self._applying
         )
         self.check_button.setEnabled(idle)
-        self.apply_button.setEnabled(idle and bool(self._diffs))
-        self.undo_button.setEnabled(idle and self._pre_update_snapshot_path() is not None)
+        self.apply_button.setEnabled(idle)
+        if self._applying:
+            text = tr("Installing updates")
+        elif self._checking:
+            text = tr("Checking for updates")
+        elif self._resume_args():
+            text = tr("Resume update")
+        elif self._diffs:
+            text = tr("Install {count} update(s)", count=len(self._diffs))
+        elif self._needs_sync:
+            text = tr("Install updates")
+        elif self._up_to_date:
+            text = tr("You're up to date · Check again")
+        else:
+            text = tr("Check for updates")
+        set_hover_grow_text(self.apply_button, text)
+        snapshot = self._pre_update_snapshot_path()
+        self.undo_button.setEnabled(idle and snapshot is not None)
+        if snapshot is None:
+            self.undo_hint.setText(tr("Nothing to undo yet."))
+        else:
+            try:
+                saved = datetime.fromtimestamp(snapshot.stat().st_mtime, timezone.utc)
+                self.undo_hint.setText(tr("Saved {when}", when=_format_relative_time(saved)))
+            except OSError:
+                self.undo_hint.setText("")
+
+    def _resume_args(self) -> list[str]:
+        """``["--resume"]`` while a failed or cancelled update apply can be resumed."""
+        profile = self.window.settings.active_profile
+        return cli_resume_args(profile.gamma if profile else None, "update apply")
 
     def _pre_update_snapshot_path(self) -> Path | None:
         """Path to the modlist.txt snapshot taken right before the last
@@ -487,12 +588,17 @@ class UpdatePage(QWidget):
         modlist_path = modlist_path_for(profile.gamma, profile.mo2_profile)
         if modlist_path is None or not modlist_path.is_file():
             return
+        snapshot = modlist_path.with_name(modlist_path.name + ".pre-update.bak")
         try:
-            shutil.copy2(
-                modlist_path, modlist_path.with_name(modlist_path.name + ".pre-update.bak")
-            )
+            shutil.copy2(modlist_path, snapshot)
         except OSError:
-            pass
+            # An older snapshot left in place would make "Undo Last Update"
+            # restore the wrong list, so it goes, and the user is told.
+            snapshot.unlink(missing_ok=True)
+            self.window.statusBar().showMessage(
+                tr("Couldn't save a copy of the mod list before updating, so Undo last update won't be available."),
+                10000,
+            )
 
     def _undo_last_update(self) -> None:
         if self.window.install_busy or self._checking or self._applying:
@@ -504,108 +610,216 @@ class UpdatePage(QWidget):
         modlist_path = modlist_path_for(profile.gamma, profile.mo2_profile)
         if modlist_path is None:
             return
-        if mo2_running():
+        # Forced: modlist.txt is about to be overwritten.
+        if game_running(force=True):
             QMessageBox.warning(
                 self,
-                tr("Game Running"),
-                tr("Close MO2/the game before restoring a modlist.txt backup."),
+                tr("Close the game first"),
+                tr("Mod Organizer or the game is still open. Close it, then undo the update."),
             )
             return
         answer = QMessageBox.question(
             self,
-            tr("Undo Last Update"),
+            tr("Undo the last update?"),
             tr(
-                "Restore modlist.txt to how it was right before the last update was applied? The current modlist.txt will be overwritten."
+                "Your mod list (modlist.txt) goes back to how it was just before the last update."
             ),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            note=tr("Changes made to the mod list since then are lost."),
+            labels={QMessageBox.StandardButton.Yes: tr("Undo update"), QMessageBox.StandardButton.No: tr("Cancel")},
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
         try:
-            shutil.copy2(snapshot, modlist_path)
+            # Atomic: a full disk must not leave modlist.txt cut short.
+            write_bytes(modlist_path, snapshot.read_bytes())
         except OSError as exc:
             QMessageBox.warning(
-                self, tr("Undo Failed"), tr("Could not restore modlist.txt:\n{exc}", exc=exc)
+                self, tr("Couldn't undo the update"), tr("The old mod list couldn't be put back.\n\n{exc}", exc=exc)
             )
             return
         QMessageBox.information(
             self,
-            tr("Undo Complete"),
-            tr("modlist.txt restored to its pre-update state."),
+            tr("Update undone"),
+            tr("Your mod list is back to how it was before the last update."),
         )
         self._update_button_states()
 
     # ----- status rendering -----
+    def _set_pill(self, text: str, level: str) -> None:
+        self.status_pill.setText(text)
+        self.status_pill.setProperty("level", level)
+        self.status_pill.style().unpolish(self.status_pill)
+        self.status_pill.style().polish(self.status_pill)
+        self.status_pill.setVisible(True)
+
+    def _set_console_visible(self, visible: bool) -> None:
+        """The bar and Show Console are only there while an update runs."""
+        progress = self.apply_progress
+        if not visible and not progress.log.isHidden():
+            progress._toggle_log()
+        # The whole area too: hidden children still left its margins as a gap.
+        progress.setVisible(visible)
+        progress.log_toggle.setVisible(visible)
+        progress.bar.setVisible(visible)
+        progress.status_label.setVisible(visible)
+
     def _set_status(self, text: str, kind: str) -> None:
-        self.status_label.setText(text)
+        self.status_label.setText(notice(text))
         self.status_label.setObjectName(kind)
         self.status_label.style().unpolish(self.status_label)
         self.status_label.style().polish(self.status_label)
 
-    def _open_changelog(self) -> None:
-        profile = self.window.settings.active_profile
-        if profile is None:
-            return
-        open_url(changelog_web_url(profile))
-
-    def _populate_whats_new(self, patchnotes: str | None) -> None:
-        """Rebuild the release list from a fresh check's patchnotes text."""
-        clear_layout(self.whats_new_sections_layout)
-        has_patchnotes = bool(patchnotes)
-        self.whats_new_sections.setVisible(has_patchnotes)
-        self.no_patchnotes_label.setVisible(not has_patchnotes)
-        if not has_patchnotes:
-            return
-        sections = parse_patchnotes_sections(patchnotes)
-        if not sections:
-            # No recognizable "# " heading at all (an unexpected format) -
-            # still show the raw text rather than nothing.
-            sections = [(tr("Latest changes"), patchnotes)]
-        for index, (title, body) in enumerate(sections):
-            self.whats_new_sections_layout.addWidget(
-                _ReleaseNotesSection(title, body, expanded=index == 0)
-            )
-
     def _render(self, status: UpdateStatus) -> None:
-        self.installed_value.setText(
-            format_version(status.installed, status.installed_human)
+        checked = self._last_checked_at is not None
+        if not checked:
+            self.status_pill.setVisible(False)
+        elif status.version_unknown:
+            self._set_pill(tr("Version unknown"), "attention")
+        elif status.installed is None:
+            self._set_pill(tr("Not installed"), "attention")
+        elif status.update_available:
+            self._set_pill(tr("Update available"), "running")
+        elif status.error:
+            self._set_pill(tr("Check failed"), "failed")
+        else:
+            self._set_pill(tr("Up to date"), "healthy")
+        self._needs_sync = checked and status.version_unknown
+        self._up_to_date = checked and status.installed is not None and not (
+            status.update_available or status.error
         )
-        self.latest_value.setText(
-            format_version(status.latest, status.latest_human, missing="-")
+
+        self.installed_stat.set(
+            format_version(status.installed, status.installed_human, "-", show_build=False)
         )
-
-        self._populate_whats_new(status.patchnotes)
-
-        self.table.setRowCount(0)
-        self._diffs = list(status.diffs)
-        for diff in self._diffs:
-            self._add_diff_row(diff)
-        has_diffs = bool(self._diffs)
-        self.no_updates_label.setVisible(not has_diffs)
-        self.table.setVisible(has_diffs)
-        self.filter_combo.setVisible(has_diffs)
-
-        # Plain text change-count summary, colored per kind (no badge chrome).
-        counts = {"Added": 0, "Modified": 0, "Removed": 0}
-        for diff in self._diffs:
-            if diff.status in counts:
-                counts[diff.status] += 1
-        parts = [
-            f"<span style='color:{_STATUS_COLORS[kind]}; font-weight:bold;'>"
-            f"{count} {kind.lower()}</span>"
-            for kind, count in counts.items()
-            if count
-        ]
-        self.count_summary.setText("  ".join(parts))
-        self.count_summary.setVisible(has_diffs and bool(parts))
-        self._apply_filter()
+        self.installed_stat.setToolTip(
+            tr("Build {build}", build=status.installed) if status.installed else ""
+        )
+        self.latest_stat.set(
+            format_version(status.latest, status.latest_human, "-", show_build=False)
+        )
+        self.latest_stat.setToolTip(
+            tr("Build {build}", build=status.latest) if status.latest else ""
+        )
+        self._render_space()
+        self._render_diffs(list(status.diffs), known=checked and not status.error)
+        self._render_releases(status)
 
         text, kind = status_summary(status)
         self._set_status(text, kind)
+        self.note_label.setText(status.note or "")
+        self.note_label.setVisible(bool(status.note))
         self._update_button_states()
 
+    def _render_space(self) -> None:
+        profile = self.window.settings.active_profile
+        free = free_space_bytes(profile.cache or profile.gamma) if profile else None
+        low = free is not None and free < _LOW_DISK_SPACE_WARNING_BYTES
+        self.space_stat.set(human_size(free) if free is not None else "-")
+        tint(self.space_stat.value, WARN if low else None)
+
+    def on_theme_changed(self) -> None:
+        # Their colours are set in code, from the theme in use then.
+        if getattr(self.window.settings, "active_profile", None) is not None:
+            self._render_space()
+        self._render_diffs(list(getattr(self, "_diffs", [])), known=getattr(self, "_diffs_known", False))
+
+    def _render_diffs(self, diffs: list[UpdateDiff], *, known: bool = True) -> None:
+        """Table, filter, counts, tile and tab title: always kept in step."""
+        self._diffs = diffs
+        self._diffs_known = known
+        self.table.setRowCount(0)
+        for diff in diffs:
+            self._add_diff_row(diff)
+        has_diffs = bool(diffs)
+        # As tall as its rows, up to a cap; past that it scrolls.
+        self.table.setFixedHeight(min(
+            self.table.horizontalHeader().sizeHint().height()
+            + self.table.verticalHeader().length() + 4,
+            _TABLE_MAX_HEIGHT,
+        ))
+        self.table.setVisible(has_diffs)
+        self.filter_row.setVisible(has_diffs)
+        self.changes_empty.setVisible(not has_diffs and known)
+
+        # Plain text change-count summary, colored per kind (no badge chrome).
+        counts = {"Added": 0, "Modified": 0, "Removed": 0}
+        for diff in diffs:
+            if diff.status in counts:
+                counts[diff.status] += 1
+        parts = [
+            f"<span style='color:{_STATUS_COLORS[kind].name()}; font-weight:bold;'>"
+            f"{_STATUS_ICONS[kind]}{count} {tr(kind).lower()}</span>"
+            for kind, count in counts.items()
+            if count
+        ]
+        self.count_summary.setText("&nbsp;&nbsp;".join(parts))
+        self.count_summary.setVisible(has_diffs and bool(parts))
+        self.changes_stat.set(str(len(diffs)) if known or has_diffs else "-")
+        tint(self.changes_stat.value, ACCENT if has_diffs else None)
+        self._set_tab_titles(self._new_count, len(diffs))
+        self._apply_filter()
+        if known and self._focus_changes:
+            self._focus_changes = False
+            self._show_changes_if_any()
+
+    def _seen_version(self, status: UpdateStatus) -> str | None:
+        """The last GAMMA version this profile was up to date on.
+
+        Saved whenever a check finds the profile current, since the installed
+        build number alone can't be matched to a release heading.
+        """
+        profile = self.window.settings.active_profile
+        if profile is None:
+            return None
+        seen = dict(gui_settings.load_gui_settings().get("gamma_seen_version", {}))
+        current = (
+            status.latest_human
+            if status.installed and status.installed == status.latest
+            else None
+        )
+        if current and seen.get(profile.profile_name) != current:
+            seen[profile.profile_name] = current
+            gui_settings.save_gui_settings(gamma_seen_version=seen)
+        return seen.get(profile.profile_name)
+
+    def _render_releases(self, status: UpdateStatus) -> None:
+        notes = status.patchnotes or ""
+        if not notes and self._releases:
+            return  # A failed fetch keeps the notes already on screen.
+        clear_layout(self.releases_box)
+        self._releases = []
+        sections = parse_patchnotes_sections(notes) if notes else []
+        if not sections and notes.strip():
+            # Unexpected format: still show it, as one untitled entry.
+            sections = [(tr("Patch notes"), notes.strip())]
+        sections = sections[:_MAX_RELEASES]
+        flags = new_releases(
+            [title for title, _body in sections],
+            self._seen_version(status),
+            status.update_available,
+        )
+        for index, ((title, body), new) in enumerate(zip(sections, flags)):
+            current = index == 0 and not status.update_available and status.installed
+            badge = tr("New") if new else tr("Installed") if current else ""
+            release = _Release(title, body, badge, opened=new or (index == 0 and not any(flags)))
+            self.releases_box.addWidget(release)
+            self._releases.append(release)
+        self._new_count = sum(flags)
+        self.notes_empty.setText(
+            tr("Patch notes couldn't be loaded. Check again later.")
+            if self._last_checked_at is not None
+            else tr("Patch notes show here after the update check.")
+        )
+        self.notes_empty.setVisible(not sections)
+        self._set_tab_titles(self._new_count, len(self._diffs))
+
+    def _set_filter(self, kind: str) -> None:
+        self._filter = kind
+        self._apply_filter()
+
     def _apply_filter(self) -> None:
-        selected = self.filter_combo.currentText()
+        selected = self._filter
         for row in range(self.table.rowCount()):
             item = self.table.item(row, 0)
             status = item.data(Qt.ItemDataRole.UserRole) if item else ""
@@ -617,9 +831,9 @@ class UpdatePage(QWidget):
         row = self.table.rowCount()
         self.table.insertRow(row)
         icon = _STATUS_ICONS.get(diff.status, "?")
-        status_item = QTableWidgetItem(f"{icon} {diff.status}")
+        status_item = QTableWidgetItem(f"{icon} {tr(diff.status)}")
         status_item.setForeground(
-            QColor(_STATUS_COLORS.get(diff.status, LIGHT_GREY.name()))
+            QColor(_STATUS_COLORS.get(diff.status, LIGHT_GREY).name())
         )
         status_item.setData(Qt.ItemDataRole.UserRole, diff.status)
         change_item = QTableWidgetItem(diff.detail)
@@ -654,10 +868,11 @@ class UpdatePage(QWidget):
             profile.gamma,
             profile.cache,
         )
-        self.check_button.setText(tr("Checking..."))
+        self.check_button.setText(tr("Checking"))
+        self._set_pill(tr("Checking"), "running")
         self._update_button_states()
         self._set_status(
-            tr("Checking the active GAMMA installation for updates..."), "dim"
+            tr("Checking the active GAMMA installation for updates"), "dim"
         )
         task = BackgroundTask(check_updates, profile, parent=self)
         task.result.connect(
@@ -718,6 +933,7 @@ class UpdatePage(QWidget):
             self._check()
             return
         self._set_status(tr("Update check failed: {message}", message=message), "warn")
+        self._set_pill(tr("Check failed"), "failed")
         self._update_button_states()
 
     # ----- apply -----
@@ -727,18 +943,26 @@ class UpdatePage(QWidget):
         if self.window.install_busy:
             QMessageBox.information(
                 self,
-                tr("Busy"),
-                tr("An installation is already running. Wait for it to finish."),
+                tr("Please wait"),
+                tr("Another install is still running. Wait for it to finish, then try again."),
             )
             return
-        if not self._diffs:
-            QMessageBox.information(self, tr("No Updates"), tr("No updates to apply."))
+        resume = self._resume_args()
+        if not self._diffs and not self._needs_sync and not resume:
+            QMessageBox.information(self, tr("You're up to date"), tr("There are no GAMMA updates to install right now."))
             return
         answer = QMessageBox.question(
             self,
-            tr("Confirm Update"),
-            tr("Apply {arg} update(s)? This will download and re-extract the updated addons.", arg=len(self._diffs)),
+            tr("Resume the update?")
+            if resume
+            else tr("Install {arg} update(s)?", arg=len(self._diffs))
+            if self._diffs
+            else tr("Install updates?"),
+            tr("The last update didn't finish. COMMANDER picks it up where it stopped. Mods that are already done are skipped.")
+            if resume
+            else tr("COMMANDER downloads the updated mods and unpacks them into GAMMA."),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            labels={QMessageBox.StandardButton.Yes: tr("Update"), QMessageBox.StandardButton.No: tr("Cancel")},
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
@@ -749,30 +973,43 @@ class UpdatePage(QWidget):
             if free is not None and free < _LOW_DISK_SPACE_WARNING_BYTES:
                 proceed = QMessageBox.question(
                     self,
-                    tr("Low Disk Space"),
+                    tr("Low on disk space"),
                     tr(
-                        "Only {free} of free space is available. GAMMA updates can need several GB to download and re-extract. Continue anyway?",
+                        "Only {free} is free. GAMMA updates can need several GB to download and unpack, so the update may fail partway.",
                         free=human_size(free),
                     ),
                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    labels={QMessageBox.StandardButton.Yes: tr("Update anyway"), QMessageBox.StandardButton.No: tr("Cancel")},
                 )
                 if proceed != QMessageBox.StandardButton.Yes:
                     return
 
         # Re-checked after the questions above: another page could have
         # started an install (or MO2 been opened) while they were showing.
-        if self.window.install_busy or mo2_running(force=True):
+        if self.window.install_busy or game_running(force=True):
             QMessageBox.warning(
                 self,
-                tr("Busy"),
-                tr("An install is running or Mod Organizer is open - try again when it's done."),
+                tr("Please wait"),
+                tr("An install is running, or Mod Organizer is open. Wait until it's done, then try again."),
             )
             return
 
-        self._snapshot_modlist_before_update()
+        if not confirm_singleplayer(self, profile, tr("updating GAMMA")):
+            return
+        # A resumed run keeps the snapshot and kept state from the run that
+        # stopped: that run may already have replaced the modlist, so taking
+        # them again would save GAMMA's list instead of the user's.
+        if not resume or self._pre_update_snapshot_path() is None:
+            self._snapshot_modlist_before_update()
         backup_error = backup_settings_before(profile, "update")
+        if getattr(self, "_kept", None) is None:
+            self._kept = capture(profile, keep_exes=self.keep_exes_cb.isChecked(), resume=bool(resume))
 
-        args = ["update", "apply"]
+        # The CLI only reads the active profile's own list; Updates may have
+        # found it in another profile of the same install.
+        if profile is not None and profile.gamma:
+            adopt_modpack_list(profile.gamma, profile.mo2_profile or "G.A.M.M.A")
+        args = ["update", "apply", *resume]
         if self.minimal_cb.isChecked():
             args.append("--minimal")
         if self.preserve_user_cb.isChecked():
@@ -795,6 +1032,7 @@ class UpdatePage(QWidget):
             lambda: self.apply_progress.log.append_line("[cancelled]")
         )
         self.apply_progress.on_started()
+        self._set_console_visible(True)
         self._apply_runner.start()
 
     def _on_apply_finished(self, rc: int, output: str) -> None:
@@ -813,17 +1051,20 @@ class UpdatePage(QWidget):
             tail = (output or "").strip().splitlines()
             for line in tail[-25:]:
                 self.apply_progress.log.append_line(line)
+        kept = getattr(self, "_kept", None)
+        if kept is not None and not cancelled and cli_ok(rc, output, ""):
+            self._kept = None
+            for note in restore(kept):
+                self.apply_progress.log.append_line(note)
+        elif kept is not None and not self._resume_args():
+            # Kept while "Resume update" can still finish this run.
+            self._kept = None
+            discard(kept)
         if not cancelled and cli_ok(rc, output, ""):
-            # Applied cleanly: the cached diff list is stale now.
-            self._diffs = []
-            self.table.setRowCount(0)
-            self.no_updates_label.setVisible(True)
-            self.table.setVisible(False)
-            # _render() keeps these four widgets consistent; hiding only the
-            # table here left the filter box and the pre-update change counts
-            # ("12 modified") on screen next to "No addon changes."
-            self.filter_combo.setVisible(False)
-            self.count_summary.setVisible(False)
+            # Applied cleanly: the cached diff list is stale now. Through
+            # _render_diffs() so the filter, counts, tile and tab title
+            # don't keep showing the pre-update changes.
+            self._render_diffs([], known=False)
             self._set_status(tr("Updates applied - re-check to confirm"), "dim")
             # An update legitimately changes files under gamma/mods -
             # Verify Integrity's MD5 baseline must not compare against
@@ -847,9 +1088,21 @@ class UpdatePage(QWidget):
                         rc=rc,
                     ),
                 )
+        # A failed update keeps its console up so the error can be read.
+        self._set_console_visible(not cancelled and not cli_ok(rc, output, ""))
         self.window.set_install_busy(False)
         self._update_button_states()
 
     def _cancel_apply(self) -> None:
-        if self._apply_runner is not None:
+        if self._apply_runner is None or not self._apply_runner.is_running():
+            return
+        answer = QMessageBox.question(
+            self,
+            tr("Stop the update?"),
+            tr("You can pick it up again later with Resume update. Mods that are already done are skipped."),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            labels={QMessageBox.StandardButton.Yes: tr("Stop update"), QMessageBox.StandardButton.No: tr("Keep updating")},
+        )
+        # The update may have finished while the dialog was open.
+        if answer == QMessageBox.StandardButton.Yes and self._apply_runner is not None:
             self._apply_runner.cancel()

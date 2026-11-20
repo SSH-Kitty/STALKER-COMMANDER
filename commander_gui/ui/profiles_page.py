@@ -11,8 +11,6 @@ from PySide6.QtGui import QColor, QIcon, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QButtonGroup,
     QDialog,
-    QDialogButtonBox,
-    QFileDialog,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -22,7 +20,6 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMenu,
-    QMessageBox,
     QPlainTextEdit,
     QPushButton,
     QRadioButton,
@@ -53,6 +50,7 @@ from ..profile_bundle import (
 )
 from ..settings import CliProfile, cli_ok, run_config_command
 from ..themes import active_theme_tokens
+from . import reflow
 from .common import (
     GAMMA_MARKERS,
     GAMMA_PROFILE,
@@ -68,10 +66,14 @@ from .common import (
     make_card,
     mo2_running,
     normalize_path,
+    notice,
     open_in_file_manager,
     section_label,
     tr,
 )
+from .dialogs import MessageBox as QMessageBox
+from .dialogs import add_buttons, style_window
+from .file_dialog import FileDialog as QFileDialog
 
 #: How long a success message stays in the editor's footer.
 _STATUS_TIMEOUT_MS = 6000
@@ -276,26 +278,50 @@ def set_profile_color(name: str, key: str | None) -> None:
     save_gui_settings(profile_colors=colors)
 
 
+#: gui_settings tables keyed by profile name. user_created_categories also
+#: has "<profile>/<MO2 profile>" keys.
+_PROFILE_TABLES = (
+    "profile_notes", "profile_colors", "playtime_seconds", "last_played_ts",
+    "gamma_seen_version", "user_created_categories",
+)
+
+
+def _profile_keys(table: dict, name: str) -> list[str]:
+    return [k for k in table if k == name or k.startswith(name + "/")]
+
+
 def move_profile_extras(old_name: str, new_name: str) -> None:
-    """Carry a renamed profile's note and color tag over to its new name."""
+    """Carry a renamed profile's note, color tag, playtime and own
+    categories over to its new name."""
     state = load_gui_settings()
     changes = {}
-    for key in ("profile_notes", "profile_colors"):
-        table = dict(state.get(key, {}))
-        if old_name in table:
-            table[new_name] = table.pop(old_name)
+    for key in _PROFILE_TABLES:
+        table = state.get(key)
+        if not isinstance(table, dict):
+            continue
+        table = dict(table)
+        moved = _profile_keys(table, old_name)
+        for old in moved:
+            table[new_name + old[len(old_name):]] = table.pop(old)
+        if moved:
             changes[key] = table
     if changes:
         save_gui_settings(**changes)
 
 
 def forget_profile_extras(name: str) -> None:
-    """Drop a deleted profile's note and color tag."""
+    """Drop a deleted profile's note, color tag, playtime and categories."""
     state = load_gui_settings()
     changes = {}
-    for key in ("profile_notes", "profile_colors"):
-        table = dict(state.get(key, {}))
-        if table.pop(name, None) is not None:
+    for key in _PROFILE_TABLES:
+        table = state.get(key)
+        if not isinstance(table, dict):
+            continue
+        table = dict(table)
+        gone = _profile_keys(table, name)
+        for old in gone:
+            del table[old]
+        if gone:
             changes[key] = table
     if changes:
         save_gui_settings(**changes)
@@ -374,6 +400,7 @@ class NewProfileDialog(QDialog):
         self.setMinimumWidth(460)
         layout = QVBoxLayout(self)
         layout.setSpacing(10)
+        style_window(self, tr("New profile"), resizable=False)
         layout.addWidget(section_label(tr("What is this profile for?"), level=2))
 
         self.fresh_radio = QRadioButton(tr("A fresh install"))
@@ -411,15 +438,7 @@ class NewProfileDialog(QDialog):
         )
         self.base_combo.setEnabled(False)
 
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
-        )
-        buttons.button(QDialogButtonBox.StandardButton.Ok).setText(tr("Continue"))
-        buttons.button(QDialogButtonBox.StandardButton.Ok).setObjectName("primary")
-        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText(tr("Cancel"))
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
+        add_buttons(self, layout, tr("Continue"))
 
     @staticmethod
     def _indented(widget: QWidget) -> QWidget:
@@ -481,8 +500,9 @@ class CompareView(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(12)
 
-        top = QHBoxLayout()
-        top.setSpacing(10)
+        # Title, the two pickers and the filter: each its own line when the
+        # window is narrow.
+        top = reflow.row(10)
         top.addWidget(section_label(tr("Compare profiles"), level=2))
         top.addSpacing(12)
         # Any two profiles: the left one starts as the profile on screen,
@@ -495,7 +515,7 @@ class CompareView(QWidget):
         self.compare_swap_button.setToolTip(tr("Swap sides"))
         self.compare_swap_button.clicked.connect(self._swap_compare)
         for combo in (self.compare_left_combo, self.compare_combo):
-            combo.setMinimumWidth(220)
+            combo.setMinimumWidth(160)
             combo.setSizeAdjustPolicy(NoWheelComboBox.SizeAdjustPolicy.AdjustToContents)
         self.compare_left_combo.currentIndexChanged.connect(
             lambda _i: self._on_compare_picked(self.compare_left_combo, self.compare_combo)
@@ -503,18 +523,17 @@ class CompareView(QWidget):
         self.compare_combo.currentIndexChanged.connect(
             lambda _i: self._on_compare_picked(self.compare_combo, self.compare_left_combo)
         )
-        top.addWidget(self.compare_left_combo)
-        top.addWidget(self.compare_swap_button)
-        top.addWidget(self.compare_combo)
+        top.addWidget(
+            reflow.group(self.compare_left_combo, self.compare_swap_button, self.compare_combo, spacing=10)
+        )
         top.addStretch(1)
         self.compare_count = QLabel()
         self.compare_count.setObjectName("dim")
-        top.addWidget(self.compare_count)
         self.compare_filter = NoWheelComboBox()
         self.compare_filter.addItems([tr("Differences only"), tr("All mods")])
         self.compare_filter.setCurrentIndex(1)
         self.compare_filter.currentIndexChanged.connect(lambda _i: self._refresh_compare())
-        top.addWidget(self.compare_filter)
+        top.addWidget(reflow.group(self.compare_count, self.compare_filter, spacing=10))
         layout.addLayout(top)
 
         self.compare_empty = info_label("")
@@ -552,12 +571,47 @@ class CompareView(QWidget):
         # Tall by default so a long list of differences reads at a glance.
         self.compare_table.setMinimumHeight(480)
         layout.addWidget(self.compare_table, 1)
+        # Soaks up the height only while the table is hidden, so the
+        # compare row and its hint stay at the top instead of floating.
+        layout.addStretch(0)
         # Profile the left side last followed (see show_for).
         self._synced_to = ""
+
+    def _compare_entries(self) -> list[tuple[str, str]]:
+        """``(key, label)`` for every list the pickers offer.
+
+        Each COMMANDER profile (key = its name), then every other MO2
+        profile inside its GAMMA folder that no COMMANDER profile points at
+        (key = "<name>\n<MO2 profile>") - MO2's own profile switcher can
+        leave several lists in one install.
+        """
+        profiles = self.page.settings.profiles
+        entries_out = [(p.profile_name, p.profile_name) for p in profiles]
+        seen = {(p.gamma, (p.mo2_profile or GAMMA_PROFILE).lower()) for p in profiles}
+        for profile in profiles:
+            for mo2 in mo2_profile_names(profile.gamma):
+                if (profile.gamma, mo2.lower()) in seen:
+                    continue
+                if not (Path(profile.gamma) / "profiles" / mo2 / "modlist.txt").is_file():
+                    continue
+                seen.add((profile.gamma, mo2.lower()))
+                entries_out.append(
+                    (f"{profile.profile_name}\n{mo2}", f"{profile.profile_name} · {mo2}")
+                )
+        return entries_out
+
+    def _resolve(self, key: str | None) -> CliProfile | None:
+        name, _, mo2 = (key or "").partition("\n")
+        profile = self.page._profile(name)
+        if profile is None or not mo2:
+            return profile
+        return dataclasses.replace(profile, mo2_profile=mo2)
 
     def show_for(self, name: str) -> None:
         """Refill the pickers; the left side follows the profile on screen."""
         names = [p.profile_name for p in self.page.settings.profiles]
+        compare_entries = self._compare_entries()
+        keys = [key for key, _label in compare_entries]
         left_name = self.compare_left_combo.currentData()
         right_name = self.compare_combo.currentData()
         if self._synced_to != name:
@@ -565,27 +619,27 @@ class CompareView(QWidget):
             if right_name == name:
                 right_name = left_name
             left_name = name
-        if left_name not in names:
+        if left_name not in keys:
             left_name = name
-        if right_name not in names or right_name == left_name:
+        if right_name not in keys or right_name == left_name:
             active = self.page.settings.active_profile
             candidates = ([active.profile_name] if active is not None else []) + names
             right_name = next((n for n in candidates if n != left_name), None)
         for combo, picked in ((self.compare_left_combo, left_name), (self.compare_combo, right_name)):
             combo.blockSignals(True)
             combo.clear()
-            for profile_name in names:
-                combo.addItem(profile_name, profile_name)
+            for key, label in compare_entries:
+                combo.addItem(label, key)
             combo.setCurrentIndex(max(combo.findData(picked), 0))
             combo.setProperty("previousData", combo.currentData())
             combo.blockSignals(False)
         self._refresh_compare()
 
     def _compare_left(self) -> CliProfile | None:
-        return self.page._profile(self.compare_left_combo.currentData())
+        return self._resolve(self.compare_left_combo.currentData())
 
     def _compare_target(self) -> CliProfile | None:
-        return self.page._profile(self.compare_combo.currentData())
+        return self._resolve(self.compare_combo.currentData())
 
     def _on_compare_picked(self, changed, other) -> None:
         """Picking the profile the other side shows swaps the two sides."""
@@ -611,7 +665,9 @@ class CompareView(QWidget):
 
     def _refresh_compare(self) -> None:
         left, right = self._compare_left(), self._compare_target()
-        if left is None or right is None or left is right:
+        if left is None or right is None or (
+            self.compare_left_combo.currentData() == self.compare_combo.currentData()
+        ):
             self._compare_message(tr("Create another profile to compare mod lists."))
             return
         self.compare_swap_button.setEnabled(True)
@@ -636,7 +692,17 @@ class CompareView(QWidget):
         )
         self.compare_filter.show()
         shown = differences if self.compare_filter.currentIndex() == 0 else rows
-        self._fill_compare_table(shown, tint=self.compare_filter.currentIndex() == 1)
+        # Refilling and re-measuring ~1000 rows is the slow part of opening
+        # this page; skip both when nothing on screen would change.
+        signature = (
+            left_lines, right_lines, self.compare_filter.currentIndex(),
+            self.compare_left_combo.currentText(), self.compare_combo.currentText(),
+            tuple(active_theme_tokens().items()), tr("Enabled"),
+        )
+        unchanged = signature == getattr(self, "_compare_signature", None)
+        self._compare_signature = signature
+        if not unchanged:
+            self._fill_compare_table(shown, tint=self.compare_filter.currentIndex() == 1)
         # Nothing to list (identical lists, "Differences only"): say so
         # instead of showing an empty table.
         self.compare_table.setVisible(bool(shown))
@@ -649,16 +715,22 @@ class CompareView(QWidget):
             )
             self.compare_empty.show()
 
-        for column, profile, lines in ((1, left, left_lines), (2, right, right_lines)):
+        sides = (
+            (1, left, left_lines, self.compare_left_combo.currentText()),
+            (2, right, right_lines, self.compare_combo.currentText()),
+        )
+        for column, profile, lines, label in sides:
             counts = count_active_mods(profile.gamma, profile.mo2_profile or GAMMA_PROFILE)
-            text = _short_name(profile.profile_name)
+            text = _short_name(label, 32)
             if counts is not None and lines is not None:
                 text += "\n" + tr(
-                    "{enabled} / {total} enabled", enabled=counts[0], total=counts[1]
+                    "{enabled} enabled · {total} total", enabled=counts[0], total=counts[1]
                 )
             item = self.compare_table.horizontalHeaderItem(column)
             item.setText(text)
-            item.setToolTip(profile.profile_name)
+            item.setToolTip(label)
+        if unchanged:
+            return
         for column in (1, 2):
             self.compare_table.resizeColumnToContents(column)
             # A little breathing room between the two status columns.
@@ -667,6 +739,7 @@ class CompareView(QWidget):
             )
 
     def _compare_message(self, text: str) -> None:
+        self._compare_signature = None
         self.compare_empty.setText(text)
         self.compare_empty.show()
         self.compare_table.hide()
@@ -722,7 +795,10 @@ class CompareView(QWidget):
         # Mod Manager only shows the active profile's list.
         sides = ((self._compare_left(), row.left), (self._compare_target(), row.right))
         if not any(
-            profile is not None and profile.profile_name == active.profile_name and state is not None
+            profile is not None
+            and profile.profile_name == active.profile_name
+            and profile.mo2_profile == active.mo2_profile
+            and state is not None
             for profile, state in sides
         ):
             self.compare_empty.setText(
@@ -739,10 +815,16 @@ class CompareView(QWidget):
 
 
 class ProfilesPage(QWidget):
+    @property
+    def settings(self):
+        # The window swaps in a fresh object on every refresh_settings(): a
+        # copy kept here went stale, and changes saved through it never
+        # reached the window (e.g. its topbar mod counter).
+        return self.window.settings
+
     def __init__(self, window) -> None:
         super().__init__()
         self.window = window
-        self.settings = window.settings
         self._task: BackgroundTask | None = None
         # Name of the saved profile on screen, "" while creating one.
         self._form_state = ""
@@ -825,12 +907,20 @@ class ProfilesPage(QWidget):
     def _build_main(self) -> QWidget:
         page = QWidget()
         page.setObjectName("pageContent")
-        root = QHBoxLayout(page)
+        # A very narrow window puts the profile list above the details.
+        list_panel = self._build_list_panel()
+        root = reflow.row(
+            20,
+            need=lambda: 24 + list_panel.minimumWidth() + 20 + holder.minimumSizeHint().width() + 16 + 24,
+        )
+        page.setLayout(root)
         root.setContentsMargins(24, 24, 24, 24)
-        root.setSpacing(20)
-        root.addWidget(self._build_list_panel())
+        root.addWidget(list_panel)
 
-        column = QVBoxLayout()
+        details = QWidget()
+        details.setObjectName("panelTransparent")
+        column = QVBoxLayout(details)
+        column.setContentsMargins(0, 0, 0, 0)
         column.setSpacing(12)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -840,8 +930,7 @@ class ProfilesPage(QWidget):
         holder_layout = QVBoxLayout(holder)
         holder_layout.setContentsMargins(0, 0, 0, 0)
         holder_layout.setSpacing(16)
-        top_row = QHBoxLayout()
-        top_row.setSpacing(16)
+        top_row = reflow.row(16)  # the note goes under when narrow
         top_row.addWidget(self._build_detail_card(), 2)
         top_row.addWidget(self._build_note_card(), 1)
         holder_layout.addLayout(top_row)
@@ -856,13 +945,15 @@ class ProfilesPage(QWidget):
         scroll.setWidget(holder)
         column.addWidget(scroll, 1)
         column.addWidget(self._build_footer())
-        root.addLayout(column, 1)
+        root.addWidget(details, 1)
         return page
 
     def _build_list_panel(self) -> QWidget:
         panel = QWidget()
         panel.setObjectName("panelTransparent")
-        panel.setFixedWidth(290)
+        # Narrower when the window is: the details beside it need the room.
+        panel.setMinimumWidth(210)
+        panel.setMaximumWidth(290)
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(12)
@@ -874,8 +965,8 @@ class ProfilesPage(QWidget):
         self.new_button.setObjectName("primary")
         self.new_button.setToolTip(tr("Create a new profile or import one from a file."))
         new_menu = QMenu(self.new_button)
-        new_menu.addAction(tr("New profile...")).triggered.connect(self._on_new_clicked)
-        new_menu.addAction(tr("Import from file...")).triggered.connect(self._import_profile)
+        new_menu.addAction(tr("New profile")).triggered.connect(self._on_new_clicked)
+        new_menu.addAction(tr("Import from file")).triggered.connect(self._import_profile)
         self.new_button.setMenu(new_menu)
         header.addWidget(self.new_button)
         layout.addLayout(header)
@@ -927,7 +1018,7 @@ class ProfilesPage(QWidget):
         self.more_button.setFixedSize(36, 34)
         self.more_button.setToolTip(tr("More actions"))
         self.more_menu = QMenu(self.more_button)
-        self.export_action = self.more_menu.addAction(tr("Export..."))
+        self.export_action = self.more_menu.addAction(tr("Export"))
         self.export_action.triggered.connect(self._export_profile)
         self.more_menu.addSeparator()
         self.delete_action = self.more_menu.addAction(tr("Delete"))
@@ -956,7 +1047,7 @@ class ProfilesPage(QWidget):
         self.note_edit = QPlainTextEdit()
         # Styled like a text field, not like the monospace log panes.
         self.note_edit.setObjectName("noteEdit")
-        self.note_edit.setPlaceholderText(tr("Add a note for this profile..."))
+        self.note_edit.setPlaceholderText(tr("Add a note for this profile"))
         self.note_edit.setMinimumHeight(60)
         # Ignored: the text box's tall default size hint would stretch the
         # whole top row; it just fills whatever height the profile card has.
@@ -1043,7 +1134,7 @@ class ProfilesPage(QWidget):
         folder_icon = self.style().standardIcon(QStyle.StandardPixmap.SP_DirOpenIcon)
         for text, edit, check, tooltip in folders:
             edit.setToolTip(tooltip)
-            edit.setPlaceholderText(tr("Choose a folder..."))
+            edit.setPlaceholderText(tr("Choose a folder"))
             browse = QPushButton()
             browse.setIcon(folder_icon)
             browse.setFixedWidth(40)
@@ -1108,7 +1199,6 @@ class ProfilesPage(QWidget):
         save/create/delete.
         """
         self.window.refresh_settings()
-        self.settings = self.window.settings
         self.profile_list.blockSignals(True)
         self.profile_list.clear()
         for profile in self.settings.profiles:
@@ -1157,7 +1247,7 @@ class ProfilesPage(QWidget):
         # The bottom 8px is the gap between cards.
         outer.setContentsMargins(0, 0, 0, 8)
         # The frame draws the card (see profileCard in themes.py): the
-        # active profile gets an accent border instead of an ACTIVE chip.
+        # active profile gets an accent border and an ACTIVE chip.
         frame = QFrame()
         frame.setObjectName("profileCard")
         frame.setProperty("active", profile.active)
@@ -1190,7 +1280,16 @@ class ProfilesPage(QWidget):
         for label in (name, summary):
             # Never wider than the list: long text is clipped, not the card.
             label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-            layout.addWidget(label)
+        title_row = QHBoxLayout()
+        title_row.setSpacing(8)
+        title_row.addWidget(name, 1)
+        if profile.active:
+            chip = QLabel(tr("ACTIVE"))
+            chip.setObjectName("statusReady")
+            chip.setToolTip(tr("The other pages use this profile."))
+            title_row.addWidget(chip, 0, Qt.AlignmentFlag.AlignTop)
+        layout.addLayout(title_row)
+        layout.addWidget(summary)
         return widget
 
     def _paint_selection(self, *_args) -> None:
@@ -1282,20 +1381,26 @@ class ProfilesPage(QWidget):
         if self._mode == "create":
             answer = QMessageBox.question(
                 self,
-                tr("Unsaved Changes"),
-                tr("Discard the new profile you're setting up?"),
+                tr("Discard the new profile?"),
+                tr("The profile you're setting up hasn't been created yet. Leaving now throws it away."),
                 QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel,
                 QMessageBox.StandardButton.Cancel,
+                labels={QMessageBox.StandardButton.Discard: tr("Discard"), QMessageBox.StandardButton.Cancel: tr("Keep editing")},
             )
             return answer == QMessageBox.StandardButton.Discard
         answer = QMessageBox.question(
             self,
-            tr("Unsaved Changes"),
-            tr("Save your changes to '{name}' first?", name=self._form_state),
+            tr("Save your changes?"),
+            tr("You changed '{name}' but haven't saved yet.", name=self._form_state),
             QMessageBox.StandardButton.Save
             | QMessageBox.StandardButton.Discard
             | QMessageBox.StandardButton.Cancel,
             QMessageBox.StandardButton.Save,
+            labels={
+                QMessageBox.StandardButton.Save: tr("Save"),
+                QMessageBox.StandardButton.Discard: tr("Don't save"),
+                QMessageBox.StandardButton.Cancel: tr("Keep editing"),
+            },
         )
         if answer == QMessageBox.StandardButton.Save:
             return self._save_or_create()
@@ -1343,7 +1448,7 @@ class ProfilesPage(QWidget):
             set_profile_color(name, key)
         except OSError as exc:
             QMessageBox.warning(
-                self, tr("Save Failed"), tr("Could not save the color:\n{exc}", exc=exc)
+                self, tr("Couldn't save the colour"), str(exc)
             )
             return
         self.refresh()
@@ -1374,7 +1479,7 @@ class ProfilesPage(QWidget):
             set_profile_note(self._note_owner, self.note_edit.toPlainText())
         except OSError as exc:
             QMessageBox.warning(
-                self, tr("Save Failed"), tr("Could not save the note:\n{exc}", exc=exc)
+                self, tr("Couldn't save the note"), str(exc)
             )
 
     def _flush_note(self) -> None:
@@ -1578,7 +1683,7 @@ class ProfilesPage(QWidget):
         self._update_busy_state()
 
     def _show_status(self, text: str) -> None:
-        self.status_label.setText(text)
+        self.status_label.setText(notice(text))
         self.status_label.setVisible(bool(text))
         if text:
             self._status_timer.start(_STATUS_TIMEOUT_MS)
@@ -1608,8 +1713,8 @@ class ProfilesPage(QWidget):
         if collision:
             QMessageBox.warning(
                 self,
-                tr("Name In Use"),
-                tr("A profile named '{name}' already exists. Choose a different name.", name=name),
+                tr("That name is taken"),
+                tr("There's already a profile called '{name}'. Pick another name.", name=name),
             )
             return False
         # Two differently-named profiles pointing at the identical
@@ -1633,9 +1738,9 @@ class ProfilesPage(QWidget):
         if path_collision:
             QMessageBox.warning(
                 self,
-                tr("Folders In Use"),
+                tr("These folders are already used"),
                 tr(
-                    "Another profile already uses these exact Anomaly/GAMMA/cache folders with the same MO2 profile. Give this one a different MO2 profile or its own install location."
+                    "Another profile already uses the same Anomaly, GAMMA and cache folders with the same MO2 profile. Pick a different MO2 profile, or install this one somewhere else."
                 ),
             )
             return False
@@ -1645,20 +1750,20 @@ class ProfilesPage(QWidget):
 
     def _validate_required(self, profile: CliProfile) -> bool:
         if not profile.profile_name:
-            QMessageBox.warning(self, tr("Missing Name"), tr("A profile name is required."))
+            QMessageBox.warning(self, tr("Name the profile"), tr("Type a name for the profile, then try again."))
             self.name_edit.setFocus()
             return False
         if not (profile.anomaly and profile.gamma and profile.cache):
             QMessageBox.warning(
                 self,
-                tr("Missing folders"),
-                tr("Anomaly, GAMMA, and cache folders are required."),
+                tr("Pick the folders"),
+                tr("Choose an Anomaly, a GAMMA and a cache folder, then try again."),
             )
             return False
         try:
             check_cli_values(profile)
         except ValueError as exc:
-            QMessageBox.warning(self, tr("Invalid profile"), str(exc))
+            QMessageBox.warning(self, tr("Something's wrong with this profile"), str(exc))
             return False
         return True
 
@@ -1685,7 +1790,7 @@ class ProfilesPage(QWidget):
         self._task.error.connect(self._on_task_error)
         self._task.start()
         self._set_buttons_enabled(False)
-        self._show_status(tr("Creating profile..."))
+        self._show_status(tr("Creating profile"))
         return True
 
     def _on_create_done(
@@ -1703,8 +1808,8 @@ class ProfilesPage(QWidget):
         if not cli_ok(rc, out, err):
             QMessageBox.warning(
                 self,
-                tr("Create Failed"),
-                (out + "\n" + err).strip() or "config create failed",
+                tr("Couldn't create the profile"),
+                (out + "\n" + err).strip() or tr("The profile couldn't be created."),
             )
             return
         self.window.refresh_settings()
@@ -1713,7 +1818,7 @@ class ProfilesPage(QWidget):
             for p in self.window.settings.profiles
         ):
             QMessageBox.warning(
-                self, tr("Create Failed"), tr("The CLI did not create the profile.")
+                self, tr("Couldn't create the profile"), tr("The profile couldn't be created. Check that the folders exist and you can write to them.")
             )
             return
         try:
@@ -1743,7 +1848,7 @@ class ProfilesPage(QWidget):
             save_profile(self.settings, self._form_state, profile)
         except OSError as exc:
             QMessageBox.warning(
-                self, tr("Save Failed"), tr("Could not write settings.json:\n{exc}", exc=exc)
+                self, tr("Couldn't save the profile"), tr("COMMANDER couldn't write its settings file (settings.json).\n\n{exc}", exc=exc)
             )
             return False
         self._form_state = profile.profile_name
@@ -1768,7 +1873,7 @@ class ProfilesPage(QWidget):
         self._task = None
         self._set_buttons_enabled(True)
         self._show_status("")
-        QMessageBox.warning(self, tr("Error"), msg)
+        QMessageBox.warning(self, tr("Something went wrong"), msg)
 
     # ----- new / import -----
     def _browse(self, edit: QLineEdit) -> None:
@@ -1845,7 +1950,7 @@ class ProfilesPage(QWidget):
         """Name of the profile shown in the editor, or None when creating one."""
         if not self._has_saved():
             QMessageBox.information(
-                self, tr("No Selection"), tr("Select a profile in the list first.")
+                self, tr("No profile selected"), tr("Pick a profile in the list first.")
             )
             return None
         return self._form_state
@@ -1874,7 +1979,7 @@ class ProfilesPage(QWidget):
         try:
             export_profile_bundle(profile, Path(path_str))
         except ProfileBundleError as exc:
-            QMessageBox.warning(self, tr("Export Failed"), str(exc))
+            QMessageBox.warning(self, tr("Couldn't export the profile"), str(exc))
             return
         self._show_status(tr("Exported to {path}", path=path_str))
 
@@ -1898,7 +2003,7 @@ class ProfilesPage(QWidget):
         try:
             bundle = read_profile_bundle(Path(path_str))
         except ProfileBundleError as exc:
-            QMessageBox.warning(self, tr("Import Failed"), str(exc))
+            QMessageBox.warning(self, tr("Couldn't import the profile"), str(exc))
             return
         imported = CliProfile()
         bundle.apply_to(imported)
@@ -1930,14 +2035,14 @@ class ProfilesPage(QWidget):
                 modlist_out, bundle.modlist_text.encode("utf-8"), lock=False
             )
             message += "\n\n" + tr(
-                "This bundle also included a modlist.txt, extracted to:\n{path}\n"
-                "Copy it into <GAMMA>/profiles/<MO2 profile>/modlist.txt after "
-                "installing GAMMA to restore its load order.",
+                "The file also had a mod list (modlist.txt). It's saved here:\n{path}\n\n"
+                "To get its load order back, copy it to <GAMMA>/profiles/<MO2 profile>/modlist.txt "
+                "after installing GAMMA.",
                 path=str(modlist_out),
             )
         except OSError:
             pass
-        QMessageBox.information(self, tr("Profile Imported"), message)
+        QMessageBox.information(self, tr("Profile imported"), message)
 
     # ----- activate / delete -----
     def _warn_if_active_profile_running(self, name: str, message: str) -> bool:
@@ -1953,9 +2058,10 @@ class ProfilesPage(QWidget):
             return True
         answer = QMessageBox.question(
             self,
-            tr("Game Running"),
+            tr("The game is still running"),
             message,
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            labels={QMessageBox.StandardButton.Yes: tr("Continue anyway"), QMessageBox.StandardButton.No: tr("Cancel")},
         )
         return answer == QMessageBox.StandardButton.Yes
 
@@ -1971,9 +2077,14 @@ class ProfilesPage(QWidget):
         if active is not None and mo2_running():
             answer = QMessageBox.question(
                 self,
-                tr("Game Running"),
-                tr("Mod Organizer / the game appears to be running under the current active profile ('{active_name}').\n\nSwitching the active profile now will not stop it, but COMMANDER's other pages will stop reflecting its state.\n\nSwitch anyway?", active_name=active.profile_name),
+                tr("The game is still running"),
+                tr("Mod Organizer or the game is running on the profile '{active_name}'.", active_name=active.profile_name),
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                points=(
+                    tr("Switching profiles won't close the game."),
+                    tr("COMMANDER will stop tracking it until you switch back."),
+                ),
+                labels={QMessageBox.StandardButton.Yes: tr("Switch anyway"), QMessageBox.StandardButton.No: tr("Cancel")},
             )
             if answer != QMessageBox.StandardButton.Yes:
                 return
@@ -2007,20 +2118,18 @@ class ProfilesPage(QWidget):
             )
         answer = QMessageBox.question(
             self,
-            tr("Delete Profile"),
-            tr(
-                "Delete profile '{name}'?\n\nOnly the COMMANDER profile is removed. Game files on disk are NOT deleted:\n\n{folders}",
-                name=name,
-                folders=folders,
-            ),
+            tr("Delete the profile '{name}'?", name=name),
+            tr("Only the profile is removed from COMMANDER. Your game files stay on disk:"),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
+            points=tuple(line for line in folders.splitlines() if line),
+            labels={QMessageBox.StandardButton.Yes: tr("Delete profile"), QMessageBox.StandardButton.No: tr("Cancel")},
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
         if not self._warn_if_active_profile_running(
             name,
-            tr("Mod Organizer / the game appears to be running under this profile.\n\nDeleting it now will not stop it, but COMMANDER will no longer have a profile to show its state under.\n\nDelete anyway?"),
+            tr("Mod Organizer or the game is running on this profile. Deleting the profile won't close it, but COMMANDER will stop tracking it."),
         ):
             return
         if self._task is not None or self._busy_guard():
@@ -2038,13 +2147,13 @@ class ProfilesPage(QWidget):
         self._set_buttons_enabled(True)
         if not cli_ok(rc, out, err):
             QMessageBox.warning(
-                self, tr("Failed"), (out + "\n" + err).strip() or "config delete failed"
+                self, tr("Couldn't delete the profile"), (out + "\n" + err).strip() or tr("The profile couldn't be deleted.")
             )
             return
         self.window.refresh_settings()
         if any(p.profile_name == name for p in self.window.settings.profiles):
             QMessageBox.warning(
-                self, tr("Failed"), tr("Profile '{name}' could not be deleted.", name=name)
+                self, tr("Couldn't delete the profile"), tr("The profile '{name}' couldn't be deleted. Try again, or restart COMMANDER.", name=name)
             )
             return
         forget_profile_extras(name)

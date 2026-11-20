@@ -37,6 +37,7 @@ from PySide6.QtGui import (
     QColor,
     QLinearGradient,
     QPainter,
+    QPixmap,
     QRadialGradient,
 )
 from PySide6.QtWidgets import (
@@ -56,6 +57,10 @@ from PySide6.QtWidgets import (
 
 from commander_gui.i18n import tr
 from commander_gui.themes import active_theme_tokens
+from commander_gui.ui.common import notice
+from commander_gui.ui.live_scene import paint_scene
+from commander_gui.ui.redforest import RedForest
+from commander_gui.ui.winter import Snowfall
 
 from .scale import px
 
@@ -113,12 +118,19 @@ class DeckBackdrop(QWidget):
     The same treatment the desktop window uses - a diagonal base gradient
     with two soft radial glows over it - drawn from the same theme tokens,
     so Deck Mode looks like the rest of COMMANDER rather than a generic Qt
-    application that happens to share its colours.
+    application that happens to share its colours. The Live themes paint
+    their scene instead: Winter's village with the snow falling over it,
+    the Red Forest with its swaying trees, campfire and falling leaves.
 
     Painted rather than styled: a QSS background on this widget would sit
     on top of the glow. Everything stacked above it is semi-transparent, so
     the glow reads through the cards and rows.
     """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.snowfall = Snowfall(self)
+        self.redforest = RedForest(self)
 
     def sizeHint(self) -> QSize:
         return QSize(DECK_W, DECK_H)
@@ -128,7 +140,26 @@ class DeckBackdrop(QWidget):
         return int(red), int(green), int(blue)
 
     def paintEvent(self, _event) -> None:
+        # Gradients (or Winter's scene) are slow to paint and the snow
+        # repaints bits of this many times a second, so the still part is
+        # drawn once per size/theme and blitted from then on.
+        dpr = self.devicePixelRatioF()
+        key = (self.width(), self.height(), dpr, tuple(active_theme_tokens().items()))
+        if getattr(self, "_cache_key", None) != key:
+            pixmap = QPixmap(round(self.width() * dpr), round(self.height() * dpr))
+            pixmap.setDevicePixelRatio(dpr)
+            pixmap.fill(QColor(0, 0, 0))
+            self._paint_still(QPainter(pixmap))
+            self._cache_key, self._cache = key, pixmap
         painter = QPainter(self)
+        try:
+            painter.drawPixmap(0, 0, self._cache)
+            self.redforest.paint(painter)
+            self.snowfall.paint(painter)
+        finally:
+            painter.end()
+
+    def _paint_still(self, painter: QPainter) -> None:
         try:
             painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
             rect = self.rect()
@@ -138,6 +169,8 @@ class DeckBackdrop(QWidget):
             base.setColorAt(0.0, QColor(tokens["back_base_a"]))
             base.setColorAt(1.0, QColor(tokens["back_base_b"]))
             painter.fillRect(rect, base)
+            if paint_scene(painter, rect):
+                return
 
             radius = max(rect.width(), rect.height())
             top_left = QRadialGradient(
@@ -492,7 +525,7 @@ class DeckStatusRow(DeckRow):
         self.layout().addWidget(self._chip, 0, Qt.AlignmentFlag.AlignVCenter)
         self.activated.connect(self._show_detail)
         self.set_detail("")
-        self.set_status(tr("Checking..."), "warn")
+        self.set_status(tr("Checking"), "warn")
 
     def set_detail(self, text: str) -> None:
         """Extra text, opened with A on an interactive row."""
@@ -709,7 +742,7 @@ class DeckPicker(QWidget):
         self.search: QLineEdit | None = None
         if searchable:
             self.search = QLineEdit()
-            self.search.setPlaceholderText(tr("Type to filter..."))
+            self.search.setPlaceholderText(tr("Type to filter"))
             self.search.textChanged.connect(self._apply_filter)
             layout.addWidget(self.search)
         layout.addWidget(self.list, 1)
@@ -876,6 +909,37 @@ class DeckOverlay(QWidget):
         outer.addLayout(row)
         outer.addStretch(1)
 
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        self._fit_buttons()
+
+    def _fit_buttons(self) -> None:
+        """Widen the panel so the button row's labels are never cut off.
+
+        ``panel_width`` is a cap picked for typical labels; a longer one
+        ("Play GAMMA Co-op", a translation, a bigger text size) used to be
+        squeezed below its text. Measured here, once the stylesheet has
+        set the buttons' font. Capped at the window: past that the row
+        still clips (ponytail: stack the buttons if that ever happens).
+        """
+        if not self.buttons:
+            return
+        margins = self.panel.layout().contentsMargins()
+        need = (
+            sum(button.sizeHint().width() for button in self.buttons)
+            + px(12) * (len(self.buttons) - 1)
+            + margins.left()
+            + margins.right()
+            + self.panel.width() - self.panel.contentsRect().width()  # its border
+        )
+        room = self.width() - 2 * px(MARGIN_X)
+        if need > self.panel.minimumWidth():
+            # Both bounds: the side stretches would otherwise keep the
+            # panel at its old minimum.
+            width = min(need, room)
+            self.panel.setMaximumWidth(max(self.panel.maximumWidth(), width))
+            self.panel.setMinimumWidth(max(self.panel.minimumWidth(), width))
+
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
         try:
@@ -961,7 +1025,7 @@ class DeckToast(QLabel):
         self._timer.timeout.connect(self.hide)
 
     def show_message(self, text: str, msecs: int = 3000) -> None:
-        self.setText(text)
+        self.setText(notice(text))
         self.adjustSize()
         self.reposition()
         self.show()
@@ -975,8 +1039,12 @@ class DeckToast(QLabel):
         parent = self.parentWidget()
         if parent is None:
             return
-        width = min(parent.width() - 2 * px(MARGIN_X), px(900))
-        self.setFixedWidth(max(px(240), width))
+        # Hug the text; long messages wrap at the cap.
+        self.setWordWrap(False)
+        natural = self.sizeHint().width()
+        self.setWordWrap(True)
+        width = min(parent.width() - 2 * px(MARGIN_X), px(900), natural)
+        self.setFixedWidth(width)
         self.adjustSize()
         # Above the nav bar, not on it: a toast covering the tabs hides the
         # one thing that says where you are.
@@ -1101,14 +1169,14 @@ class DeckProgress(QWidget):
     def _do_cancel(self) -> None:
         if self._runner is not None:
             self._runner.cancel()
-            self.status.setText(tr("Cancelling..."))
+            self.status.setText(tr("Cancelling"))
         elif self._cancel_fn is not None:
             self._cancel_fn()
-            self.status.setText(tr("Cancelling..."))
+            self.status.setText(tr("Cancelling"))
 
     # -- slots ------------------------------------------------------------
     def status_message(self, text: str) -> None:
-        self.status.setText(text)
+        self.status.setText(notice(text))
 
     def set_percent(self, value: int) -> None:
         if self.bar.maximum() == 0:
@@ -1121,7 +1189,7 @@ class DeckProgress(QWidget):
     def on_started(self) -> None:
         self.reset()
         self.set_indeterminate()
-        self.status.setText(tr("Starting..."))
+        self.status.setText(tr("Starting"))
 
     def on_line(self, line: str) -> None:
         text = line.strip()

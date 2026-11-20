@@ -12,12 +12,13 @@ import shutil
 import tarfile
 import tempfile
 import threading
+import urllib.parse
 import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import __version__, network
+from . import __version__, atomic, network
 from .network import read_response_bytes
 
 _GITHUB_API = "https://api.github.com/repos/GloriousEggroll/proton-ge-custom/releases"
@@ -115,11 +116,18 @@ def _find_assets(release_tag: str) -> tuple[str, str]:
 
     Raises ``ValueError`` if the release or assets are not found.
     """
+    if not re.fullmatch(r"GE-Proton[\w.-]+", release_tag):
+        raise ValueError(f"Not a GE-Proton release tag: {release_tag!r}")
     rel = _api_get(f"{_GITHUB_API}/tags/{release_tag}")
     try:
         tar_url, sum_url, _name = _pick_assets(rel.get("assets", []), host_arch())
     except ValueError as exc:
         raise ValueError(f"{exc} ({release_tag})") from exc
+    for url in (tar_url, sum_url):
+        parts = urllib.parse.urlsplit(url)
+        host = parts.hostname or ""
+        if parts.scheme != "https" or not (host == "github.com" or host.endswith(".githubusercontent.com")):
+            raise ValueError(f"Unexpected download host for {release_tag}: {host}")
     return tar_url, sum_url
 
 
@@ -226,6 +234,8 @@ def install_proton(
     # Downloaded next to where it installs, not into the system temp dir:
     # /tmp is often a RAM-backed tmpfs too small for a ~500 MB archive, and
     # the free-space check below is made against install_dir.
+    atomic.remove_stale(install_dir, ".proton-download-*")
+    atomic.remove_stale(install_dir, ".proton-staging-*")
     with tempfile.TemporaryDirectory(prefix=".proton-download-", dir=install_dir) as tmp:
         tmp_path = Path(tmp)
         tar_name = tar_url.rsplit("/", 1)[-1]
@@ -233,7 +243,7 @@ def install_proton(
 
         # --- download tarball ---
         req = urllib.request.Request(tar_url, headers={"User-Agent": _USER_AGENT})
-        with network.urlopen_with_retry(req, timeout=600) as resp:
+        with network.urlopen_with_retry(req, timeout=60) as resp:
             try:
                 header_value = resp.headers.get("Content-Length")
                 total = int(header_value) if header_value is not None else None
@@ -400,6 +410,8 @@ def steam_compat_tool_names() -> set[str]:
         if start < 0:
             continue
         brace = text.find("{", start)
+        if brace < 0:
+            continue  # unparsable: never scan from the wrong place
         depth, end = 0, len(text)
         for index in range(brace, len(text)):
             if text[index] == "{":

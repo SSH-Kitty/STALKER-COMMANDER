@@ -15,6 +15,27 @@ _ALLOWED_SCHEMES = ("http", "https")
 _RETRYABLE_HTTP_STATUSES = frozenset({429, 500, 502, 503, 504})
 
 
+class _SafeRedirect(urllib.request.HTTPRedirectHandler):
+    """Follow redirects only to http(s), and never from https down to http."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        old = urllib.parse.urlsplit(req.full_url).scheme.lower()
+        new = urllib.parse.urlsplit(newurl).scheme.lower()
+        if new not in _ALLOWED_SCHEMES or (old == "https" and new != "https"):
+            raise urllib.error.HTTPError(
+                req.full_url, code, f"Refusing redirect to {newurl!r}", headers, fp
+            )
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+# Installed globally so every urllib.request.urlopen in the app is covered.
+urllib.request.install_opener(urllib.request.build_opener(_SafeRedirect))
+
+
+def is_loopback_host(host: str | None) -> bool:
+    return (host or "").lower() in ("localhost", "127.0.0.1", "::1")
+
+
 def urlopen(url_or_request: str | urllib.request.Request, *, timeout: float):
     """``urllib.request.urlopen`` restricted to http(s).
 
@@ -30,10 +51,37 @@ def urlopen(url_or_request: str | urllib.request.Request, *, timeout: float):
         if isinstance(url_or_request, urllib.request.Request)
         else url_or_request
     )
-    scheme = urllib.parse.urlsplit(full_url).scheme.lower()
+    parts = urllib.parse.urlsplit(full_url)
+    scheme = parts.scheme.lower()
     if scheme not in _ALLOWED_SCHEMES:
         raise ValueError(f"Refusing to open a non-http(s) URL: {full_url!r}")
-    return urllib.request.urlopen(url_or_request, timeout=timeout)  # nosec B310 - scheme checked above
+    # Plain http only to this machine: the modpack list carries download
+    # links and their checksums, so anyone on the network path could swap
+    # them for their own.
+    if scheme == "http" and not is_loopback_host(parts.hostname):
+        raise ValueError(f"Refusing a plain-http URL, use https: {full_url!r}")
+    try:
+        return urllib.request.urlopen(url_or_request, timeout=timeout)  # nosec B310 - scheme checked above
+    except (urllib.error.URLError, OSError) as exc:
+        _log_failure(full_url, exc)
+        raise
+
+
+def _log_failure(url: str, exc: Exception) -> None:
+    """Host, path and the failure into commander.log - never credentials or the query
+    string, which can carry a token."""
+    from .applog import get_logger
+    from .log_dump import _scrub
+
+    parts = urllib.parse.urlsplit(url)
+    if isinstance(exc, urllib.error.HTTPError):
+        what = f"HTTP {exc.code} {exc.reason}"
+        remaining = exc.headers.get("X-RateLimit-Remaining") if exc.headers else None
+        if remaining is not None:
+            what += f" (rate limit remaining {remaining})"
+    else:
+        what = f"{exc.__class__.__name__}: {getattr(exc, 'reason', exc)}"
+    get_logger().warning("%s", _scrub(f"network: {parts.hostname}{parts.path} failed: {what}"))
 
 
 def urlopen_with_retry(

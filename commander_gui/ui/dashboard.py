@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import time
+from datetime import datetime, timezone
+from pathlib import Path
 
-from PySide6.QtCore import QRectF, QSize, Qt, QTimer
+from PySide6.QtCore import QEvent, QRectF, QSize, Qt, QTimer
 from PySide6.QtGui import QColor, QPainter, QPainterPath
 from PySide6.QtWidgets import (
     QComboBox,
@@ -12,7 +14,6 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QLabel,
-    QMessageBox,
     QProgressBar,
     QPushButton,
     QScrollArea,
@@ -21,21 +22,26 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .. import __version_label__, coop, romeo
 from ..achievements import ACHIEVEMENTS, unlocked_count
-from ..cli_runner import run_sync
 from ..game_stats import STAT_FIELDS, SaveStats, latest_save_stats, stat_value
 from ..gui_settings import configured_wine_prefix, load_gui_settings, save_gui_settings
-from ..launcher import find_extra_protons
+from ..i18n import active_language
+from ..launcher import find_extra_protons, select_mo2_profile
+from ..self_update import commander_appimage_path
 from ..settings import CliSettings
 from ..themes import active_theme_tokens
 from ..updates import UpdateStatus, check_updates, format_version, status_summary
 from ..winetricks import check_winetricks_full_status
+from . import reflow
 from .common import (
     OK_GREEN,
+    STATUS_GREY,
+    STATUS_RED,
     WARN,
     BackgroundTask,
-    InstallStatusRow,
     NoWheelComboBox,
+    StatusDot,
     activate_profile,
     anomaly_installed,
     clear_layout,
@@ -56,27 +62,38 @@ from .common import (
     play_click_sound,
     populate_runner_combo,
     section_label,
+    tint,
     tr,
     winetricks_tooltip,
 )
 from .deck_icon import deck_icon
 from .deck_switch import switch_mode
-from .mod_manager_page import _QUERY_TIMEOUT, _query_mo2_profiles
+from .dialogs import MessageBox as QMessageBox
+from .mod_manager_page import _query_mo2_profiles
 
 #: Below this much free space the drive meter turns to the warning colour:
 #: a GAMMA update alone can download tens of GB.
 _LOW_DISK_BYTES = 50 * 1024**3
 
 
-#: Theme tokens colouring the Storage usage segments, in folder order:
-#: bright accent, dark shade, light neutral - picked per theme so the three
-#: always stay apart (a theme's own accent shades can be near-identical).
-#: Looked up at paint time, so a theme switch recolours them straight away.
-_SEGMENT_TOKENS = ("storage_a", "storage_b", "storage_c")
+#: Theme tokens colouring the Storage usage segments: bright accent, dark
+#: shade, muted mid-tone, light neutral - picked per theme so the four always
+#: stay apart (a theme's own accent shades can be near-identical). Looked up
+#: at paint time, so a theme switch recolours them straight away.
+_SEGMENT_TOKENS = {
+    "Anomaly": "storage_a",
+    "GAMMA": "storage_b",
+    "ROMEO": "storage_d",
+    "Cache": "storage_c",
+}
 
 
 def _token_color(token: str) -> QColor:
     return QColor(active_theme_tokens().get(token, "#7f8f78"))
+
+
+def _deck_mode_icon():
+    return deck_icon(QColor(active_theme_tokens().get("accent_strong", "#9fe96f")), 28)
 
 
 #: Height of a card's title row - the pill buttons' height (Deck Mode,
@@ -91,6 +108,175 @@ def _card_title(text: str) -> QLabel:
     label.setFixedHeight(_TITLE_ROW_H)
     label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
     return label
+
+
+def _short_path(text: str) -> str:
+    """Show the home folder as ~ so paths stay readable."""
+    home = str(Path.home())
+    if text == home or text.startswith(home + "/"):
+        return "~" + text[len(home):]
+    return text
+
+
+#: How long a GAMMA update check is shown again on a visit before a new one.
+_UPDATE_CHECK_TTL_S = 600
+
+
+class _ElidedLabel(QLabel):
+    """A one-line label that cuts long text in the middle instead of
+    widening its card."""
+
+    def __init__(self, text: str = "") -> None:
+        super().__init__()
+        self._full = text
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.setMinimumWidth(40)
+        self.setText(text)
+
+    def setText(self, text: str) -> None:
+        self._full = text
+        self._elide()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._elide()
+
+    def _elide(self) -> None:
+        super().setText(
+            self.fontMetrics().elidedText(
+                self._full, Qt.TextElideMode.ElideMiddle, max(self.width(), 40)
+            )
+        )
+
+
+class _FocusClickGuard:
+    """Mixin for widgets that open a folder: tells apart the click that
+    only brings COMMANDER back to the front, so it can be ignored."""
+
+    _activated_at = 0.0
+    _window_active = True
+
+    def event(self, event) -> bool:
+        # Track activation from the events themselves: on KDE Wayland the
+        # focus click arrives before WindowActivate while isActiveWindow()
+        # already reports True. Child widgets never get ActivationChange.
+        if event.type() == QEvent.Type.WindowActivate:
+            self._window_active = True
+            self._activated_at = time.monotonic()
+        elif event.type() == QEvent.Type.WindowDeactivate:
+            self._window_active = False
+        return super().event(event)
+
+    def _is_focus_click(self) -> bool:
+        return not self._window_active or time.monotonic() - self._activated_at < 0.3
+
+
+class _FolderButton(_FocusClickGuard, QPushButton):
+    """A Quick actions folder button that ignores the focus click."""
+
+    def mousePressEvent(self, event) -> None:
+        if self._is_focus_click():
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+
+class _ComponentRow(_FocusClickGuard, QFrame):
+    """An Installation status row: bold name over a shortened path, a fix
+    button shown only while the component is missing, and the state on the
+    right. Clicking the row runs ``on_click``."""
+
+    def __init__(
+        self,
+        name: str,
+        detail: str = "",
+        ok: bool | None = None,
+        pending_text: str = "",
+        on_click=None,
+        fix_text: str = "",
+        on_fix=None,
+        on_change=None,
+    ) -> None:
+        super().__init__()
+        self.setObjectName("componentRow")
+        self.setAttribute(Qt.WidgetAttribute.WA_Hover)
+        self.state = "pending"
+        self._on_click = on_click
+        self._on_change = on_change
+        self._focus_click = False
+        self._pending_text = pending_text or tr("Unknown")
+        if on_click is not None:
+            self.setCursor(Qt.CursorShape.PointingHandCursor)
+        row = QHBoxLayout(self)
+        row.setContentsMargins(8, 4, 8, 4)
+        row.setSpacing(8)
+        text = QVBoxLayout()
+        text.setSpacing(0)
+        title = QLabel(tr(name))
+        title.setObjectName("settingTitle")
+        text.addWidget(title)
+        self._detail = _ElidedLabel()
+        self._detail.setObjectName("dim")
+        text.addWidget(self._detail)
+        row.addLayout(text, 1)
+        self._fix = QPushButton(fix_text)
+        self._fix.setObjectName("settingAction")
+        self._fix.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._fix.hide()
+        if on_fix is not None:
+            self._fix.clicked.connect(on_fix)
+        row.addWidget(self._fix, 0, Qt.AlignmentFlag.AlignVCenter)
+        self._dot = StatusDot()
+        row.addWidget(self._dot, 0, Qt.AlignmentFlag.AlignVCenter)
+        self._status = QLabel()
+        row.addWidget(self._status, 0, Qt.AlignmentFlag.AlignVCenter)
+        self.set_state(ok, detail)
+
+    def _show(self, state: str, color: str, text: str, detail: str) -> None:
+        self.state = state
+        self._detail.setText(_short_path(detail))
+        if detail:
+            tip = detail
+            if self._on_click is not None:
+                tip += "\n" + tr("Click to open the folder")
+            self.set_status_tooltip(tip)
+        self._status.setText(text)
+        self._dot.setStyleSheet(f"color: {color};")
+        self._status.setStyleSheet(f"color: {color};")
+        self._fix.setVisible(state == "missing" and bool(self._fix.text()))
+        if self._on_change is not None:
+            self._on_change()
+
+    def set_state(
+        self, ok: bool | None, detail: str = "", pending_text: str | None = None
+    ) -> None:
+        if ok is True:
+            self._show("ok", OK_GREEN.name(), tr("Installed"), detail)
+        elif ok is False:
+            self._show("missing", STATUS_RED.name(), tr("Not installed"), detail)
+        else:
+            text = pending_text if pending_text is not None else self._pending_text
+            self._show("pending", STATUS_GREY.name(), text, detail)
+
+    def set_installing(self, detail: str = "") -> None:
+        self._show("installing", WARN.name(), tr("Installing"), detail)
+
+    def set_status_tooltip(self, text: str) -> None:
+        self.setToolTip(text)
+
+    def mousePressEvent(self, event) -> None:
+        self._focus_click = self._is_focus_click()
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        if (
+            self._on_click is not None
+            and not self._focus_click
+            and event.button() == Qt.MouseButton.LeftButton
+            and self.rect().contains(event.position().toPoint())
+        ):
+            self._on_click()
+        super().mouseReleaseEvent(event)
 
 
 def _field_combo() -> NoWheelComboBox:
@@ -117,6 +303,67 @@ def _field(label: str, control: QWidget) -> QVBoxLayout:
     column.addWidget(caption)
     column.addWidget(control)
     return column
+
+
+def _add_divided(
+    layout: QVBoxLayout,
+    title: QWidget,
+    right_header: QHBoxLayout,
+    left: QGridLayout,
+    right: QGridLayout,
+    *,
+    gap: int,
+) -> None:
+    """Title over `left`, `right_header` over `right`, a divider midway between.
+
+    The divider spans the header row too, so it ends as far from the card's
+    top edge as from its bottom. Both sides keep their natural width.
+    """
+    grid = reflow.divided(QGridLayout())
+    # Columns 1 and 3 sit either side of the divider and add their own
+    # spacing even when empty, so half of `gap` each makes `gap` in all.
+    grid.setHorizontalSpacing(gap // 2)
+    grid.setVerticalSpacing(layout.spacing())
+    grid.addWidget(title, 0, 0, 1, 2)
+    grid.addLayout(right_header, 0, 3, 1, 2)
+    divider = QFrame()
+    divider.setObjectName("vDivider")
+    divider.setFixedWidth(1)
+    grid.addWidget(divider, 0, 2, 2, 1)
+    # Each side spans its stretch column, so its own stretch can push
+    # columns out to the divider. The sides' size hints are ignored and
+    # columns 0 and 4 hold the natural widths instead, so the divider sits
+    # midway as if the sides kept their natural width. The margins match
+    # the install rows: text ends 24 px from the divider and card edge.
+    boxes = []
+    for side, column, margins in ((left, 0, (0, 0, 16, 0)), (right, 4, (16, 0, 8, 0))):
+        box = QWidget()
+        box.setObjectName("panelTransparent")
+        box.setLayout(side)
+        side.setContentsMargins(*margins)
+        box.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        grid.addWidget(box, 1, min(column, 3), 1, 2)
+        boxes.append((box, side, column, margins))
+    grid.setColumnStretch(1, 1)
+    grid.setColumnStretch(3, 1)
+    grid.setRowStretch(1, 1)
+    layout.addLayout(grid)
+    # Measured once in the card, where the labels have their themed font.
+    for box, side, column, margins in boxes:
+        for child in box.findChildren(QWidget):
+            child.ensurePolished()
+        natural = side.sizeHint().width()
+        box.setMinimumWidth(natural)
+        grid.setColumnMinimumWidth(column, natural - margins[0] - margins[2])
+
+
+def _holder(layout) -> QWidget:
+    """``layout`` in a plain widget, so it can glide as one piece."""
+    widget = QWidget()
+    widget.setObjectName("panelTransparent")
+    layout.setContentsMargins(0, 0, 0, 0)
+    widget.setLayout(layout)
+    return widget
 
 
 class _Swatch(QWidget):
@@ -175,16 +422,24 @@ def _query_winetricks_status(prefix: str) -> dict[str, bool] | None:
 
 
 class DashboardPage(QWidget):
+    @property
+    def settings(self) -> CliSettings:
+        # The window swaps in a fresh object on every refresh_settings(): a
+        # copy kept here went stale, and a change saved through it (e.g. the
+        # MO2 profile switch) never reached the window's topbar mod counter.
+        return self.window.settings
+
     def __init__(self, window) -> None:
         super().__init__()
         self.window = window
-        self.settings: CliSettings = window.settings
         self._sizes: dict[str, int] = {}
         self._update_checking = False
+        self._update_card_args: tuple | None = None
         self._winetricks_task: BackgroundTask | None = None
         self._size_task: BackgroundTask | None = None
         self._mo2_profiles_task: BackgroundTask | None = None
         self._set_mo2_selected_task: BackgroundTask | None = None
+        self._profile_card_key: tuple | None = None
         # Re-walking a ~150GB install tree on every Dashboard visit is
         # expensive; reuse a recent scan of the same paths instead.
         self._size_cache_key: tuple[str, str, str] | None = None
@@ -215,16 +470,15 @@ class DashboardPage(QWidget):
 
         # Two rows of two: Installation status | Updates, then
         # Game stats | Storage usage.
-        status_row = QHBoxLayout()
-        status_row.setSpacing(16)
+        # Each pair goes one above the other when the window is narrow.
+        status_row = reflow.row(16)
         root.addLayout(status_row)
         self.install_status_card, _ = make_card(expand=True)
         status_row.addWidget(self.install_status_card, 1)
         self.updates_card, _ = make_card(expand=True)
         status_row.addWidget(self.updates_card, 1)
 
-        bottom = QHBoxLayout()
-        bottom.setSpacing(16)
+        bottom = reflow.row(16)
         root.addLayout(bottom)
         self._save: SaveStats | None = None
         self._stats_task: BackgroundTask | None = None
@@ -243,13 +497,20 @@ class DashboardPage(QWidget):
         # than keeping every card pinned at its natural size.
         root.addStretch(1)
 
+        checked = getattr(window, "commander_update_checked", None)
+        if checked is not None:
+            checked.connect(self._on_commander_update_checked)
         self.refresh()
 
     # ----- profile card -----
+    def on_theme_changed(self) -> None:
+        button = self.findChild(QPushButton, "deckModeButton")
+        if button is not None:
+            button.setIcon(_deck_mode_icon())
+
     def refresh(self) -> None:
         self._refresh_generation += 1
         self.window.refresh_settings()
-        self.settings = self.window.settings
         self._render_profile()
         self._render_install_status()
         self._build_actions()
@@ -262,45 +523,97 @@ class DashboardPage(QWidget):
     def _render_install_status(self) -> None:
         layout = self.install_status_card.layout()
         clear_layout(layout)
-        layout.addWidget(_card_title(tr("Installation status")))
+        header = QHBoxLayout()
+        header.setSpacing(6)
+        header.addWidget(_card_title(tr("Installation status")))
+        header.addStretch(1)
+        self._install_headline_dot = StatusDot()
+        header.addWidget(self._install_headline_dot, 0, Qt.AlignmentFlag.AlignVCenter)
+        self._install_headline = QLabel()
+        header.addWidget(self._install_headline, 0, Qt.AlignmentFlag.AlignVCenter)
+        layout.addLayout(header)
+        self._install_rows: list[_ComponentRow] = []
         profile = self.settings.active_profile
         if profile is None:
-            layout.addWidget(InstallStatusRow("STALKER Anomaly", tr("No active profile")))
-            layout.addWidget(InstallStatusRow("GAMMA Modpack", tr("No active profile")))
+            for name in ("STALKER Anomaly", "GAMMA Modpack"):
+                row = _ComponentRow(name, tr("No active profile"))
+                self._install_rows.append(row)
+                layout.addWidget(row)
+            self._update_install_headline()
             return
         op = getattr(self.window, "install_operation", None)
         anomaly_state = display_state(anomaly_installed(profile.anomaly), op, "anomaly")
         gamma_state = display_state(
             gamma_installed(profile.gamma, profile.mo2_profile), op, "gamma"
         )
-        if anomaly_state == "installing":
-            self.anomaly_status = InstallStatusRow("STALKER Anomaly", profile.anomaly)
-            self.anomaly_status.set_installing(tr("Installing Anomaly..."))
-        else:
-            self.anomaly_status = InstallStatusRow(
-                "STALKER Anomaly",
-                profile.anomaly,
-                ok=bool(anomaly_state),
-            )
-        layout.addWidget(self.anomaly_status)
-        if gamma_state == "installing":
-            self.gamma_status = InstallStatusRow("GAMMA Modpack", profile.gamma)
-            self.gamma_status.set_installing(tr("Installing GAMMA..."))
-        else:
-            self.gamma_status = InstallStatusRow(
-                "GAMMA Modpack", profile.gamma, ok=bool(gamma_state)
-            )
-        layout.addWidget(self.gamma_status)
-        self.winetricks_status = InstallStatusRow(
-            "Dependencies", tr("Checking..."), ok=None, pending_text=tr("Checking")
+        to_install = lambda: self.window.set_page("install")
+        self.anomaly_status = _ComponentRow(
+            "STALKER Anomaly",
+            profile.anomaly,
+            ok=anomaly_state if anomaly_state != "installing" else None,
+            on_click=lambda: self._open_folder(profile.anomaly),
+            fix_text=tr("Install"),
+            on_fix=to_install,
+            on_change=self._update_install_headline,
         )
-        layout.addWidget(self.winetricks_status)
+        if anomaly_state == "installing":
+            self.anomaly_status.set_installing(tr("Installing Anomaly"))
+        self.gamma_status = _ComponentRow(
+            "GAMMA Modpack",
+            profile.gamma,
+            ok=gamma_state if gamma_state != "installing" else None,
+            on_click=lambda: self._open_folder(profile.gamma),
+            fix_text=tr("Install"),
+            on_fix=to_install,
+            on_change=self._update_install_headline,
+        )
+        if gamma_state == "installing":
+            self.gamma_status.set_installing(tr("Installing GAMMA"))
+        self.winetricks_status = _ComponentRow(
+            "Dependencies",
+            tr("Checking"),
+            pending_text=tr("Checking"),
+            on_click=to_install,
+            fix_text=tr("Install missing"),
+            on_fix=self._install_missing_dependencies,
+            on_change=self._update_install_headline,
+        )
+        self._install_rows = [self.anomaly_status, self.gamma_status, self.winetricks_status]
+        for row in self._install_rows:
+            layout.addWidget(row)
+        self._update_install_headline()
         if op == "dependencies":
-            self.winetricks_status.set_installing(tr("Installing dependencies..."))
+            self.winetricks_status.set_installing(tr("Installing dependencies"))
         else:
             self._start_winetricks_status(
                 self._refresh_generation, self.winetricks_status
             )
+
+    def _update_install_headline(self) -> None:
+        """One line summing up the rows: green when all is installed, amber
+        when something is missing or installing, grey while still checking."""
+        label = getattr(self, "_install_headline", None)
+        rows = getattr(self, "_install_rows", None)
+        if label is None or not rows:
+            return
+        states = {row.state for row in rows}
+        if "installing" in states:
+            color, text = WARN, tr("Installing")
+        elif "missing" in states:
+            color, text = WARN, tr("Something needs attention")
+        elif "pending" in states:
+            color, text = STATUS_GREY, tr("Checking")
+        else:
+            color, text = OK_GREEN, tr("Everything is installed")
+        label.setText(text)
+        label.setStyleSheet("font-weight: 600;")
+        tint(label, color)
+        tint(self._install_headline_dot, color)
+
+    def _install_missing_dependencies(self) -> None:
+        self.window.set_page("install")
+        page = self.window._ensure_page("install")
+        page._start_winetricks()
 
     def _paused_winetricks_status(self) -> None:
         """Hold the status as Installed while the game is running.
@@ -381,8 +694,32 @@ class DashboardPage(QWidget):
 
     def _render_profile(self) -> None:
         layout = self.profile_card.layout()
-        clear_layout(layout)
         profile = self.settings.active_profile
+        try:
+            coop_mode = (
+                coop.status(profile.anomaly)
+                if profile is not None and coop.is_active(profile.anomaly)
+                else None
+            )
+        except OSError:
+            coop_mode = None
+        # Building this card's four dropdowns is most of a Dashboard visit:
+        # skip it when nothing it shows changed - unless a dropdown is still
+        # greyed out by a switch in flight, which only a rebuild undoes.
+        state = load_gui_settings()
+        name = profile.profile_name if profile is not None else None
+        key = (
+            repr(profile), [p.profile_name for p in self.settings.profiles], coop_mode,
+            find_extra_protons(), state.get("runner"), active_language(),
+            format_playtime(state.get("playtime_seconds", {}).get(name, 0.0)),
+            format_last_played(state.get("last_played_ts", {}).get(name)),
+        )
+        if key == self._profile_card_key and all(
+            combo.isEnabled() for combo in self.profile_card.findChildren(QComboBox)
+        ):
+            return
+        self._profile_card_key = key
+        clear_layout(layout)
         if profile is None:
             layout.addWidget(section_label(tr("No Active Profile")))
             layout.addWidget(
@@ -398,6 +735,18 @@ class DashboardPage(QWidget):
         header.setContentsMargins(0, 0, 0, 0)
         header.addWidget(_card_title(tr("Profile overview")))
         header.addStretch(1)
+        # Co-op badge: the game's engine is not the stock one, worth seeing
+        # before pressing Play. Click it to manage co-op.
+        if coop_mode is not None:
+            reverted = coop_mode == coop.REVERTED
+            badge = QPushButton(tr("Engine reverted") if reverted else tr("Co-op active"))
+            badge.setObjectName("verifyPill")
+            badge.setProperty("level", "attention" if reverted else "healthy")
+            badge.setFixedHeight(_TITLE_ROW_H)
+            badge.setCursor(Qt.CursorShape.PointingHandCursor)
+            badge.setToolTip(tr("Open Multiplayer"))
+            badge.clicked.connect(lambda: self.window.set_page("multiplayer"))
+            header.addWidget(badge)
         manage = QPushButton(tr("Manage profiles"))
         manage.setObjectName("pillButton")
         manage.setFixedHeight(_TITLE_ROW_H)
@@ -411,8 +760,7 @@ class DashboardPage(QWidget):
         # full-width row - and the session numbers as tiles on the right.
         # Anomaly/GAMMA/Cache folder paths are deliberately not repeated
         # here: the Installation status card already shows them.
-        body = QHBoxLayout()
-        body.setSpacing(24)
+        body = reflow.row(24)
         grid = QGridLayout()
         grid.setHorizontalSpacing(16)
         grid.setVerticalSpacing(10)
@@ -455,16 +803,24 @@ class DashboardPage(QWidget):
         )
         grid.addLayout(_field(tr("Current runner"), self.runner_combo), 1, 0)
 
-        # Download threads - a fixed 3-option "just pick a speed" choice
-        # rather than the Profiles page's free-form 1-20 spin box.
+        # Download threads - a fixed "just pick a speed" choice. Each CLI
+        # thread downloads and unpacks one mod, so 1 is one mod at a time.
         self.download_threads_combo = _field_combo()
         for value, threads_label in (
+            (1, tr("1 (One at a time)")),
+            (2, tr("2 (Slow connection)")),
             (4, tr("4 (Safe)")),
             (6, tr("6 (Balanced)")),
             (8, tr("8 (Fast)")),
         ):
             self.download_threads_combo.addItem(threads_label, value)
         idx = self.download_threads_combo.findData(profile.download_threads)
+        if idx < 0:
+            # Set from the terminal (CLI allows 1-20): show it, don't fake 1.
+            self.download_threads_combo.addItem(
+                str(profile.download_threads), profile.download_threads
+            )
+            idx = self.download_threads_combo.count() - 1
         self.download_threads_combo.blockSignals(True)
         self.download_threads_combo.setCurrentIndex(max(idx, 0))
         self.download_threads_combo.blockSignals(False)
@@ -476,14 +832,8 @@ class DashboardPage(QWidget):
         grid.addLayout(
             _field(tr("Download threads"), self.download_threads_combo), 1, 1
         )
-        body.addLayout(grid, 3)
+        body.addWidget(_holder(grid), 3)
 
-        divider = QFrame()
-        divider.setObjectName("vDivider")
-        divider.setFixedWidth(1)
-        body.addWidget(divider)
-
-        state = load_gui_settings()
         playtime_seconds = state.get("playtime_seconds", {}).get(profile.profile_name, 0.0)
         last_played_ts = state.get("last_played_ts", {}).get(profile.profile_name)
         tiles = QVBoxLayout()
@@ -506,7 +856,7 @@ class DashboardPage(QWidget):
             tiles.addWidget(caption_label)
             tiles.addSpacing(4)
         tiles.addStretch(1)
-        body.addLayout(tiles, 1)
+        body.addWidget(_holder(tiles), 1)
         layout.addLayout(body)
 
     def _sync_profile_combo(self, combo: NoWheelComboBox) -> None:
@@ -533,9 +883,14 @@ class DashboardPage(QWidget):
         if active is not None and game_running(force=True):
             answer = QMessageBox.question(
                 self,
-                tr("Game Running"),
-                tr("Mod Organizer / the game appears to be running under the current active profile ('{active_name}').\n\nSwitching the active profile now will not stop it, but COMMANDER's other pages will stop reflecting its state.\n\nSwitch anyway?", active_name=active.profile_name),
+                tr("The game is still running"),
+                tr("Mod Organizer or the game is running on the profile '{active_name}'.", active_name=active.profile_name),
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                points=(
+                    tr("Switching profiles won't close the game."),
+                    tr("COMMANDER will stop tracking it until you switch back."),
+                ),
+                labels={QMessageBox.StandardButton.Yes: tr("Switch anyway"), QMessageBox.StandardButton.No: tr("Cancel")},
             )
             if answer != QMessageBox.StandardButton.Yes:
                 self._sync_profile_combo(combo)
@@ -594,9 +949,10 @@ class DashboardPage(QWidget):
         combo.blockSignals(True)
         combo.clear()
         combo.addItems(names)
-        # Same preference as Mod Manager's own profile combo: MO2's actual
-        # selected profile wins over a stale CliProfile.mo2_profile field.
-        for candidate in (selected, profile.mo2_profile if profile else None):
+        # Show the profile Play launches (CliProfile.mo2_profile, passed to
+        # MO2 as -p), not MO2's own selected one: picking ROMEO inside MO2
+        # left this showing ROMEO while Play still started G.A.M.M.A.
+        for candidate in (profile.mo2_profile if profile else None, selected):
             if not candidate:
                 continue
             wanted = candidate.upper()
@@ -637,22 +993,20 @@ class DashboardPage(QWidget):
             # overwrite this change.
             QMessageBox.warning(
                 self,
-                tr("Mod Organizer is running"),
-                tr("Close Mod Organizer first - it would overwrite this change when it exits."),
+                tr("Close Mod Organizer first"),
+                tr("Mod Organizer is open and would undo this change when it closes. Close it, then try again."),
             )
             self._sync_mo2_profile_combo(combo)
             return
         combo.setEnabled(False)
         generation = self._refresh_generation
         task = BackgroundTask(
-            run_sync,
-            ["mo2", "config", "set", "selected-profile", name],
-            timeout=_QUERY_TIMEOUT,
-            parent=self,
+            select_mo2_profile, profile.gamma if profile is not None else "", name, parent=self
         )
+        owner = profile.profile_name if profile is not None else None
         task.result.connect(
-            lambda res, name=name, generation=generation: self._on_mo2_profile_set(
-                name, generation, *res
+            lambda res, name=name, generation=generation, owner=owner: self._on_mo2_profile_set(
+                name, generation, *res, owner=owner
             )
         )
         task.error.connect(
@@ -664,9 +1018,20 @@ class DashboardPage(QWidget):
         task.start()
 
     def _on_mo2_profile_set(
-        self, name: str, generation: int, rc: int, out: str
+        self, name: str, generation: int, rc: int, out: str, owner: str | None = None
     ) -> None:
         self._set_mo2_selected_task = None
+        if rc == 0:
+            # MO2's ini already changed: record it even when a refresh
+            # landed mid-call, or COMMANDER and MO2 disagree from now on.
+            # Saved on the profile the change was made for, not whichever
+            # is active now.
+            target = next(
+                (p for p in self.settings.profiles if p.profile_name == owner), None
+            ) if owner is not None else self.settings.active_profile
+            if target is not None and target.mo2_profile != name:
+                target.mo2_profile = name
+                self.settings.save()
         if generation != self._refresh_generation:
             return
         combo = getattr(self, "mo2_profile_combo", None)
@@ -675,16 +1040,12 @@ class DashboardPage(QWidget):
                 combo.setEnabled(True)
                 self._sync_mo2_profile_combo(combo)
             QMessageBox.warning(
-                self, tr("Failed"), out.strip() or tr("Could not set selected profile")
+                self, tr("Couldn't change the MO2 profile"), out.strip() or tr("Mod Organizer didn't accept the change. Try again, or pick the profile in Mod Organizer itself.")
             )
             return
         # _render_profile() rebuilds this card from scratch on refresh() -
         # do not touch `combo` after this point (see the Profile combo's
         # own switch handler above for why).
-        profile = self.settings.active_profile
-        if profile is not None and profile.mo2_profile != name:
-            profile.mo2_profile = name
-            self.settings.save()
         self.refresh()
 
     def _on_mo2_profile_set_error(self, generation: int) -> None:
@@ -755,7 +1116,16 @@ class DashboardPage(QWidget):
                 self._draw_sizes(None)
 
         def compute() -> dict[str, int]:
-            return {k: dir_size(p) for k, p in paths.items()}
+            sizes = {k: dir_size(p) for k, p in paths.items()}
+            gamma = Path(profile.gamma) if profile.gamma else None
+            if gamma is not None and romeo.installed(gamma):
+                # ROMEO's mods live inside GAMMA: shown on their own, taken
+                # out of GAMMA so the total stays the same.
+                folders = romeo.old_mods(gamma) + [gamma / "mods" / romeo.KEPT_MCM]
+                sizes["ROMEO"] = sum(dir_size(p) for p in folders if p.is_dir())
+                sizes["GAMMA"] = max(sizes["GAMMA"] - sizes["ROMEO"], 0)
+                sizes = {k: sizes[k] for k in _SEGMENT_TOKENS if k in sizes}
+            return sizes
 
         task = BackgroundTask(compute, parent=self)
         self._size_task = task
@@ -798,23 +1168,31 @@ class DashboardPage(QWidget):
         shown while the first measurement runs."""
         layout = self.sizes_card.layout()
         clear_layout(layout)
-        layout.addWidget(_card_title(tr("Storage usage")))
         if sizes is None:
+            layout.addWidget(_card_title(tr("Storage usage")))
             layout.addWidget(_SegmentedBar([]))
-            measuring = QLabel(tr("Measuring folder sizes..."))
+            measuring = QLabel(tr("Measuring folder sizes"))
             measuring.setObjectName("dim")
             layout.addWidget(measuring)
             self._draw_free_space(layout)
             return
-        total = sum(sizes.values())
+        # Title with the total on the right, which leaves the legend room
+        # for a fourth folder (ROMEO).
+        header = QHBoxLayout()
+        header.setContentsMargins(0, 0, 0, 0)
+        header.addWidget(_card_title(tr("Storage usage")))
+        header.addStretch(1)
+        total_label = QLabel(tr("Total: {arg}", arg=human_size(sum(sizes.values()))))
+        tint(total_label, OK_GREEN)
+        header.addWidget(total_label)
+        layout.addLayout(header)
         segments = [
-            (value, _SEGMENT_TOKENS[index % len(_SEGMENT_TOKENS)])
-            for index, value in enumerate(sizes.values())
+            (value, _SEGMENT_TOKENS.get(key, "storage_c")) for key, value in sizes.items()
         ]
         layout.addWidget(_SegmentedBar(segments))
 
-        # Legend: a swatch per folder, then the total on the right.
-        legend = QHBoxLayout()
+        # Legend: a swatch per folder.
+        legend = reflow.mark_row(QHBoxLayout())
         legend.setSpacing(18)
         for (key, value), (_value, token) in zip(sizes.items(), segments, strict=True):
             item = QHBoxLayout()
@@ -823,9 +1201,6 @@ class DashboardPage(QWidget):
             item.addWidget(QLabel(tr("{key}: {arg}", key=key, arg=human_size(value))))
             legend.addLayout(item)
         legend.addStretch(1)
-        total_label = QLabel(tr("Total: {arg}", arg=human_size(total)))
-        total_label.setStyleSheet(f"color: {OK_GREEN.name()};")
-        legend.addWidget(total_label)
         layout.addLayout(legend)
         self._draw_free_space(layout)
         if unavailable is not None:
@@ -1005,16 +1380,22 @@ class DashboardPage(QWidget):
             return
         if self._update_checking:
             return
-        self._update_checking = True
-        generation = self._refresh_generation
         profile_id = (
             profile.profile_name,
             profile.anomaly,
             profile.gamma,
             profile.cache,
         )
+        cached = getattr(self, "_update_cache", None)
+        if cached is not None and cached[1] == profile_id and time.monotonic() - cached[0] < _UPDATE_CHECK_TTL_S:
+            # Every visit used to fetch again and flash "Checking".
+            text, kind = status_summary(cached[2])
+            self._render_update_card(cached[2], text, kind)
+            return
+        self._update_checking = True
+        generation = self._refresh_generation
         self._render_update_card(
-            None, tr("Checking the active GAMMA installation for updates..."), "dim"
+            None, tr("Checking the active GAMMA installation for updates"), "dim"
         )
         task = BackgroundTask(
             check_updates,
@@ -1047,6 +1428,7 @@ class DashboardPage(QWidget):
             self._start_update_check()
             return
         self._update_checking = False
+        self._update_cache = (time.monotonic(), profile_id, status)
         text, kind = status_summary(status)
         self._render_update_card(status, text, kind)
 
@@ -1072,15 +1454,17 @@ class DashboardPage(QWidget):
         status_text: str,
         status_kind: str,
     ) -> None:
+        self._update_card_args = (status, status_text, status_kind)
         layout = self.updates_card.layout()
         clear_layout(layout)
         # Title with the check as a pill beside it, like Deck Mode and
         # Achievements on the neighbouring cards.
         header = QHBoxLayout()
         header.setContentsMargins(0, 0, 0, 0)
-        header.addWidget(section_label(tr("Updates")))
         header.addStretch(1)
-        check_button = QPushButton(tr("Check for updates"))
+        check_button = QPushButton(
+            tr("Checking") if self._update_checking else "⟳  " + tr("Check for updates")
+        )
         check_button.setObjectName("pillButton")
         check_button.setFixedHeight(34)
         check_button.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -1091,67 +1475,115 @@ class DashboardPage(QWidget):
         )
         check_button.clicked.connect(self._start_update_check)
         header.addWidget(check_button)
-        layout.addLayout(header)
 
-        if status is not None and status.installed is not None:
-            grid = QGridLayout()
-            grid.setHorizontalSpacing(16)
-            grid.setVerticalSpacing(6)
-            rows = (
-                (
-                    tr("Installed GAMMA version:"),
-                    format_version(
-                        status.installed, status.installed_human, show_build=False
-                    ),
-                ),
-                (
-                    tr("Latest GAMMA version:"),
-                    format_version(
-                        status.latest, status.latest_human, missing="-", show_build=False
-                    ),
-                ),
+        rows = QGridLayout()
+        rows.setHorizontalSpacing(16)
+        rows.setVerticalSpacing(8)
+        # Spare width goes after the version, so the states line up at the
+        # divider like the Installed column on the card to the left.
+        rows.setColumnStretch(1, 1)
+        # History on the right, past a divider.
+        history = QGridLayout()
+        history.setHorizontalSpacing(16)
+        history.setVerticalSpacing(8)
+        # Names start at the divider, times end at the card edge.
+        history.setColumnStretch(0, 1)
+
+        def add_row(name: str, value: str, state: str | None = None, ok=None, action=None, rows=rows):
+            """One line: dim name | value | coloured dot + state | button."""
+            row = rows.rowCount()
+            # Every row as tall as one with a button, so the lines stay even.
+            rows.setRowMinimumHeight(row, _TITLE_ROW_H - 4)
+            caption = QLabel(name)
+            caption.setObjectName("dim")
+            rows.addWidget(caption, row, 0)
+            rows.addWidget(QLabel(value), row, 1)
+            if state is not None:
+                cell = QHBoxLayout()
+                cell.setSpacing(6)
+                color = None if ok is None else (OK_GREEN if ok else WARN).name()
+                if color is not None:
+                    dot = StatusDot()
+                    dot.setStyleSheet(f"color: {color};")
+                    cell.addWidget(dot, 0, Qt.AlignmentFlag.AlignVCenter)
+                label = QLabel(state)
+                if color is not None:
+                    label.setStyleSheet(f"color: {color};")
+                else:
+                    label.setObjectName("dim")
+                cell.addWidget(label)
+                rows.addLayout(cell, row, 2)
+            if action is not None:
+                text, slot = action
+                button = QPushButton(text)
+                button.setObjectName("pillButton")
+                button.setFixedHeight(_TITLE_ROW_H - 4)
+                button.setCursor(Qt.CursorShape.PointingHandCursor)
+                button.clicked.connect(slot)
+                rows.addWidget(button, row, 4)
+
+        # GAMMA: the short result on the row, any longer explanation under it.
+        known = status is not None and status.installed is not None
+        gamma_version = (
+            format_version(status.installed, status.installed_human, show_build=False)
+            if known
+            else "–"
+        )
+        if status is None and self._update_checking:
+            add_row("GAMMA", gamma_version, tr("Checking for updates"))
+        elif status is not None and status.update_available:
+            add_row(
+                "GAMMA", gamma_version, tr("Update available"), False,
+                (tr("Open updates"), lambda: self.window.set_page("update")),
             )
-            for index, (key, value) in enumerate(rows):
-                # No wrapping: the key column sizes to its longest label
-                # instead of breaking "Installed GAMMA version:" in two.
-                key_label = QLabel(key)
-                key_label.setObjectName("dim")
-                grid.addWidget(key_label, index, 0)
-                grid.addWidget(QLabel(value), index, 1)
-            grid.setColumnStretch(2, 1)
-            layout.addLayout(grid)
+        elif status_kind == "accent":
+            add_row("GAMMA", gamma_version, tr("Up to date"), True)
+        else:
+            add_row("GAMMA", gamma_version, tr("Unknown"), False)
 
-        # The result as a dot + text, like the Installation status rows.
-        if status_kind == "accent":
-            # "Up to date" is a positive/ready result, same as the Installed
-            # status dot elsewhere on this page - use the same fixed green
-            # rather than the theme's accent color so the two always match.
-            color = OK_GREEN.name()
-        elif status_kind == "warn":
-            color = WARN.name()
+        # COMMANDER: the status bar's startup check, shown here too.
+        tag = getattr(self.window, "_commander_update_tag", None)
+        if not getattr(self.window, "_commander_update_known", False):
+            add_row("COMMANDER", __version_label__, tr("Checking for updates"))
+        elif getattr(self.window, "_commander_update_failed", False):
+            add_row("COMMANDER", __version_label__, tr("Unknown"), False)
+        elif tag:
+            add_row(
+                "COMMANDER", __version_label__, tr("Update available"), False,
+                (tr("Update now"), lambda: self.window._start_commander_update(tag)),
+            )
         else:
-            color = None
-        status_row = QHBoxLayout()
-        status_row.setSpacing(6)
-        if color is not None:
-            dot = QLabel("●")
-            dot.setStyleSheet(f"color: {color}; font-size: 18px;")
-            dot.setFixedWidth(24)
-            status_row.addWidget(dot)
-        status_label = info_label(status_text)
-        if color is not None:
-            status_label.setStyleSheet(f"color: {color};")
-        else:
-            status_label.setObjectName(status_kind)
-            status_label.style().unpolish(status_label)
-            status_label.style().polish(status_label)
-        status_row.addWidget(status_label, 1)
-        if status is not None and status.update_available:
-            goto_button = QPushButton(tr("Open updates"))
-            goto_button.setObjectName("primary")
-            goto_button.clicked.connect(lambda: self.window.set_page("update"))
-            status_row.addWidget(goto_button)
-        layout.addLayout(status_row)
+            add_row("COMMANDER", __version_label__, tr("Up to date"), True)
+
+        # History: when each one last changed.
+        from .update_page import _format_relative_time
+
+        def ago(path) -> str | None:
+            try:
+                return _format_relative_time(
+                    datetime.fromtimestamp(path.stat().st_mtime, timezone.utc)
+                )
+            except (OSError, AttributeError):
+                return None
+
+        profile = self.settings.active_profile
+        version_file = Path(profile.gamma, "version.txt") if profile and profile.gamma else None
+        add_row(tr("GAMMA last updated"), ago(version_file) or tr("Unknown"), rows=history)
+        # The AppImage is swapped whole on a self-update; a source run has
+        # no install step, so its own package stands in.
+        commander_file = commander_appimage_path() or Path(__file__).parent.parent / "__init__.py"
+        add_row(tr("COMMANDER last updated"), ago(commander_file) or tr("Unknown"), rows=history)
+        _add_divided(layout, section_label(tr("Updates")), header, rows, history, gap=16)
+
+        # Errors and other long results get their own line under the rows.
+        if status_kind == "warn":
+            note = info_label(status_text)
+            note.setObjectName("warn")
+            layout.addWidget(note)
+
+    def _on_commander_update_checked(self) -> None:
+        if self._update_card_args is not None:
+            self._render_update_card(*self._update_card_args)
 
     # ----- actions card -----
     def _build_actions(self) -> None:
@@ -1170,9 +1602,7 @@ class DashboardPage(QWidget):
         # corner, was easy to miss and did not say what it opened.
         deck_button = QPushButton(" " + tr("Deck Mode"))
         deck_button.setObjectName("deckModeButton")
-        deck_button.setIcon(
-            deck_icon(QColor(active_theme_tokens().get("accent_strong", "#9fe96f")), 28)
-        )
+        deck_button.setIcon(_deck_mode_icon())
         deck_button.setIconSize(QSize(28, 28))
         deck_button.setFixedHeight(34)
         deck_button.setToolTip(tr("Switch to Steam Deck Mode"))
@@ -1188,7 +1618,7 @@ class DashboardPage(QWidget):
         # still be holding the deleted widget.
         self._play_button = None
         if profile is not None:
-            play = QPushButton(tr("Play GAMMA"))
+            play = QPushButton(tr("Play GAMMA Co-op") if coop.is_active(profile.anomaly) else tr("Play GAMMA"))
             play.setObjectName("primary")
             self._play_button = play
             install_hover_grow_text(play, "accent_text")
@@ -1198,14 +1628,13 @@ class DashboardPage(QWidget):
             QTimer.singleShot(0, self._bind_play_state)
             grid = QGridLayout()
             grid.setSpacing(8)
+            # Anomaly and GAMMA folders open from the Installation status rows.
             buttons: list[tuple[str, str]] = [
-                (tr("Open Anomaly folder"), profile.anomaly),
-                (tr("Open GAMMA folder"), profile.gamma),
                 (tr("Open cache folder"), profile.cache),
                 (tr("Open log folder"), "logs"),
             ]
             for i, (text, target) in enumerate(buttons):
-                btn = QPushButton(text)
+                btn = _FolderButton(text)
                 if target == "logs":
                     from ..config import logs_dir
 
@@ -1241,6 +1670,11 @@ class DashboardPage(QWidget):
 
     def on_busy_changed(self, busy: bool) -> None:
         """Mirror the Play page lock while installation work is active."""
+        # An install, update or uninstall just changed the folders: measure
+        # them again on the next refresh instead of reusing the cached sizes.
+        if not busy:
+            self._size_cache_key = None
+            self._update_cache = None  # an update may have just been applied
         button = getattr(self, "_play_button", None)
         if button is None:
             return
@@ -1251,9 +1685,9 @@ class DashboardPage(QWidget):
     def on_install_activity_changed(self, operation: str | None) -> None:
         """Show active Anomaly/GAMMA installs in the dashboard status card."""
         if operation == "anomaly" and hasattr(self, "anomaly_status"):
-            self.anomaly_status.set_installing(tr("Installing Anomaly..."))
+            self.anomaly_status.set_installing(tr("Installing Anomaly"))
         elif operation == "gamma" and hasattr(self, "gamma_status"):
-            self.gamma_status.set_installing(tr("Installing GAMMA..."))
+            self.gamma_status.set_installing(tr("Installing GAMMA"))
         elif operation is None and self.settings.active_profile is not None:
             # Bump the generation the same way refresh() does: _render_
             # install_status() below replaces self.winetricks_status with a
@@ -1293,5 +1727,5 @@ class DashboardPage(QWidget):
     def _open_folder(self, target: str) -> None:
         if not open_in_file_manager(target):
             self.window.statusBar().showMessage(
-                f"Could not open folder: {target}", 6000
+                tr("Could not open folder: {path}", path=target), 6000
             )

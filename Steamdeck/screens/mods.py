@@ -1,13 +1,20 @@
 """Turning mods on and off, and installing new ones.
 
-Enable, disable, search, reorder, and Install mod (an archive from
+Enable, disable, search, reorder, Install mod (an archive from
 Downloads or an SD card, FOMOD installers included - see
-``Steamdeck/mod_installer.py``). Reordering is the desktop's drag and drop
+``Steamdeck/mod_installer.py``), and Tools (the desktop's backups, New
+category, Check for File Conflicts and the MO2 profile switcher, on the
+same files). Reordering is the desktop's drag and drop
 done with the pad: hold A on a mod to pick it up, D-pad up/down to carry it
 (across category headers too), A to put it down, B to put it back. Nothing
-is written until it is put down, and then once. Deleting mod folders stays
-a desktop job - getting it subtly wrong on a handheld costs the user their
-install.
+is written until it is put down, and then once.
+
+X opens the desktop's right-click menu: on a mod, Rename (a COMMANDER-only
+nickname), Move to Category, Show Conflicts, Reinstall from Cache and
+Update from Archive; on a category header, rename, move and (for one the
+user made) delete it - its mods stay, moved to Uncategorized. Deleting mod
+folders and MO2 profiles stays a desktop job - getting it subtly wrong on a
+handheld costs the user their install.
 
 Two implementation choices are worth knowing about:
 
@@ -25,6 +32,7 @@ Two implementation choices are worth knowing about:
 
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import QPointF, QRectF, QSize, Qt
@@ -38,25 +46,46 @@ from PySide6.QtWidgets import (
     QStyledItemDelegate,
 )
 
+from commander_gui import gui_settings
 from commander_gui.i18n import tr
+from commander_gui.launcher import select_mo2_profile
+from commander_gui.mod_install import ModInstallError, sanitize_name
 from commander_gui.modlist import (
+    _backups_newest_first,
+    _valid_name,
+    add_category,
+    custom_mod_names,
+    delete_category,
+    entries,
+    find_enabled_mod_file_conflicts,
     grouped,
+    mod_conflicts,
     modlist_path_for,
+    move_category,
     move_mod,
     read_lines,
+    rename_category,
+    reorder_to_original,
+    save_lines,
+    seed_new_mo2_profile,
     set_status_at,
+    snapshot_modlist_backup,
+    summarize_mod_conflicts,
 )
-from commander_gui.themes import active_theme_tokens
-from commander_gui.ui.common import mo2_running
+from commander_gui.themes import active_theme_tokens, token_color
+from commander_gui.ui.common import BackgroundTask, mo2_running
+from commander_gui.ui.mod_manager_page import cached_archive_for
+from commander_gui.ui.profiles_page import mo2_profile_names
 
 from .. import gamepad as pad
 from ..focus import enable_kinetic_scroll
-from ..modlist_io import ModlistWriteBlocked, write_lines
+from ..modlist_io import ModlistWriteBlocked, backup_path, guard_reason, write_lines
 from ..scale import px
 from ..widgets import (
     MIN_TOUCH,
     DeckOverlay,
     DeckPicker,
+    DeckTextPanel,
     deck_button,
     deck_label,
     picker_overlay,
@@ -82,6 +111,11 @@ _PRIORITY = Qt.ItemDataRole.UserRole + 4  # mod: MO2 priority number
 _COUNT = Qt.ItemDataRole.UserRole + 5  # header: mods in the category
 _COLLAPSED = Qt.ItemDataRole.UserRole + 6  # header: bool
 _GRABBED = Qt.ItemDataRole.UserRole + 7  # mod: picked up to be moved
+_NAME = Qt.ItemDataRole.UserRole + 8  # mod: its real (modlist) name
+
+#: grouped()'s label for trailing mods with no separator - not a real
+#: category, so it can't be renamed, moved or deleted.
+_NO_CATEGORY = "Uncategorized"
 
 
 def search_icon(color: QColor, size: int) -> QIcon:
@@ -140,13 +174,13 @@ class _ModRowDelegate(QStyledItemDelegate):
             painter.drawRoundedRect(inner, px(10), px(10))
         if selected:
             painter.setPen(QPen(QColor(tokens.get("focus", "#9fe96f")), 2))
-            painter.setBrush(QColor(tokens.get("btn_hover", "#222222")))
+            painter.setBrush(token_color("btn_hover", "#222222"))
             painter.drawRoundedRect(inner, px(10), px(10))
 
     def _paint_header(self, painter, rect, index, tokens, selected, pad) -> None:
         # The same "header band" treatment the desktop tree gives category
         # rows: the card colour behind bold accent text.
-        self._selection(painter, rect, tokens, selected, QColor(tokens.get("btn", "#222222")))
+        self._selection(painter, rect, tokens, selected, token_color("btn", "#222222"))
         collapsed = bool(index.data(_COLLAPSED))
         font = QFont(painter.font())
         font.setPixelSize(px(_HEADER_PX))
@@ -247,7 +281,7 @@ class ModsScreen(DeckScreen):
         # is a magnifier button at the right of the filter chips (or Y), and
         # the text lives in a hidden field the on-screen keyboard types into.
         self.search = QLineEdit()
-        self.search.setPlaceholderText(tr("Search mods..."))
+        self.search.setPlaceholderText(tr("Search mods"))
         self.search.textChanged.connect(self._on_search_changed)
         self.search.hide()
 
@@ -282,14 +316,20 @@ class ModsScreen(DeckScreen):
         self.search_button.setIcon(search_icon(QColor(active_theme_tokens().get("text", "#dddddd")), px(26)))
         self.search_button.setIconSize(QSize(px(26), px(26)))
         self.search_button.setFixedWidth(px(MIN_TOUCH + 32))
-        self.search_button.setToolTip(tr("Search mods..."))
+        self.search_button.setToolTip(tr("Search mods"))
         chips.addWidget(self.search_button)
         self.install_button = deck_button(
             "＋  " + tr("Install mod"), role="chip", on_click=self._install_mod
         )
         chips.addWidget(self.install_button, 1)
+        self.backups_button = deck_button(
+            "⚙  " + tr("Tools"), role="chip", on_click=self._show_tools
+        )
+        chips.addWidget(self.backups_button, 1)
         self.body.addLayout(chips)
         self._installer = None
+        self._conflicts_task: BackgroundTask | None = None
+        self._archive_task: BackgroundTask | None = None
 
         # Shown only while a search is active: what is being searched for,
         # and one tap (or B) to clear it.
@@ -350,6 +390,7 @@ class ModsScreen(DeckScreen):
         blocked = self.window.install_busy or mo2_running()
         self.list.setEnabled(not blocked)
         self.install_button.setEnabled(not blocked)
+        self.backups_button.setEnabled(not blocked and self._path is not None)
         if blocked:
             self.status.setText(
                 tr(
@@ -379,6 +420,7 @@ class ModsScreen(DeckScreen):
         # Parsed once: this runs on every keystroke in the search box, over a
         # modlist that is 500-900 entries in a real GAMMA install.
         groups = grouped(self._lines)
+        nicknames = self._nicknames()
         priority = 0
         restore_row = 0
         # Reversed, exactly like the desktop tree: MO2 writes modlist.txt
@@ -393,9 +435,10 @@ class ModsScreen(DeckScreen):
                     continue
                 if self._filter == "disabled" and enabled:
                     continue
-                if needle and needle not in name.lower():
+                shown_name = nicknames.get(name, name)
+                if needle and needle not in name.lower() and needle not in shown_name.lower():
                     continue
-                rows.append((name, line_index, enabled, priority))
+                rows.append((name, shown_name, line_index, enabled, priority))
             filtering = bool(needle) or self._filter != "all"
             if not rows and filtering:
                 continue
@@ -411,9 +454,10 @@ class ModsScreen(DeckScreen):
                 restore_row = self.list.count() - 1
             if collapsed:
                 continue
-            for name, line_index, enabled, number in rows:
-                item = QListWidgetItem(name)
+            for name, shown_name, line_index, enabled, number in rows:
+                item = QListWidgetItem(shown_name)
                 item.setData(_KIND, "mod")
+                item.setData(_NAME, name)
                 item.setData(_LINE, line_index)
                 item.setData(_ENABLED, enabled)
                 item.setData(_CATEGORY, category)
@@ -643,7 +687,7 @@ class ModsScreen(DeckScreen):
             return
         self._grabbed = None
         item.setData(_GRABBED, False)
-        name = item.text()
+        name = item.data(_NAME)
         row = self.list.row(item)
         category = None
         for above in range(row - 1, -1, -1):
@@ -656,9 +700,9 @@ class ModsScreen(DeckScreen):
         # "below that mod on screen" is move_mod's before=True, the same
         # inversion the desktop tree's drop makes.
         if before is not None and before.data(_KIND) == "mod":
-            new_lines = move_mod(self._lines, name, target_name=before.text(), before=True)
+            new_lines = move_mod(self._lines, name, target_name=before.data(_NAME), before=True)
         elif after is not None and after.data(_KIND) == "mod":
-            new_lines = move_mod(self._lines, name, target_name=after.text(), before=False)
+            new_lines = move_mod(self._lines, name, target_name=after.data(_NAME), before=False)
         else:
             new_lines = move_mod(self._lines, name, category=category)
         if new_lines != self._lines:
@@ -673,14 +717,14 @@ class ModsScreen(DeckScreen):
         if item is None:
             return
         self._grabbed = None
-        name = item.text()
+        name = item.data(_NAME)
         self._populate()
         self._select_mod(name)
         self.update_hints()
 
     def _select_mod(self, name: str) -> None:
         for mod in self.mod_items():
-            if mod.text() == name:
+            if mod.data(_NAME) == name:
                 self.list.setCurrentItem(mod)
                 self.list.scrollToItem(mod)
                 return
@@ -705,8 +749,12 @@ class ModsScreen(DeckScreen):
             self.open_search()
             return True
         if action == pad.CONTEXT:
-            if self.list.hasFocus():
-                self._category_actions()
+            item = self.list.currentItem()
+            if self.list.hasFocus() and item is not None:
+                if item.data(_KIND) == "header":
+                    self._category_menu(item.data(_CATEGORY))
+                else:
+                    self._mod_menu(item)
             else:
                 self._pick_category()
             return True
@@ -726,7 +774,7 @@ class ModsScreen(DeckScreen):
             back = "Back"
         return [
             ("A", "Toggle / fold · hold: move" if on_list else "Select"),
-            ("X", "Enable / disable category" if on_list else "Jump to category"),
+            ("X", "Options" if on_list else "Jump to category"),
             ("Y", "Search"),
             ("B", back),
         ]
@@ -759,11 +807,768 @@ class ModsScreen(DeckScreen):
             self._collapsed.discard(category)
         self._populate()
         for item in self.mod_items():
-            if item.text() == name:
+            if item.data(_NAME) == name:
                 self.list.setCurrentItem(item)
                 self.list.scrollToItem(item)
                 self.list.setFocus(Qt.FocusReason.OtherFocusReason)
                 return
+
+    # -- backups ----------------------------------------------------------
+    # The desktop Mod Manager's three backup tools, on the same files: the
+    # pristine .gammagui.bak and the timestamped modlist-*.bak snapshots.
+    def _show_backups(self) -> None:
+        if self._path is None or not self._path.is_file():
+            return
+        if self._refuse_if_blocked():
+            return
+        pristine = backup_path(self._path)
+        if pristine.is_file():
+            stamp = datetime.fromtimestamp(pristine.stat().st_mtime).astimezone().strftime("%Y-%m-%d %H:%M")
+            status = tr("Backup: {name} ({stamp})", name=pristine.name, stamp=stamp)
+        else:
+            status = tr("No backup yet")
+        self.window.show_overlay(
+            DeckOverlay(
+                tr("Backups"),
+                deck_label(
+                    tr("Save a backup of the current MO2 modlist.") + "\n\n" + status,
+                    role="body",
+                    wrap=True,
+                ),
+                [
+                    (tr("Create backup"), self._create_backup, "primary"),
+                    (tr("Restore backup"), self._pick_backup, "normal"),
+                    (tr("Restore original order"), self._restore_original_order, "normal"),
+                    (tr("Cancel"), self.window.dismiss_overlay, "normal"),
+                ],
+                panel_width=1100,
+                default_index=3,
+            )
+        )
+
+    def _refuse_if_blocked(self) -> bool:
+        reason = guard_reason(self.window)
+        if reason is not None:
+            self.window.notify(reason, 6000)
+            self._update_guard()
+            return True
+        return False
+
+    def _create_backup(self) -> None:
+        self.window.dismiss_overlay()
+        if self._path is None or self._refuse_if_blocked():
+            return
+        try:
+            snapshot_modlist_backup(self._path)
+        except OSError as exc:
+            self.window.notify(tr("Couldn't create the backup") + ": " + str(exc), 8000)
+            return
+        newest = _backups_newest_first(self._path)
+        name = newest[0].name if newest else self._path.name
+        self.window.notify(tr("Backup saved: {backup}", backup=name), 5000)
+
+    def _pick_backup(self) -> None:
+        self.window.dismiss_overlay()
+        if self._path is None:
+            return
+        backups = _backups_newest_first(self._path)
+        if not backups:
+            self.window.notify(tr("No backup yet"))
+            return
+        options = []
+        for bak in backups:
+            try:
+                stamp = datetime.fromtimestamp(bak.stat().st_mtime).astimezone().strftime("%Y-%m-%d %H:%M")
+            except OSError:
+                continue
+            options.append((f"{stamp}   ·   {bak.name}", str(bak)))
+        picker = DeckPicker("", options, 0)
+        picker.chosen.connect(lambda value: self._confirm_restore(Path(str(value))))
+        self.window.show_overlay(
+            picker_overlay(self.window, tr("Restore backup"), picker, panel_width=1100)
+        )
+
+    def _confirm_restore(self, bak: Path) -> None:
+        self.window.dismiss_overlay()
+
+        def _restore() -> None:
+            if self._path is None:
+                return
+            try:
+                lines = read_lines(bak)
+            except (OSError, ValueError) as exc:
+                self.window.notify(tr("Couldn't restore the backup") + ": " + str(exc), 8000)
+                return
+            # A snapshot of the list being replaced goes first, so this
+            # restore can itself be undone from the same picker.
+            try:
+                write_lines(self.window, self._path, lines, snapshot=True)
+            except ModlistWriteBlocked as exc:
+                self.window.notify(str(exc), 6000)
+                self._update_guard()
+                return
+            self._snapshot_taken = True
+            self.window.update_mod_counter()
+            self.refresh()
+            self.window.notify(tr("Restored from: {bak}", bak=bak.name), 5000)
+
+        self.window.confirm(
+            tr("Restore backup"),
+            tr("Your mod list is replaced with this backup:\n{bak}", bak=bak.name)
+            + "\n\n"
+            + tr("Changes you made since then are lost."),
+            _restore,
+            confirm_text=tr("Restore"),
+            confirm_role="danger",
+        )
+
+    def _restore_original_order(self) -> None:
+        self.window.dismiss_overlay()
+        if self._path is None or self._refuse_if_blocked():
+            return
+        pristine = backup_path(self._path)
+        try:
+            original = read_lines(pristine)
+        except (OSError, ValueError):
+            self.window.notify(tr("The original order isn't available"), 6000)
+            return
+        new_lines = reorder_to_original(self._lines, original)
+        if new_lines == self._lines:
+            self.window.notify(tr("The GAMMA mods are already in their original order."), 5000)
+            return
+
+        def _restore() -> None:
+            if self._write(new_lines):
+                self.refresh()
+                self.window.notify(
+                    tr("GAMMA mods restored to order from: {name}", name=pristine.name), 5000
+                )
+
+        self.window.confirm(
+            tr("Put GAMMA back in its original order?"),
+            tr("The GAMMA mods go back to their default load order.")
+            + "\n\n•  " + tr("Mods you installed yourself are kept.")
+            + "\n•  " + tr("Your categories are kept.")
+            + "\n•  " + tr("Mods stay on or off as they are."),
+            _restore,
+            confirm_text=tr("Restore order"),
+        )
+
+    # -- menus ------------------------------------------------------------
+    # The desktop Mod Manager's right-click menus and toolbar, as pickers:
+    # each entry runs its action once the menu is down.
+    def _menu(self, title: str, options: list[tuple[str, object]]) -> None:
+        picker = DeckPicker("", options, None)
+
+        def _run(action: object) -> None:
+            self.window.dismiss_overlay()
+            if callable(action):
+                action()
+
+        picker.chosen.connect(_run)
+        self.window.show_overlay(picker_overlay(self.window, title, picker))
+
+    def _ask_text(self, title: str, text: str, on_done) -> None:
+        """The on-screen keyboard for one line of text; ``on_done(stripped)``."""
+        edit = QLineEdit(text, self)
+        edit.setMaxLength(120)
+        edit.hide()
+
+        def _done(value: str) -> None:
+            edit.deleteLater()
+            on_done(value.strip())
+
+        self.window.open_keyboard(edit, title=title, on_done=_done)
+
+    def _show_tools(self) -> None:
+        if self._path is None or self._refuse_if_blocked():
+            return
+        profile = self.profile()
+        self._menu(
+            tr("Tools"),
+            [
+                (tr("Create backup"), self._create_backup),
+                (tr("Restore backup"), self._pick_backup),
+                (tr("Restore original order"), self._restore_original_order),
+                (tr("New category"), self._new_category),
+                (tr("Check for File Conflicts"), self._check_all_conflicts),
+                (
+                    tr("MO2 profile") + ":  " + (profile.mo2_profile if profile else "-"),
+                    self._pick_mo2_profile,
+                ),
+            ],
+        )
+
+    def _mod_menu(self, item: QListWidgetItem) -> None:
+        name = str(item.data(_NAME))
+        options: list[tuple[str, object]] = [
+            (tr("Rename"), lambda: self._rename_mod(name)),
+        ]
+        if name in self._nicknames():
+            options.append((tr("Reset Name"), lambda: self._set_nickname(name, "")))
+        options += [
+            (tr("Enable / disable category"), self._category_actions),
+            (tr("Move to Category"), lambda: self._pick_move_category(name)),
+            (tr("Show Conflicts"), lambda: self._show_mod_conflicts(name)),
+            (tr("Reinstall from Cache"), lambda: self._reinstall_from_cache(name)),
+        ]
+        # Only mods the user installed: a GAMMA mod's files are GAMMA's to
+        # update, and replacing them by hand breaks the next update.
+        if name in custom_mod_names(self._lines):
+            options.append((tr("Update from Archive"), lambda: self._update_from_archive(name)))
+        self._menu(item.text(), options)
+
+    def _category_menu(self, category: object) -> None:
+        category = str(category or _NO_CATEGORY)
+        options: list[tuple[str, object]] = [
+            (tr("Enable all"), lambda: self._set_category(category, True)),
+            (tr("Disable all"), lambda: self._set_category(category, False)),
+        ]
+        if category != _NO_CATEGORY:
+            options += [
+                (tr("Rename Category"), lambda: self._rename_category(category)),
+                (tr("Move Category Up"), lambda: self._move_category(category, 1)),
+                (tr("Move Category Down"), lambda: self._move_category(category, -1)),
+            ]
+            # Only categories the user made: never offer to delete GAMMA's own.
+            if category in self._tracked_categories()[2]:
+                options.append((tr("Delete Category"), lambda: self._delete_category(category)))
+        self._menu(category if category != _NO_CATEGORY else tr("Uncategorized"), options)
+
+    # -- nicknames (COMMANDER-only names; the desktop's "mod_nicknames") ----
+    def _nickname_key(self) -> str:
+        profile = self.profile()
+        return str(Path(profile.gamma)) if profile is not None and profile.gamma else ""
+
+    def _nicknames(self) -> dict[str, str]:
+        stored = gui_settings.load_gui_settings().get("mod_nicknames", {})
+        return dict(stored.get(self._nickname_key(), {}))
+
+    def _set_nickname(self, name: str, nickname: str) -> None:
+        key = self._nickname_key()
+        if not key:
+            return
+        stored = dict(gui_settings.load_gui_settings().get("mod_nicknames", {}))
+        names = dict(stored.get(key, {}))
+        nickname = nickname.strip()[:120]
+        if nickname and nickname != name:
+            names[name] = nickname
+        else:
+            names.pop(name, None)
+        if names:
+            stored[key] = names
+        else:
+            stored.pop(key, None)
+        gui_settings.save_gui_settings(mod_nicknames=stored)
+        self._populate()
+        self._select_mod(name)
+
+    def _rename_mod(self, name: str) -> None:
+        # Only COMMANDER's settings change, so this works while MO2 runs.
+        self._ask_text(
+            tr("Rename mod"),
+            self._nicknames().get(name, name),
+            lambda text: self._set_nickname(name, text) if text else None,
+        )
+
+    # -- categories -------------------------------------------------------
+    def _tracked_categories(self) -> tuple[dict, str | None, list[str]]:
+        """The categories the user made, as the desktop page tracks them:
+        ``(all tracked, this list's key, its names)``."""
+        tracked = dict(gui_settings.load_gui_settings().get("user_created_categories", {}))
+        profile = self.profile()
+        if profile is None:
+            return tracked, None, []
+        key = f"{profile.profile_name}/{profile.mo2_profile}"
+        # The older, profile-only key belongs to the profile's MO2 profile.
+        names = tracked.get(key, tracked.get(profile.profile_name, []))
+        return tracked, key, list(names)
+
+    def _save_tracked(self, change) -> None:
+        tracked, key, names = self._tracked_categories()
+        if key is not None:
+            tracked[key] = change(names)
+            gui_settings.save_gui_settings(user_created_categories=tracked)
+
+    def _new_category(self) -> None:
+        def _add(text: str) -> None:
+            if not text or self._refuse_if_blocked():
+                return
+            before = {name for name, _mods in grouped(self._lines)}
+            try:
+                new_lines = add_category(self._lines, sanitize_name(text))
+            except (ModInstallError, ValueError) as exc:
+                self.window.notify(tr("That category won't work") + ": " + str(exc), 6000)
+                return
+            if self._write(new_lines):
+                added = [n for n, _m in grouped(new_lines) if n not in before]
+                if added:
+                    self._save_tracked(lambda names: names + [added[0]])
+                self._populate()
+                if added:
+                    self._jump_to_category(added[0])
+
+        self._ask_text(tr("New category"), "", _add)
+
+    def _rename_category(self, old: str) -> None:
+        def _rename(text: str) -> None:
+            if not text or text == old or self._refuse_if_blocked():
+                return
+            before = {name for name, _mods in grouped(self._lines)}
+            try:
+                new_lines = rename_category(self._lines, old, text)
+            except ValueError as exc:
+                self.window.notify(tr("That name won't work") + ": " + str(exc), 6000)
+                return
+            if new_lines == self._lines or not self._write(new_lines):
+                return
+            # rename_category() may clean the name up: use what landed.
+            final = next((n for n, _m in grouped(new_lines) if n not in before), text)
+            self._save_tracked(lambda names: [final if n == old else n for n in names])
+            self._collapsed.discard(old)
+            self._populate()
+            self._jump_to_category(final)
+
+        self._ask_text(tr("New name for the category:"), old, _rename)
+
+    def _move_category(self, category: str, delta: int) -> None:
+        """+1 is Move Up on screen (the list shows the file bottom-up)."""
+        if self._refuse_if_blocked():
+            return
+        categories = [n for n, _m in grouped(self._lines) if n != _NO_CATEGORY]
+        if category not in categories:
+            return
+        neighbor = categories.index(category) + delta
+        if not 0 <= neighbor < len(categories):
+            return
+        try:
+            new_lines = move_category(self._lines, category, categories[neighbor], before=delta < 0)
+        except ValueError as exc:
+            self.window.notify(tr("Couldn't move the category") + ": " + str(exc), 6000)
+            return
+        if self._write(new_lines):
+            self._populate()
+            self._jump_to_category(category)
+
+    def _delete_category(self, category: str) -> None:
+        count = next((len(mods) for n, mods in grouped(self._lines) if n == category), 0)
+
+        def _delete() -> None:
+            if self._refuse_if_blocked():
+                return
+            try:
+                new_lines = delete_category(self._lines, category, delete_members=False)
+            except ValueError as exc:
+                self.window.notify(tr("Couldn't delete the category") + ": " + str(exc), 6000)
+                return
+            # A backup first, always: Restore backup in Tools undoes this.
+            if self._write(new_lines, snapshot=True):
+                self._save_tracked(lambda names: [n for n in names if n != category])
+                self._populate()
+
+        self.window.confirm(
+            tr('Delete the category "{category}"?', category=category),
+            tr("Its {count} mod(s) move to Uncategorized and stay as they are.", count=count),
+            _delete,
+            confirm_text=tr("Delete Category"),
+            confirm_role="danger",
+        )
+
+    def _pick_move_category(self, name: str) -> None:
+        current = next(
+            (c for c, mods in grouped(self._lines) for _s, n, _i in mods if n == name), None
+        )
+        options = [
+            (category, category)
+            for category in dict.fromkeys(c for c, _m in grouped(self._lines))
+            if category != current
+        ]
+        if not options:
+            return
+        picker = DeckPicker("", options, None, searchable=len(options) > 12)
+        picker.chosen.connect(lambda category: self._move_to_category(name, str(category)))
+        self.window.show_overlay(picker_overlay(self.window, tr("Move to Category"), picker))
+
+    def _move_to_category(self, name: str, category: str) -> None:
+        self.window.dismiss_overlay()
+        if self._refuse_if_blocked():
+            return
+        new_lines = move_mod(self._lines, name, category=category)
+        if new_lines != self._lines and self._write(new_lines):
+            self._collapsed.discard(category)
+            self._populate()
+            self._select_mod(name)
+
+    # -- conflicts --------------------------------------------------------
+    def _mods_dir(self) -> Path | None:
+        profile = self.profile()
+        if profile is None:
+            return None
+        mods_dir = Path(profile.gamma) / "mods"
+        if mods_dir.is_symlink():
+            self.window.notify(
+                tr("The GAMMA mods folder is a link to another folder, which COMMANDER doesn't change for safety. Point the profile at the real folder instead."),
+                8000,
+            )
+            return None
+        return mods_dir
+
+    def _run_conflicts(self, function, *args, on_done) -> None:
+        """Scanning every enabled mod's files takes a while: off the GUI thread."""
+        if self._conflicts_task is not None:
+            return
+        task = BackgroundTask(function, *args, parent=self)
+        self._conflicts_task = task
+
+        def _done(result) -> None:
+            self._conflicts_task = None
+            self.window.toast.hide()
+            on_done(result)
+
+        def _failed(message: str) -> None:
+            self._conflicts_task = None
+            self.window.notify(tr("Couldn't check for conflicts") + ": " + message, 8000)
+
+        task.result.connect(_done)
+        task.error.connect(_failed)
+        task.start()
+
+    def _show_mod_conflicts(self, name: str) -> None:
+        mods_dir = self._mods_dir()
+        if mods_dir is None:
+            return
+        lines = list(self._lines)
+        enabled = any(mod == name and status == "Enabled" for status, mod in entries(lines))
+        self.window.notify(tr("Checking conflicts for {name}", name=name), 0)
+
+        def _show(result) -> None:
+            overrides, overridden_by = result
+
+            def _section(title: str, rows: dict[str, list[str]]) -> str:
+                body = [
+                    f"   {mod}  ({len(files)})"
+                    for mod, files in sorted(rows.items(), key=lambda r: (-len(r[1]), r[0]))
+                ]
+                return title + "\n" + ("\n".join(body) if body else "   " + tr("None"))
+
+            text = tr(
+                "Files this mod shares with other enabled mods. Where two mods "
+                "ship the same file, the one lower in the list wins."
+            )
+            if not enabled:
+                text += "\n" + tr("This mod is disabled - this is what enabling it would do.")
+            text += "\n\n" + _section(tr("Overrides ({count})", count=len(overrides)), overrides)
+            text += "\n\n" + _section(
+                tr("Overridden by ({count})", count=len(overridden_by)), overridden_by
+            )
+            self._show_text(tr("Conflicts - {name}", name=self._nicknames().get(name, name)), text)
+
+        self._run_conflicts(mod_conflicts, lines, mods_dir, name, on_done=_show)
+
+    def _check_all_conflicts(self) -> None:
+        mods_dir = self._mods_dir()
+        if mods_dir is None:
+            return
+        self.window.notify(tr("Scanning"), 0)
+        custom = custom_mod_names(self._lines)
+
+        def _show(conflicts, show_all: bool = False) -> None:
+            if not conflicts:
+                self.window.notify(tr("None of your turned-on mods change the same file."), 6000)
+                return
+            rows = summarize_mod_conflicts(conflicts)
+            mine = [r for r in rows if r[0] in custom or r[1] in custom]
+            shown = rows if show_all else mine
+            if show_all:
+                info = tr(
+                    "Every mod pair that overrides each other's gamedata files, "
+                    "including GAMMA's own mods overriding each other - mostly "
+                    "intentional, curated by the pack itself."
+                )
+            elif not custom:
+                info = tr(
+                    "You haven't installed any mods of your own yet (nothing "
+                    "is filed under \"Custom Mods\"), so there's nothing here "
+                    "to check."
+                )
+            elif not mine:
+                info = tr("None of your own installed mods conflict with anything.")
+            else:
+                info = tr(
+                    "Conflicts touching a mod you installed yourself (Custom "
+                    "Mods) - the ones actually worth checking."
+                )
+            text = info + "\n\n" + "\n".join(
+                f"{winner}  >  {loser}  ({count})" for winner, loser, count in shown
+            )
+            buttons = []
+            if not show_all and len(rows) > len(mine):
+                buttons.append((
+                    tr("Show all {total} conflicts (including GAMMA's own)", total=len(rows)),
+                    lambda: _show(conflicts, True),
+                ))
+            self._show_text(
+                tr("{count} Mod Conflict(s) Found", count=len(shown)), text, buttons
+            )
+
+        self._run_conflicts(
+            find_enabled_mod_file_conflicts, list(self._lines), mods_dir, on_done=_show
+        )
+
+    def _show_text(self, title: str, text: str, buttons=()) -> None:
+        body = DeckTextPanel(text, min_height=200, max_height=520)
+        overlay = DeckOverlay(
+            title,
+            body,
+            [*((label, action, "normal") for label, action in buttons),
+             (tr("Close"), self.window.dismiss_overlay, "primary")],
+            panel_width=1100,
+        )
+        overlay.default_button = body
+        self.window.show_overlay(overlay)
+
+    # -- reinstall / update -----------------------------------------------
+    def _installer_for_job(self):
+        from ..mod_installer import DeckModInstaller
+
+        if self._installer is None:
+            self._installer = DeckModInstaller(self)
+        return self._installer
+
+    def _reinstall_from_cache(self, name: str) -> None:
+        if self._refuse_if_blocked():
+            return
+        profile = self.profile()
+        if profile is None or self._archive_task is not None:
+            return
+        # The MD5 check reads the whole archive (some are GBs): off the GUI thread.
+        self.window.notify(tr("Checking the cached copy of {name}", name=name), 0)
+        task = BackgroundTask(cached_archive_for, profile, profile.mo2_profile, name, parent=self)
+        self._archive_task = task
+
+        def _done(archive) -> None:
+            self._archive_task = None
+            self.window.toast.hide()
+            self._ask_reinstall_from_cache(name, archive)
+
+        def _failed(_message: str) -> None:
+            self._archive_task = None
+            self.window.toast.hide()
+            self._ask_reinstall_from_cache(name, None)
+
+        task.result.connect(_done)
+        task.error.connect(_failed)
+        task.start()
+
+    def _ask_reinstall_from_cache(self, name: str, archive: Path | None) -> None:
+        if archive is None:
+            self.window.show_overlay(
+                DeckOverlay(
+                    tr("Can't reinstall from the cache"),
+                    deck_label(
+                        tr(
+                            "There's no downloaded copy of '{name}' in the cache. The "
+                            "official GAMMA list may have changed since it was "
+                            "installed, or it isn't part of GAMMA.",
+                            name=name,
+                        )
+                        + "\n\n"
+                        + tr("Use the reset tools on the Utilities page instead."),
+                        role="body",
+                        wrap=True,
+                    ),
+                    [(tr("Close"), self.window.dismiss_overlay, "primary")],
+                )
+            )
+            return
+        self.window.confirm(
+            tr("Reinstall this mod?"),
+            tr("'{name}' is installed again from its downloaded copy in the cache.", name=name)
+            + "\n\n•  " + tr("Its files are replaced.")
+            + "\n•  " + tr("It stays on or off, in the same place in the list."),
+            lambda: self._installer_for_job().reinstall(
+                archive, name, tr("'{name}' was reinstalled from its cached archive.", name=name)
+            ),
+            confirm_text=tr("Reinstall"),
+        )
+
+    def _update_from_archive(self, name: str) -> None:
+        if self._refuse_if_blocked():
+            return
+        from ..mod_installer import ARCHIVE_SUFFIXES, pick_file
+
+        def _chosen(archive: Path) -> None:
+            installer = self._installer_for_job()
+            if installer._refuse_xrrazom(archive):
+                return
+            self.window.confirm(
+                tr("Update this mod?"),
+                tr("The files of '{name}' are replaced with {archive}.", name=name, archive=archive.name)
+                + "\n\n•  " + tr("It stays on or off, in the same place in the list.")
+                + "\n•  " + tr("If the update fails, the current files are put back."),
+                lambda: installer.reinstall(archive, name, tr("'{name}' was updated.", name=name)),
+                confirm_text=tr("Update"),
+            )
+
+        downloads = Path.home() / "Downloads"
+        pick_file(
+            self.window,
+            tr("Update {name} from archive", name=name),
+            downloads if downloads.is_dir() else Path.home(),
+            ARCHIVE_SUFFIXES,
+            _chosen,
+        )
+
+    # -- MO2 profiles -----------------------------------------------------
+    # Switch, New and Rename. Deleting one (its mod list, saves and
+    # settings) stays a desktop job.
+    def _pick_mo2_profile(self, select: str | None = None) -> None:
+        profile = self.profile()
+        if profile is None:
+            return
+        names = mo2_profile_names(profile.gamma)
+        current = profile.mo2_profile
+        picker = DeckPicker(
+            "",
+            [(("●  " if n == current else "○  ") + n, n) for n in names],
+            select or current,
+        )
+        picker.chosen.connect(lambda name: self._switch_mo2_profile(str(name)))
+
+        def _highlighted() -> str | None:
+            item = picker.list.currentItem()
+            return item.data(Qt.ItemDataRole.UserRole) if item is not None else None
+
+        overlay = DeckOverlay(
+            tr("MO2 profile"),
+            picker,
+            [(tr("Cancel"), self.window.dismiss_overlay, "normal")],
+            panel_width=1000,
+            header_buttons=[
+                (tr("Rename"), lambda: self._rename_mo2_profile(_highlighted()), "normal"),
+                ("+  " + tr("New"), self._new_mo2_profile, "normal"),
+            ],
+        )
+        overlay.default_button = picker.list
+        overlay.hints = (("A", "Switch"), ("X", "Rename"), ("Y", "New"), ("B", "Cancel"))
+
+        def _on_action(action: str) -> bool:
+            if action == pad.CONTEXT:
+                self._rename_mo2_profile(_highlighted())
+                return True
+            if action == pad.SEARCH:
+                self._new_mo2_profile()
+                return True
+            return False
+
+        overlay.action_handler = _on_action
+        self.window.show_overlay(overlay)
+
+    def _switch_mo2_profile(self, name: str) -> None:
+        self.window.dismiss_overlay()
+        profile = self.profile()
+        if profile is None or name == profile.mo2_profile or self._refuse_if_blocked():
+            return
+        # Both MO2's own choice and the COMMANDER profile, so launching and
+        # Mod Organizer itself agree on which mod list is in use.
+        rc, out = select_mo2_profile(profile.gamma, name)
+        if rc != 0:
+            self.window.notify(tr("Couldn't change the MO2 profile") + ": " + out.strip(), 8000)
+            return
+        profile.mo2_profile = name
+        try:
+            self.window.settings.save()
+        except OSError as exc:
+            self.window.notify(tr("Could not write settings.json:\n{exc}", exc=exc), 8000)
+        self._snapshot_taken = False
+        self._collapsed.clear()
+        self.window.profile_changed()
+        self.window.notify(tr("MO2 profile") + ": " + name)
+
+    def _new_mo2_profile(self) -> None:
+        profile = self.profile()
+        if profile is None or self._refuse_if_blocked():
+            return
+        existing = mo2_profile_names(profile.gamma)
+
+        def _named(name: str) -> None:
+            if not name:
+                return
+            if not _valid_name(name):
+                self.window.notify(tr("Profile names can't be empty or contain / or \\."), 6000)
+                return
+            if name in existing:
+                self.window.notify(tr('A profile named "{name}" already exists.', name=name), 6000)
+                return
+            empty = object()
+            picker = DeckPicker(
+                "",
+                [(tr("(Empty profile)"), empty), *((n, n) for n in existing)],
+                profile.mo2_profile,
+            )
+            picker.chosen.connect(lambda source: _create(name, None if source is empty else str(source)))
+            self.window.show_overlay(
+                picker_overlay(self.window, tr("Start with the mod list from:"), picker)
+            )
+
+        def _create(name: str, source: str | None) -> None:
+            self.window.dismiss_overlay()
+            if self._refuse_if_blocked():
+                return
+            try:
+                if not (source and seed_new_mo2_profile(profile.gamma, name, source_profile=source)):
+                    # Empty, or the source had no modlist.txt: still a profile.
+                    save_lines(Path(profile.gamma) / "profiles" / name / "modlist.txt", [])
+            except OSError as exc:
+                self.window.notify(tr("Couldn't create the MO2 profile") + ": " + str(exc), 8000)
+                return
+            self._pick_mo2_profile(select=name)
+
+        self._ask_text(tr("New MO2 profile"), "", _named)
+
+    def _rename_mo2_profile(self, old: str | None) -> None:
+        profile = self.profile()
+        if not old or profile is None or self._refuse_if_blocked():
+            return
+        gamma = profile.gamma
+        existing = mo2_profile_names(gamma)
+
+        def _rename(new: str) -> None:
+            if not new or new == old or self._refuse_if_blocked():
+                return
+            if not _valid_name(new):
+                self.window.notify(tr("Profile names can't be empty or contain / or \\."), 6000)
+                return
+            if new in existing:
+                self.window.notify(tr('A profile named "{name}" already exists.', name=new), 6000)
+                return
+            root = Path(gamma) / "profiles"
+            try:
+                (root / old).rename(root / new)
+            except OSError as exc:
+                self.window.notify(tr("Couldn't rename the MO2 profile") + ": " + str(exc), 8000)
+                return
+            settings = self.window.settings
+            tracked = dict(gui_settings.load_gui_settings().get("user_created_categories", {}))
+            for cli_profile in settings.profiles:
+                if cli_profile.gamma != gamma or cli_profile.mo2_profile != old:
+                    continue
+                cli_profile.mo2_profile = new
+                moved = tracked.pop(f"{cli_profile.profile_name}/{old}", None)
+                if moved is not None:
+                    tracked[f"{cli_profile.profile_name}/{new}"] = moved
+            gui_settings.save_gui_settings(user_created_categories=tracked)
+            if old == profile.mo2_profile or new == profile.mo2_profile:
+                # MO2 must not be left pointing at a folder that is gone.
+                select_mo2_profile(gamma, new)
+            try:
+                settings.save()
+            except OSError as exc:
+                self.window.notify(tr("Could not write settings.json:\n{exc}", exc=exc), 8000)
+            self.window.profile_changed()
+            self._pick_mo2_profile(select=new)
+
+        self._ask_text(tr("New name for \"{name}\":", name=old), old, _rename)
 
     # -- editing ----------------------------------------------------------
     def _toggle(self, item: QListWidgetItem) -> None:
@@ -782,14 +1587,18 @@ class ModsScreen(DeckScreen):
         self.list.viewport().update()
         self._render_counts(grouped(self._lines))
 
-    def _write(self, new_lines: list[str]) -> bool:
-        """Write through the guarded choke point; False if refused."""
+    def _write(self, new_lines: list[str], *, snapshot: bool = False) -> bool:
+        """Write through the guarded choke point; False if refused.
+
+        ``snapshot`` forces a backup of the list first (a deleted
+        category); otherwise one is taken before the session's first edit.
+        """
         try:
             write_lines(
                 self.window,
                 self._path,
                 new_lines,
-                snapshot=not self._snapshot_taken,
+                snapshot=snapshot or not self._snapshot_taken,
             )
         except ModlistWriteBlocked as exc:
             # Nothing was written, so rows must go on showing what the file

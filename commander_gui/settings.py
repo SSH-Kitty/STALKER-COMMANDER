@@ -8,6 +8,7 @@ safely share the same file.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -37,7 +38,7 @@ class CliProfile:
     gamma: str = "gamma/gamma"
     cache: str = "gamma/cache"
     mo2_profile: str = "G.A.M.M.A"
-    download_threads: int = 6
+    download_threads: int = 4
     mod_pack_maker_url: str = DEFAULT_MOD_PACK_MAKER_URL
     mod_list_url: str = DEFAULT_MOD_LIST_URL
     gamma_setup_repo_url: str = "https://github.com/Grokitach/gamma_setup"
@@ -163,12 +164,14 @@ def _corrupt_backup_path(path: Path) -> Path:
 
 
 def _reset_settings(path: Path, backup: Path) -> CliSettings:
+    settings = CliSettings()
+    settings.profiles = [CliProfile(active=True)]
     try:
         path.replace(backup)
     except OSError:
-        pass
-    settings = CliSettings()
-    settings.profiles = [CliProfile(active=True)]
+        # Couldn't set the corrupt file aside: don't save over it either,
+        # or the only copy of the user's profiles is gone.
+        return settings
     settings.save(path)
     return settings
 
@@ -213,7 +216,31 @@ def load_settings(path: Path | None = None) -> CliSettings:
         default = CliProfile(active=True)
         settings.profiles = [default]
         settings.save(path)
+    elif _absolute_folders(settings):
+        try:
+            settings.save(path)
+        except OSError:
+            pass  # still absolute in memory; saved with the next change
     return settings
+
+
+def _absolute_folders(settings: CliSettings) -> bool:
+    """Pin relative profile folders that exist here; True if any changed.
+
+    The CLI's defaults ("gamma/gamma") are relative to wherever COMMANDER was
+    started, so starting it from another folder lost the install. Only a
+    folder that exists is pinned: a start from the wrong folder leaves the
+    path relative, instead of saving a path where nothing is installed.
+    """
+    changed = False
+    for profile in settings.profiles:
+        for key in ("anomaly", "gamma", "cache"):
+            value = getattr(profile, key)
+            fixed = os.path.abspath(os.path.expanduser(value)) if value.strip() else value
+            if fixed != value and os.path.isdir(fixed):
+                setattr(profile, key, fixed)
+                changed = True
+    return changed
 
 
 def run_config_command(args: list[str], timeout: int = 120) -> tuple[int, str, str]:
@@ -222,6 +249,8 @@ def run_config_command(args: list[str], timeout: int = 120) -> tuple[int, str, s
     These commands perform extra side effects (MO2 selected_profile + modlist
     download), so we shell out to the CLI instead of editing JSON by hand.
     """
+    if args and args[0] in ("use", "delete") and any(a.lstrip().startswith("-") for a in args[1:]):
+        return 2, "", "A profile name can't start with \"-\""  # the CLI would read it as an option
     binary = str(cli_binary_path())
     cmd = [binary, "config", *args]
     try:

@@ -7,7 +7,9 @@ and shows the exact path to the user when finished.
 
 from __future__ import annotations
 
+import getpass
 import os
+import re
 import tempfile
 import zipfile
 from collections.abc import Callable
@@ -62,6 +64,8 @@ _SKIP_DIRS = frozenset(
         "node_modules",
         "licenses",
         "dumps",
+        # The Windows launcher's own files: perl, vim, its install logs.
+        ".grok's modpack installer",
     }
 )
 
@@ -80,6 +84,10 @@ def archive_name(now: datetime | None = None) -> str:
 def _is_candidate(path: Path) -> bool:
     """True for files worth archiving: log/crash extensions or crash-y names."""
     if path.suffix.lower() in _EXTENSIONS:
+        return True
+    # The previous launch's log (launcher.log.1): a player who restarts the
+    # game after a crash would otherwise send a dump without that session.
+    if path.suffix == ".1" and Path(path.stem).suffix.lower() == ".log":
         return True
     if path.suffix.lower() in _BINARY_EXTENSIONS:
         return False
@@ -166,12 +174,27 @@ def _prefix_candidates(root: Path) -> list[Path]:
 
 
 def _scrub(text: str) -> str:
-    """Credential redaction plus the home path, which names the user."""
+    """Credential redaction plus the home path and login name, which name
+    the user - the login also as a path part anywhere else (/run/media/<login>,
+    Wine's Z:\\home\\<login>, any case)."""
     from .diagnostics import redact
 
     home = str(Path.home())
     redacted = redact(text)
-    return redacted.replace(home, "~") if len(home) > 1 else redacted
+    if len(home) > 1:
+        redacted = redacted.replace(home, "~")
+    try:
+        login = getpass.getuser()
+    except Exception:  # noqa: BLE001 - no login name: nothing to hide
+        return redacted
+    if not login:
+        return redacted
+    return re.sub(
+        r"(?i)(?<=[/\\])" + re.escape(login) + r"(?=[/\\]|$|[\s\"':;,)\]])",
+        "user",
+        redacted,
+        flags=re.MULTILINE,
+    )
 
 
 def _unique_path(directory: Path, name: str) -> Path:
@@ -200,6 +223,11 @@ def build_log_dump(
     """
     dest_dir.mkdir(parents=True, exist_ok=True)
     target = _unique_path(dest_dir, archive_name(now))
+    try:
+        login = getpass.getuser()
+    except Exception:  # noqa: BLE001 - no login name: nothing to hide
+        login = ""
+    login = login or "\0"  # never matches a real path part
     manifest_lines: list[str] = [
         "COMMANDER log dump",
         f"Created: {(now or datetime.now().astimezone()).strftime('%Y-%m-%d %H:%M:%S')}",
@@ -235,15 +263,26 @@ def build_log_dump(
                         skipped.append(f"{safe_label}/{file_path.name} (total cap)")
                         continue
                     relative = file_path.relative_to(root)
-                    arcname = f"{safe_label}/{relative.as_posix()}"
+                    # A Wine prefix's drive_c/users/<login>/ names the user.
+                    parts = ["user" if part == login else part for part in relative.parts]
+                    arcname = f"{safe_label}/{'/'.join(parts)}"
+                    suffix = file_path.suffix.lower()
                     try:
-                        if file_path.suffix.lower() in {".log", ".crash", ".txt"}:
-                            content = file_path.read_bytes().decode(
-                                "utf-8", errors="replace"
-                            )
+                        data = file_path.read_bytes()
+                        content = None
+                        if suffix in {".log", ".crash", ".txt"}:
+                            content = data.decode("utf-8", errors="replace")
+                        elif suffix not in {".dmp", ".mdmp"}:
+                            # Picked up by a crash-y name (.json, .xml, .ini...):
+                            # text gets the same redaction as any log.
+                            try:
+                                content = data.decode("utf-8")
+                            except UnicodeDecodeError:
+                                content = None
+                        if content is not None:
                             zf.writestr(arcname, _scrub(content))
                         else:
-                            zf.write(file_path, arcname)
+                            zf.writestr(arcname, data)
                     except OSError:
                         continue
                     included += 1
@@ -255,9 +294,11 @@ def build_log_dump(
                     # in the manifest matters: unlike every other file
                     # here, this one was never scanned at all.
                     tag = (
-                        "ok, NOT REDACTED - raw memory dump"
-                        if file_path.suffix.lower() in {".dmp", ".mdmp"}
-                        else "ok"
+                        "ok"
+                        if content is not None
+                        else "ok, NOT REDACTED - raw memory dump"
+                        if suffix in {".dmp", ".mdmp"}
+                        else "ok, NOT REDACTED - binary file"
                     )
                     manifest_lines.append(f"[{tag}] {arcname} ({size} bytes)")
             for name, text in sorted((extra_texts or {}).items()):
@@ -269,7 +310,7 @@ def build_log_dump(
                 manifest_lines.append("")
                 manifest_lines.append("Skipped:")
                 manifest_lines.extend(f"- {entry}" for entry in skipped)
-            zf.writestr("MANIFEST.txt", "\n".join(manifest_lines) + "\n")
+            zf.writestr("MANIFEST.txt", _scrub("\n".join(manifest_lines) + "\n"))
         Path(temp_path).replace(target)
     except BaseException:
         Path(temp_path).unlink(missing_ok=True)
@@ -310,7 +351,7 @@ def create_log_dump(
     sources = gather_default_sources()
     for label, root in sorted(sources.items()):
         say(f"Scanning {label}: {root}")
-    say("Compressing logs...")
+    say("Compressing logs")
     return build_log_dump(
         log_dumps_dir(),
         sources,

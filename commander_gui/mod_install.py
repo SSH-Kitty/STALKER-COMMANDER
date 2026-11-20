@@ -22,12 +22,21 @@ from .config import cli_binary_path
 INSTALLING_MARKER = ".commander-installing"
 
 
+#: One ``Key = value`` line of ``7zz l -slt`` output.
+_LISTING_LINE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9 ]* =( |$)")
+_MAX_ENTRIES = 500_000
+
+
 class ModInstallError(RuntimeError):
     """Raised when an archive cannot be safely installed."""
 
 
 def find_archiver() -> Path:
-    """Locate the bundled 7zz helper, falling back to a system 7-Zip."""
+    """Locate the bundled 7zz helper, falling back to a system 7-Zip.
+
+    COMMANDER ships this 7zz itself: the CLI dropped it in 1.41 for an
+    in-process 7z.so, which only the CLI can use. Keep it on a CLI update.
+    """
     bundled = cli_binary_path().parent / "resources" / "7zz"
     if bundled.is_file() and os.access(bundled, os.X_OK):
         return bundled
@@ -47,6 +56,13 @@ def sanitize_name(name: str) -> str:
     if not cleaned or cleaned in {".", ".."}:
         raise ModInstallError("The archive does not have a usable mod name")
     return cleaned[:180]
+
+
+def drop_romeo_prefix(name: str) -> str:
+    """A new mod's name without a leading "xx-". That prefix marks ROMEO's
+    mods, and Uninstall ROMEO deletes by it (romeo.old_mods), so a mod
+    added to any other MO2 profile never gets it."""
+    return re.sub(r"^(?:\s*xx-)+", "", name, flags=re.IGNORECASE)
 
 
 def default_mod_name(archive: Path) -> str:
@@ -86,7 +102,7 @@ def _list_archive_paths(archiver: Path, archive: Path) -> list[str]:
         result = subprocess.run(
             # -p with no password: an encrypted archive fails instead of
             # waiting for a password on a terminal nobody is looking at.
-            [str(archiver), "l", "-slt", "-p", str(archive)],
+            [str(archiver), "l", "-slt", "-p", "--", str(archive)],
             stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
@@ -124,6 +140,13 @@ def _list_archive_paths(archiver: Path, archive: Path) -> list[str]:
             continue
         path = None
         for line in block.splitlines():
+            if line.strip() and not _LISTING_LINE_RE.match(line):
+                # A name holding a line break (or a blank line) would split
+                # its own entry across blocks and hide the tail from the
+                # path checks below.
+                raise ModInstallError("Archive contains an entry name with a line break")
+            if line.startswith("Hard Link = ") and line.strip() != "Hard Link =":
+                raise ModInstallError("Archive contains an unsupported link")
             if line.startswith("Path = ") and path is None:
                 path = line[len("Path = ") :]
             elif (
@@ -142,6 +165,8 @@ def _list_archive_paths(archiver: Path, archive: Path) -> list[str]:
                 raise ModInstallError("Archive contains an unsupported symlink")
         if path is not None:
             paths.append(path)
+            if len(paths) > _MAX_ENTRIES:
+                raise ModInstallError("Archive has too many entries")
     return paths
 
 
@@ -164,6 +189,24 @@ def _validate_archive_entries(archiver: Path, archive: Path) -> None:
             raise ModInstallError("Archive contains a path-traversal entry")
 
 
+def _check_room(archiver: Path, archive: Path, folder: Path) -> None:
+    """Refuse an archive that unpacks to more than the drive has free: a
+    small archive can expand to hundreds of GB, and on a Deck that drive is
+    often the home one Steam itself needs."""
+    from .romeo import unpacked_size  # deferred: romeo imports this module
+
+    size = unpacked_size(archiver, archive)
+    try:
+        free = shutil.disk_usage(folder).free
+    except OSError:
+        return
+    if size is not None and size > free:
+        raise ModInstallError(
+            f"Not enough free space: the archive unpacks to {size // 1024**2:,} MB, "
+            f"{free // 1024**2:,} MB is free"
+        )
+
+
 def extract_archive(
     archive: Path,
     staging: Path,
@@ -179,8 +222,9 @@ def extract_archive(
     _validate_archive_entries(archiver, archive)
     if cancel_event is not None and cancel_event.is_set():
         raise ModInstallError("Mod installation cancelled")
+    _check_room(archiver, archive, staging.parent)
     staging.mkdir(parents=True, exist_ok=False)
-    command = [str(archiver), "x", str(archive), f"-o{staging}", "-y", "-p", "-bsp1"]
+    command = [str(archiver), "x", f"-o{staging}", "-y", "-p", "-bsp1", "--", str(archive)]
     try:
         process = subprocess.Popen(
             command,
@@ -211,13 +255,15 @@ def extract_archive(
         output: list[str] = []
         if process.stdout is None:
             raise ModInstallError("Archive extractor produced no output stream")
-        for line in process.stdout:
+        for line in _output_pieces(process.stdout):
             clean = line.strip()
             if clean:
                 output.append(clean)
-                if progress is not None:
-                    match = re.search(r"(\d{1,3})%", clean)
-                    progress(int(match.group(1)) if match else None, clean)
+                # Only percent lines: 7-Zip's header ("Blocks = 12",
+                # "Physical Size = ...") means nothing to a player.
+                match = re.match(r"(\d{1,3})%", clean)
+                if progress is not None and match:
+                    progress(int(match.group(1)), clean)
             if cancel_event is not None and cancel_event.is_set():
                 process.terminate()
                 try:
@@ -249,6 +295,21 @@ def extract_archive(
         raise
     finally:
         stop_watching.set()
+
+
+def _output_pieces(stream):
+    """Yield 7-Zip output split on newlines and on the backspaces/carriage
+    returns its ``-bsp1`` progress uses, so percents arrive as they happen."""
+    piece = ""
+    while char := stream.read(1):
+        if char in "\b\r\n":
+            if piece:
+                yield piece
+            piece = ""
+        else:
+            piece += char
+    if piece:
+        yield piece
 
 
 def _make_owner_writable(root: Path) -> None:
@@ -297,21 +358,30 @@ def _unwrap_tarball(
     if cancel_event is not None and cancel_event.is_set():
         raise ModInstallError("Mod installation cancelled")
     try:
-        result = subprocess.run(
-            [str(archiver), "x", str(inner), f"-o{staging}", "-y", "-p"],
+        process = subprocess.Popen(
+            [str(archiver), "x", f"-o{staging}", "-y", "-p", "--", str(inner)],
             stdin=subprocess.DEVNULL,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
             text=True,
             errors="replace",
-            timeout=3600,
-            check=False,
         )
-    except (OSError, subprocess.TimeoutExpired) as exc:
+    except (OSError, ValueError) as exc:
         raise ModInstallError(f"Could not unpack the inner tar archive: {exc}") from exc
-    if result.returncode != 0:
-        detail = "\n".join(result.stdout.splitlines()[-8:])
+    # Polled, not one blocking run(): Cancel must stop a multi-GB unpack now.
+    while True:
+        try:
+            output, _ = process.communicate(timeout=0.2)
+            break
+        except subprocess.TimeoutExpired:
+            if cancel_event is not None and cancel_event.is_set():
+                process.kill()
+                process.communicate()
+                raise ModInstallError("Mod installation cancelled") from None
+    if process.returncode != 0:
+        detail = "\n".join(output.splitlines()[-8:])
         raise ModInstallError(
-            f"Archive extraction failed (exit code {result.returncode})\n{detail}"
+            f"Archive extraction failed (exit code {process.returncode})\n{detail}"
         )
     inner.unlink()
 
@@ -378,7 +448,10 @@ def move_payload(
     payload = payload_root(staging)
     if not any(payload.iterdir()):
         raise ModInstallError("The archive contains no installable files")
-    destination.mkdir()
+    try:
+        destination.mkdir()
+    except FileExistsError as exc:  # created since the check above
+        raise ModInstallError(f"Mod directory already exists: {destination.name}") from exc
     (destination / INSTALLING_MARKER).touch()
     try:
         for child in list(payload.iterdir()):
@@ -432,6 +505,7 @@ def make_staging_dir(gamma_dir: str | Path | None) -> Path:
     written.
     """
     try:
+        atomic.remove_stale(gamma_dir, ".gamma-mod-install-*")
         return Path(tempfile.mkdtemp(prefix=".gamma-mod-install-", dir=gamma_dir))
     except OSError:
         return Path(tempfile.mkdtemp(prefix="gamma-mod-install-"))

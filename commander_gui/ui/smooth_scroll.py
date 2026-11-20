@@ -29,6 +29,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .. import gui_settings
+
 #: Length of one glide.
 GLIDE_MS = 200
 _ANIMATION_NAME = "commanderSmoothWheel"
@@ -43,7 +45,11 @@ class SmoothWheelScroller(QObject):
 
     # -- filter -----------------------------------------------------------
     def eventFilter(self, obj, event) -> bool:
-        if event.type() != QEvent.Type.Wheel or not isinstance(obj, QWidget):
+        return event.type() == QEvent.Type.Wheel and self.wheel(obj, event)
+
+    def wheel(self, obj, event) -> bool:
+        """A wheel event: glide it, or False to let Qt have it."""
+        if not isinstance(obj, QWidget):
             return False
         area = obj.parentWidget()
         if not isinstance(area, QAbstractScrollArea) or area.viewport() is not obj:
@@ -62,6 +68,8 @@ class SmoothWheelScroller(QObject):
 
     # -- scrolling --------------------------------------------------------
     def _glide(self, area: QAbstractScrollArea, delta: int) -> bool:
+        if not gui_settings.animations_enabled():
+            return False
         bar = area.verticalScrollBar()
         if bar is None or bar.maximum() <= bar.minimum():
             return False

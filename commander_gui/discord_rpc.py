@@ -23,6 +23,7 @@ import json
 import os
 import socket
 import struct
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -163,7 +164,7 @@ def _connect(client_id: str) -> _IpcClient | None:
             sock.connect(str(path))
             if client.handshake(client_id):
                 return client
-        except (OSError, ValueError, struct.error):
+        except (OSError, ValueError, AttributeError, struct.error):
             pass
         sock.close()
     return None
@@ -208,17 +209,25 @@ def update_presence(
 
 
 def stop_presence(rpc) -> None:
-    """Clear the activity and disconnect. No-op if ``rpc`` is None."""
+    """Clear the activity and disconnect. No-op if ``rpc`` is None.
+
+    Done on a thread of its own: the clear waits up to 2 s for Discord's
+    reply, and callers are on the GUI thread (the game just exited).
+    """
     if rpc is None:
         return
-    try:
-        rpc.set_activity(None)
-    except Exception:  # noqa: BLE001, S110
-        pass
-    try:
-        rpc.close()
-    except Exception:  # noqa: BLE001, S110
-        pass
+
+    def _stop() -> None:
+        try:
+            rpc.set_activity(None)
+        except Exception:  # noqa: BLE001, S110
+            pass
+        try:
+            rpc.close()
+        except Exception:  # noqa: BLE001, S110
+            pass
+
+    threading.Thread(target=_stop, name="discord-stop", daemon=True).start()
 
 
 def probe_discord(client_id: str = DEFAULT_CLIENT_ID) -> bool:

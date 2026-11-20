@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import itertools
 import time
+from pathlib import Path
 from typing import ClassVar
 
 from PySide6.QtCore import (
@@ -11,12 +13,14 @@ from PySide6.QtCore import (
     QObject,
     QPointF,
     QPropertyAnimation,
+    QSize,
     Qt,
     QTimer,
     QVariantAnimation,
     Signal,
 )
 from PySide6.QtGui import (
+    QActionGroup,
     QColor,
     QFont,
     QGuiApplication,
@@ -24,25 +28,29 @@ from PySide6.QtGui import (
     QLinearGradient,
     QPainter,
     QPen,
+    QPixmap,
     QRadialGradient,
     QShortcut,
 )
 from PySide6.QtWidgets import (
     QApplication,
+    QFrame,
     QGraphicsOpacityEffect,
     QHBoxLayout,
     QLabel,
     QMainWindow,
-    QMessageBox,
-    QProgressDialog,
+    QMenu,
     QPushButton,
     QStackedWidget,
+    QStatusBar,
+    QSystemTrayIcon,
     QTabBar,
     QVBoxLayout,
     QWidget,
 )
 
 from .. import __version__, __version_label__, gui_settings
+from ..diagnostics import debug_summary
 from ..i18n import LANGUAGE_INFO, active_language, set_active_language
 from ..self_update import (
     commander_appimage_path,
@@ -57,9 +65,15 @@ from ..themes import (
     active_theme_tokens,
     build_palette,
     build_stylesheet,
+    resolve_theme,
     set_active_theme,
 )
-from ..updates import check_commander_update, check_updates, effective_update_channel
+from ..updates import (
+    check_commander_update,
+    check_updates,
+    effective_update_channel,
+)
+from . import graphics_window, reflow
 from .about_page import _DISCORD, AboutPage
 from .common import (
     OK_GREEN,
@@ -67,22 +81,33 @@ from .common import (
     WARN,
     BackgroundTask,
     NoWheelComboBox,
+    ProgressArea,
+    activate_profile,
     count_active_mods,
+    game_running,
     human_size,
     instance_window_title,
-    mo2_running,
+    notice,
     notify_desktop,
     open_url,
+    play_click_sound,
+    play_feedback_sound,
     resume_after_shutdown,
     shutdown_active_runners,
     tr,
 )
+from .credits_page import CreditsPage
 from .dashboard import DashboardPage
-from .help_page import HelpPage
+from .dialogs import MessageBox as QMessageBox
+from .dialogs import ProgressDialog
 from .install_page import InstallPage, _resume_state_matches
+from .live_scene import paint_scene
 from .mod_manager_page import ModManagerPage
+from .moddb_plugin import controller as moddb_controller
+from .multiplayer_page import MultiplayerPage
 from .play_page import PlayPage
 from .profiles_page import ProfilesPage
+from .redforest import RedForest
 from .settings_page import SettingsPage
 from .system_check_page import SystemCheckPage
 from .title_bar import (
@@ -95,18 +120,20 @@ from .title_bar import (
 )
 from .update_page import UpdatePage
 from .utilities_page import UtilitiesPage
+from .winter import ChristmasLights, Snowfall
 
 NAV_ITEMS = [
     ("dashboard", "Dashboard"),
     ("systemcheck", "System Check"),
     ("install", "Install"),
     ("play", "Play"),
+    ("multiplayer", "Multiplayer"),
     ("update", "Updates"),
     ("modmanager", "Mod Manager"),
     ("profiles", "Profiles"),
     ("utilities", "Utilities"),
-    ("help", "Help"),
-    ("about", "About"),
+    ("about", "Help"),
+    ("credits", "About"),
 ]
 
 #: Tab-bar position for each nav key, fixed by NAV_ITEMS order. Separate from
@@ -116,14 +143,16 @@ NAV_ITEMS = [
 _TAB_INDEX: dict[str, int] = {key: i for i, (key, _title) in enumerate(NAV_ITEMS)}
 
 # Indices after which a thin vertical separator is drawn in the tab bar.
-_SEPARATOR_AFTER = {1, 4, 7}
+_SEPARATOR_AFTER = {2, 5, 8}
+_RELEASES_URL = "https://github.com/SSH-Kitty/STALKER-GAMMA-COMMANDER/releases"
 
 
 #: Text grows to this fraction of its normal size while a tab is hovered.
 _HOVER_SCALE = 1.12
 _HOVER_ANIM_MS = 150
-#: How far (px) tab labels sit above their tab's middle.
-_TAB_TEXT_LIFT = 4
+#: How far (px) tab labels sit above their tab's middle: half the tab's
+#: 2px bottom border, so the text is centered in the area above it.
+_TAB_TEXT_LIFT = 1
 
 
 class NavTabBar(QTabBar):
@@ -169,6 +198,10 @@ class NavTabBar(QTabBar):
             self._hovered_index = -1
 
     def _animate_tab_scale(self, index: int, target: float) -> None:
+        if not gui_settings.animations_enabled():
+            self._hover_scale[index] = 1.0
+            self.update()
+            return
         anim = self._hover_anims.get(index)
         if anim is None:
             anim = QVariantAnimation(self)
@@ -207,6 +240,8 @@ class NavTabBar(QTabBar):
         current = self.currentIndex()
 
         for i in range(self.count()):
+            if not self.isTabVisible(i):
+                continue
             rect = self.tabRect(i)
             is_selected = i == current
             is_hovered = i == self._hovered_index
@@ -223,12 +258,18 @@ class NavTabBar(QTabBar):
             )
 
             if is_selected and not settings_mode:
+                # Underline hugs the label (not the whole tab rect), so it
+                # never reaches the group separators; rounded caps.
+                text_w = self.fontMetrics().horizontalAdvance(self.tabText(i))
+                half = min(text_w, rect.width() - 8) / 2 + 4
                 pen = QPen(accent)
-                pen.setWidth(2)
+                pen.setWidth(3)
+                pen.setCapStyle(Qt.PenCapStyle.RoundCap)
                 painter.setPen(pen)
+                y = rect.bottom() - 2
                 painter.drawLine(
-                    QPointF(rect.left(), rect.bottom() - 1),
-                    QPointF(rect.right(), rect.bottom() - 1),
+                    QPointF(rect.center().x() - half, y),
+                    QPointF(rect.center().x() + half, y),
                 )
 
         if self.count() < 2:
@@ -242,16 +283,20 @@ class NavTabBar(QTabBar):
         pen.setWidth(1)
         painter.setPen(pen)
 
-        for i in range(self.count()):
-            if i in _SEPARATOR_AFTER and i < self.count() - 1:
-                r = self.tabRect(i)
-                x = r.right() + 4
+        # A separator goes between two neighbouring visible tabs that sit in
+        # different groups, so hiding tabs never leaves a doubled/dangling one.
+        visible = [i for i in range(self.count()) if self.isTabVisible(i)]
+        group = lambda i: sum(i > s for s in _SEPARATOR_AFTER)
+        for a, b in itertools.pairwise(visible):
+            if group(a) != group(b):
+                r = self.tabRect(a)
+                x = (r.right() + self.tabRect(b).left()) / 2
                 painter.drawLine(QPointF(x, r.top() + 5), QPointF(x, r.bottom() - 5))
 
         painter.end()
 
 
-def paint_backdrop(painter: QPainter, rect) -> None:
+def paint_backdrop(painter: QPainter, rect, screen: QSize | None = None) -> None:
     """Dark GAMMA-style backdrop with a soft, blurred radiation-green glow.
 
     Painted by the main window across its whole area - behind the central
@@ -269,6 +314,9 @@ def paint_backdrop(painter: QPainter, rect) -> None:
     base.setColorAt(0.0, QColor(tokens["back_base_a"]))
     base.setColorAt(1.0, QColor(tokens["back_base_b"]))
     painter.fillRect(rect, base)
+
+    if paint_scene(painter, rect, screen):
+        return
 
     radius = max(rect.width(), rect.height())
     r1 = rgb("back_glow1_rgb")
@@ -311,12 +359,24 @@ class _CommanderUpdateProgressBridge(QObject):
     updated = Signal(int, str)
 
 
+class _NoticeStatusBar(QStatusBar):
+    """Every page's status-bar notice goes through notice()."""
+
+    def showMessage(self, text: str, timeout: int = 0) -> None:
+        super().showMessage(notice(text), timeout)
+
+
 class MainWindow(QMainWindow):
     #: A newer COMMANDER release tag, from the one shared update check.
     commander_update_found = Signal(str)
+    #: Every finished COMMANDER update check, found or not (Dashboard card).
+    commander_update_checked = Signal()
 
     def __init__(self) -> None:
         super().__init__()
+        self.snowfall = Snowfall(self)
+        self.redforest = RedForest(self)
+        self.setStatusBar(_NoticeStatusBar(self))
         gui_state = gui_settings.load_gui_settings()
         self.resize(gui_state["window_width"], gui_state["window_height"])
         self.settings = load_settings()
@@ -328,6 +388,12 @@ class MainWindow(QMainWindow):
         self._settings_open = False
         self._last_tab_key = "dashboard"
         self._nav_refresh_serial = 0
+        #: Newer COMMANDER release tag, and (label, path) of one installed
+        #: but not restarted into yet - both drive the update banner.
+        self._commander_update_tag: str | None = None
+        self._commander_update_known = False
+        self._commander_update_failed = False
+        self._ready_update: tuple[str, Path] | None = None
 
         # Built before _build_ui(): constructing pages there (e.g. the
         # Dashboard) can trigger refresh_settings() -> _refresh_status_bar()
@@ -335,16 +401,25 @@ class MainWindow(QMainWindow):
         self._build_status_bar()
         self._build_ui()
         self._build_shortcuts()
+        self._build_tray()
         self.apply_title_bar(bool(gui_state.get("custom_title_bar", True)))
         # Mouse-wheel scrolling glides instead of jumping, in every page,
         # list and text box of this window.
-        from .smooth_scroll import install as install_smooth_scroll
+        # Hand cursor over everything clickable, too - one app-wide filter
+        # for both.
+        from .pointer_cursor import install_app_filter
 
-        self._smooth_scroll = install_smooth_scroll(self)
+        self._app_filter = install_app_filter(self)
         self.tabs.setCurrentIndex(0)
         QTimer.singleShot(0, self._maybe_check_for_updates_in_background)
         QTimer.singleShot(0, self._check_commander_update_status)
         self._start_update_timer()
+        # Winter moves on to dawn, day, dusk and night with the clock.
+        self._painted_theme = resolve_theme(active_theme())
+        self._daytime_timer = QTimer(self)
+        self._daytime_timer.setInterval(60_000)
+        self._daytime_timer.timeout.connect(self._follow_time_of_day)
+        self._daytime_timer.start()
         # The Welcome screen (latest patch notes, links), unless "Don't show
         # again" was ticked - here or in Deck Mode, which shares the setting.
         QTimer.singleShot(0, self._maybe_show_welcome)
@@ -445,6 +520,7 @@ class MainWindow(QMainWindow):
             tr(
                 "A new GAMMA update is available - open COMMANDER's Updates page to review it."
             ),
+            [(tr("Open Updates"), lambda: self.set_page("update"))],
         )
 
     #: How often an open COMMANDER looks for updates again. Each check keeps
@@ -485,6 +561,7 @@ class MainWindow(QMainWindow):
                 "COMMANDER {tag} is out - click the update button in COMMANDER's status bar to get it.",
                 tag=tag,
             ),
+            [(tr("Update now"), lambda: self._start_commander_update(tag))],
         )
 
     def _build_ui(self) -> None:
@@ -538,6 +615,7 @@ class MainWindow(QMainWindow):
         topbar_layout.addWidget(wordmark_block, 0, Qt.AlignmentFlag.AlignVCenter)
         topbar_layout.addWidget(header, 1, Qt.AlignmentFlag.AlignVCenter)
         self._topbar = topbar
+        self._wordmark_block = wordmark_block
         self._topbar_row = header
         # Floats in the top-right corner (pinned there by pin_top_right()) instead
         # of taking a row, so everything else stays centered in the bar.
@@ -549,7 +627,23 @@ class MainWindow(QMainWindow):
         self.tabs.setObjectName("navtabs")
         self.tabs.setDocumentMode(True)
         self.tabs.setExpanding(False)
-        header_layout.addWidget(self.tabs)
+        # Tabs that don't fit move into "More" (see _update_overflow), so the
+        # bar itself never scrolls.
+        self.tabs.setUsesScrollButtons(False)
+        self._user_hidden: set[int] = set()
+        self._overflow: list[int] = []
+        nav_box = QWidget()
+        nav_box.setObjectName("panelTransparent")
+        nav_layout = QHBoxLayout(nav_box)
+        nav_layout.setContentsMargins(0, 0, 0, 0)
+        nav_layout.setSpacing(4)
+        nav_layout.addWidget(self.tabs)
+        self._more_button = QPushButton(tr("More") + " ▾")
+        self._more_button.setObjectName("navMore")
+        self._more_button.hide()
+        self._more_button.clicked.connect(self._show_more_menu)
+        nav_layout.addWidget(self._more_button)
+        header_layout.addWidget(nav_box)
 
         header_layout.addStretch(1)
 
@@ -638,12 +732,22 @@ class MainWindow(QMainWindow):
         self._stack_fade.setStartValue(0.9)
         self._stack_fade.setEndValue(1.0)
         self._stack_fade.setEasingCurve(QEasingCurve.Type.InOutCubic)
+        # Enabled only while the fade runs: a live effect renders the whole
+        # stack offscreen on every repaint of anything inside it, which made
+        # every hover, scroll and animation in every page pay for it.
+        self._stack_opacity.setEnabled(False)
+        self._stack_fade.finished.connect(
+            lambda: self._stack_opacity.setEnabled(False)
+        )
         self.stack.currentChanged.connect(self._on_stack_page_changed)
 
         self.tabs.currentChanged.connect(self._on_nav)
+        self.tabs.currentChanged.connect(lambda _i: self._refresh_more_button())
         self.tabs.tabBarClicked.connect(self._on_tab_clicked)
         layout.addWidget(topbar)
+        layout.addWidget(self._build_update_banner())
         layout.addWidget(self.stack, 1)
+        self._lights = self.snowfall.lights = ChristmasLights(topbar, central)
         self.setCentralWidget(central)
         for widget in (
             topbar, header, wordmark_block, wordmark, byline,
@@ -652,14 +756,126 @@ class MainWindow(QMainWindow):
             widget.installEventFilter(self._drag_filter)
         self._sync_title_bar_layout()
 
-        # Keep the full navigation strip visible at startup. The saved window
-        # size may predate the current tab labels and otherwise enables the
-        # QTabBar scroll arrows.
-        self.tabs.setMinimumWidth(self.tabs.sizeHint().width())
-        header_width = header.sizeHint().width()
-        self.setMinimumWidth(header_width)
-        if self.width() < header_width:
-            self.resize(header_width, self.height())
+        self.apply_hidden_tabs()
+        # Again once styles and fonts are applied: before that the tabs
+        # report widths that are too small.
+        QTimer.singleShot(0, self._update_overflow)
+
+    def apply_hidden_tabs(self) -> None:
+        """Show/hide top-bar tabs per Settings > Appearance > Top bar."""
+        hidden = set(gui_settings.load_gui_settings().get("hidden_nav_tabs", []))
+        self._user_hidden = {_TAB_INDEX[key] for key in hidden if key in _TAB_INDEX}
+        if self._last_tab_key in hidden:
+            self._last_tab_key = "dashboard"
+        self._update_overflow()
+
+    def _update_overflow(self) -> None:
+        """Lay out the top-bar tabs: every wanted tab that fits, the rest in More.
+
+        Tabs are dropped from the right end until the remainder plus the
+        More button fit beside the counter and cog. At normal widths nothing
+        is dropped and More stays hidden, so the bar looks as it always did.
+        """
+        if getattr(self, "_topbar_row", None) is None:  # not built yet
+            return
+        tabs = self.tabs
+        shown = [i for i in range(tabs.count()) if i not in self._user_hidden]
+        width = {i: tabs.tabSizeHint(i).width() for i in shown}
+        # header: stretch, tabs+More, stretch, counter+cog - 3 gaps of 16px
+        # and the right margin; a few px of slack so text never clips.
+        row = self._topbar_row
+        room = row.width() - 8 - 3 * 16 - 8 - self._right_cluster.sizeHint().width()
+        need = sum(width.values())
+        over: list[int] = []
+        if need > room:
+            room -= self._more_button.sizeHint().width() + 4
+            for i in reversed(shown[1:]):  # Dashboard always stays
+                if need <= room:
+                    break
+                over.append(i)
+                need -= width[i]
+            over.reverse()
+        current = tabs.currentIndex()
+        if over == self._overflow and all(
+            tabs.isTabVisible(i) == (i not in self._user_hidden and i not in over)
+            for i in range(tabs.count())
+        ):
+            self._refresh_more_button()
+            self._sync_topbar_min_width()
+            return
+        self._overflow = over
+        # Signals off: hiding the current tab must not run _on_nav(), which
+        # would close the Settings page the user is changing this from.
+        tabs.blockSignals(True)
+        for i in range(tabs.count()):
+            tabs.setTabVisible(i, i not in self._user_hidden and i not in over)
+        # Hiding the current tab makes Qt pick another one; undo that. A tab
+        # the user removes from the bar in Settings falls back to the
+        # Dashboard; one opened in code (set_page) stays, as its page shows.
+        tabs.setCurrentIndex(0 if current in self._user_hidden and self._settings_open else current)
+        tabs.blockSignals(False)
+        # QTabBar leaves the other tabs where they were until something makes
+        # it lay out again; re-setting a label does.
+        tabs.setTabText(0, tabs.tabText(0))
+        tabs.updateGeometry()
+        tabs.update()
+        self._refresh_more_button()
+        self._sync_topbar_min_width()
+
+    def _refresh_more_button(self) -> None:
+        more = self._more_button
+        more.setVisible(bool(self._overflow))
+        current = self.tabs.currentIndex()
+        active = current in self._overflow and not self._settings_open
+        if more.property("active") != active:
+            more.setProperty("active", active)
+            more.style().unpolish(more)
+            more.style().polish(more)
+
+    def _show_more_menu(self) -> None:
+        menu = QMenu(self)
+        current = self.tabs.currentIndex()
+        for i in self._overflow:
+            action = menu.addAction(tr(NAV_ITEMS[i][1]))
+            action.setCheckable(True)
+            action.setChecked(i == current and not self._settings_open)
+            action.triggered.connect(lambda _checked=False, i=i: self._go_to_tab(i))
+        menu.exec(self._more_button.mapToGlobal(self._more_button.rect().bottomLeft()))
+
+    def _go_to_tab(self, index: int) -> None:
+        if self._settings_open:
+            self._on_tab_clicked(index)
+        else:
+            self.tabs.setCurrentIndex(index)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._update_overflow()
+        self._fit_status_bar()
+
+    def _sync_topbar_min_width(self) -> None:
+        """Window never narrower than the smallest bar that still works.
+
+        That is the wordmark, the Dashboard tab, More, the counter and the
+        cog. Redone whenever the counter text, font or theme change - sized
+        once at build time it let "577 Mods" overlap the last tabs. The
+        pages' own minimum widths still apply on top of this.
+        """
+        if getattr(self, "_topbar", None) is None:  # not built yet
+            return
+        layout = self._topbar.layout()
+        margins = layout.contentsMargins()
+        self.setMinimumWidth(
+            margins.left()
+            + margins.right()
+            + self._wordmark_block.sizeHint().width()
+            + layout.spacing()
+            + 8 + 3 * 16 + 8
+            + self._right_cluster.sizeHint().width()
+            + self.tabs.tabSizeHint(0).width()
+            + self._more_button.sizeHint().width()
+            + 4
+        )
 
     def _build_status_bar(self) -> None:
         """Build the persistent status bar contents exactly once.
@@ -685,7 +901,7 @@ class MainWindow(QMainWindow):
         _STATUS_COMBO_STYLE = (
             "QComboBox {"
             "  font-size: 12px;"
-            "  padding: 1px 6px;"
+            "  padding: 1px 18px 1px 6px;"
             "  border: 1px solid palette(mid);"
             "  border-radius: 3px;"
             "  background: palette(button);"
@@ -693,9 +909,21 @@ class MainWindow(QMainWindow):
             "QComboBox::drop-down { border: none; width: 16px; }"
         )
 
+        # Clicking the version copies a short version and hardware block
+        # for bug reports.
+        self._status_version_button = QPushButton()
+        self._status_version_button.setObjectName("statusVersion")
+        self._status_version_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._status_version_button.clicked.connect(self._copy_debug_summary)
+        self.statusBar().addWidget(self._status_version_button)
+
         self._status_info_label = QLabel()
         self._status_info_label.setStyleSheet(_STATUS_LABEL_STYLE)
         self.statusBar().addWidget(self._status_info_label)
+
+        self._status_language_label = QLabel()
+        self._status_language_label.setStyleSheet(_STATUS_LABEL_STYLE)
+        self.statusBar().addWidget(self._status_language_label)
 
         self._status_language_combo = NoWheelComboBox()
         self._status_language_combo.setStyleSheet(_STATUS_COMBO_STYLE)
@@ -776,7 +1004,7 @@ class MainWindow(QMainWindow):
         update_layout.setContentsMargins(0, 0, 0, 0)
         update_layout.setSpacing(0)
 
-        self._update_status_button = QPushButton(tr("Checking for updates..."))
+        self._update_status_button = QPushButton(tr("Checking for updates"))
         self._update_status_button.setObjectName("commanderUpdateStatus")
         self._update_status_button.setFlat(True)
         self._update_status_button.setEnabled(False)
@@ -821,6 +1049,12 @@ class MainWindow(QMainWindow):
         # text gets the same breathing room from the window edges as pages.
         self.statusBar().setContentsMargins(12, 0, 12, 4)
         self.statusBar().addPermanentWidget(update_area)
+        self._status_update_area = update_area
+        # Narrower than all of it is fine: _fit_status_bar hides the left
+        # group then. Left to its own size hint the bar (~1300 px) set the
+        # window's minimum, and tiling compositors (niri and the like) that
+        # give it a narrower column drew it cut off at the right.
+        self.statusBar().setMinimumWidth(1)
 
     def _check_commander_update_status(self) -> None:
         """Best-effort, non-blocking check for a newer COMMANDER release.
@@ -838,10 +1072,43 @@ class MainWindow(QMainWindow):
             check_commander_update, __version__, channel=channel, parent=self
         )
         task.result.connect(self._on_commander_update_status_checked)
+        task.error.connect(self._on_commander_update_check_failed)
         task.start()
 
+    def _on_commander_update_check_failed(self, _message: str) -> None:
+        if getattr(self, "_commander_update_tag", None):
+            # A known update stays offered: one failed re-check (the network
+            # down for a moment) is no reason to hide it.
+            return
+        self._commander_update_tag = None
+        self._update_status = "failed"
+        self._render_update_status()
+        self._commander_update_known = True
+        self._commander_update_failed = True
+        self._refresh_update_banner()
+        self.commander_update_checked.emit()
+
     def _on_commander_update_status_checked(self, tag: object) -> None:
-        button = self._update_status_button
+        if tag and isinstance(tag, str):
+            self._commander_update_tag = tag
+            self._update_status = "update"
+            self.commander_update_found.emit(tag)
+            self._notify_commander_update(tag)
+        else:
+            self._commander_update_tag = None
+            self._update_status = "current"
+        self._render_update_status()
+        self._commander_update_known = True
+        self._commander_update_failed = False
+        self._refresh_update_banner()
+        self.commander_update_checked.emit()
+
+    def _render_update_status(self) -> None:
+        """The status bar's update button, from the last check. Again on a
+        language or theme change: its text and colour are set here, once."""
+        button = getattr(self, "_update_status_button", None)
+        if button is None:
+            return
         # The check can run again (switching the update channel in
         # Settings); drop the previous result's click handler first, or one
         # click would open the dialog once per check.
@@ -852,82 +1119,167 @@ class MainWindow(QMainWindow):
             except (RuntimeError, TypeError):
                 pass
             self._update_status_handler = None
-        if tag and isinstance(tag, str):
-            self._commander_update_tag = tag
-            self.commander_update_found.emit(tag)
-            self._notify_commander_update(tag)
-            button.setText(tr("COMMANDER update available"))
+        status = getattr(self, "_update_status", "checking")
+        tag = getattr(self, "_commander_update_tag", None)
+        button.setToolTip("")
+        if status == "update" and tag:
+            button.setText(tr("Click here to update COMMANDER"))
             button.setStyleSheet(f"color: {WARN.name()}; border: none;")
             button.setCursor(Qt.CursorShape.PointingHandCursor)
             button.setEnabled(True)
             if commander_appimage_path() is not None:
-                # Running as an AppImage - offer to download and swap it in
-                # place instead of just sending the user to the browser. A
-                # source checkout or the AUR package (pacman-tracked, see
-                # packaging/aur/PKGBUILD) never sets APPIMAGE, so they fall
-                # through to the plain "open the releases page" behavior.
                 button.setToolTip(tr("Download and install {tag} now", tag=tag))
-                self._update_status_handler = lambda: self._offer_commander_self_update(tag)
-                button.clicked.connect(self._update_status_handler)
             else:
                 button.setToolTip(tr("Open the Releases page for {tag}", tag=tag))
-                self._update_status_handler = lambda: open_url(
-                    "https://github.com/SSH-Kitty/STALKER-GAMMA-COMMANDER/releases"
-                )
-                button.clicked.connect(self._update_status_handler)
-        else:
+            self._update_status_handler = lambda: self._start_commander_update(tag)
+            button.clicked.connect(self._update_status_handler)
+        elif status == "current":
             button.setText(tr("COMMANDER is up to date"))
             button.setStyleSheet(f"color: {OK_GREEN.name()}; border: none;")
             button.setEnabled(False)
+        elif status == "failed":
+            button.setText(tr("Couldn't check for updates"))
+            button.setStyleSheet("border: none;")
+            button.setEnabled(False)
+        else:
+            button.setText(tr("Checking for updates"))
+            button.setStyleSheet(f"color: {STATUS_GREY.name()}; border: none;")
+            button.setEnabled(False)
+
+    def _start_commander_update(self, tag: str) -> None:
+        """The status bar's and the banner's Update button."""
+        if commander_appimage_path() is not None:
+            # Running as an AppImage - offer to download and swap it in
+            # place instead of just sending the user to the browser. A
+            # source checkout or the AUR package (pacman-tracked, see
+            # packaging/aur/PKGBUILD) never sets APPIMAGE, so they fall
+            # through to the plain "open the releases page" behavior.
+            self._offer_commander_self_update(tag)
+        else:
+            open_url(_RELEASES_URL)
+
+    def _build_update_banner(self) -> QFrame:
+        """The "new COMMANDER version" strip under the nav tabs.
+
+        Rebuilt with the rest of the UI on a language switch;
+        _refresh_update_banner() decides whether it shows.
+        """
+        banner = QFrame()
+        banner.setObjectName("updateBanner")
+        row = QHBoxLayout(banner)
+        row.setContentsMargins(16, 6, 8, 6)
+        row.setSpacing(10)
+        self._update_banner_text = QLabel()
+        self._update_banner_text.setObjectName("updateBannerText")
+        row.addWidget(self._update_banner_text, 1)
+        self._update_banner_notes = QPushButton(tr("See what's new"))
+        self._update_banner_notes.setMinimumHeight(30)
+        self._update_banner_notes.clicked.connect(
+            lambda: self._start_commander_update(self._commander_update_tag)
+        )
+        row.addWidget(self._update_banner_notes)
+        self._update_banner_action = QPushButton()
+        self._update_banner_action.setObjectName("primary")
+        self._update_banner_action.setMinimumSize(110, 30)
+        self._update_banner_action.clicked.connect(self._on_update_banner_action)
+        row.addWidget(self._update_banner_action)
+        close = QPushButton("\u2715")
+        close.setObjectName("updateBannerClose")
+        close.setToolTip(tr("Hide until the next version"))
+        close.setFixedSize(30, 30)
+        close.setCursor(Qt.CursorShape.PointingHandCursor)
+        close.clicked.connect(self._dismiss_update_banner)
+        row.addWidget(close)
+        self._update_banner = banner
+        self._refresh_update_banner()
+        return banner
+
+    def _refresh_update_banner(self) -> None:
+        banner = getattr(self, "_update_banner", None)
+        if banner is None:
+            return
+        ready = getattr(self, "_ready_update", None)
+        tag = getattr(self, "_commander_update_tag", None)
+        if ready is not None:
+            self._update_banner_text.setText(
+                tr("COMMANDER {tag} is ready. Restart to finish updating.", tag=ready[0])
+                if ready[0]
+                else tr("The new version is ready. Restart to finish updating.")
+            )
+            self._update_banner_notes.hide()
+            self._update_banner_action.setText(tr("Restart now"))
+            banner.show()
+        elif tag and gui_settings.load_gui_settings().get("dismissed_update_tag") != tag:
+            self._update_banner_text.setText(
+                "\u2b06  " + tr("COMMANDER {tag} is out.", tag=tag)
+            )
+            self._update_banner_notes.show()
+            self._update_banner_action.setText(tr("Update"))
+            banner.show()
+        else:
+            banner.hide()
+
+    def _on_update_banner_action(self) -> None:
+        ready = getattr(self, "_ready_update", None)
+        if ready is not None:
+            self._restart_into_update(ready[1])
+        elif self._commander_update_tag:
+            self._start_commander_update(self._commander_update_tag)
+
+    def _dismiss_update_banner(self) -> None:
+        if getattr(self, "_ready_update", None) is None and self._commander_update_tag:
+            gui_settings.save_gui_settings(dismissed_update_tag=self._commander_update_tag)
+        self._update_banner.hide()
 
     def _offer_commander_self_update(self, tag: str) -> None:
-        """Confirm, then download and swap in the new AppImage, then restart."""
-        answer = QMessageBox.question(
+        """Show the patch notes (the Welcome screen's layout), then download
+        and install over the running AppImage."""
+        from .welcome_overlay import show_welcome
+
+        show_welcome(
             self,
-            tr("Update COMMANDER"),
-            tr(
-                "Download and install COMMANDER {tag} now? "
-                "The app will restart when it's done.",
-                tag=tag,
-            ),
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-        )
-        if answer != QMessageBox.StandardButton.Yes:
-            return
-        self._run_commander_download(
-            tr("Downloading COMMANDER {tag}...", tag=tag),
-            lambda cancel, progress: download_and_install_commander_update(
-                tag, cancel_event=cancel, progress_cb=progress
+            update_tag=tag,
+            on_update=lambda: self._run_commander_download(
+                tr("Downloading COMMANDER {tag}", tag=tag),
+                lambda cancel, progress: download_and_install_commander_update(
+                    tag, cancel_event=cancel, progress_cb=progress
+                ),
+                ready_tag=tag,
             ),
         )
 
-    def switch_commander_build(self, target: str) -> None:
+    def switch_commander_build(self, target: str, tag: str | None = None) -> None:
         """Settings' "Switch to Unstable" / "Revert to Stable".
 
         Installs the newest build of ``target`` ("unstable" or "stable") over
         this AppImage and restarts - going back a version when reverting.
         """
         if target == "unstable":
-            title = tr("Try the unstable build")
-            question = tr(
-                "Download and install the latest unstable COMMANDER build? "
-                "Unstable builds get new features sooner but are less tested.\n\n"
-                "COMMANDER restarts when it's done, and you can revert to the "
-                "stable build from Settings at any time."
-            )
+            title = tr("Try the unstable build?")
+            question = tr("New features arrive here first, but they may have bugs.")
+            points = ()
+            info = tr("COMMANDER restarts when it's done. You can switch back in Settings.")
+            install = tr("Install unstable build")
         else:
-            title = tr("Go back to the stable build")
+            title = tr("Go back to the stable build?")
             question = tr(
-                "Download and install the latest stable COMMANDER build?\n\n"
-                "It may be older than the unstable build you're running now. "
-                "Settings changed by the newer build may not all carry back.\n\n"
-                "COMMANDER restarts when it's done."
+                "The stable build may be older than the unstable one you're "
+                "using now."
             )
+            points = (
+                tr("COMMANDER downloads the build and restarts."),
+                tr("Some settings changed by the newer build may not carry over."),
+            )
+            info = ""
+            install = tr("Install stable build")
         answer = QMessageBox.question(
             self,
             title,
             question,
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            points=points,
+            info=info,
+            labels={QMessageBox.StandardButton.Yes: install, QMessageBox.StandardButton.No: tr("Cancel")},
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
@@ -943,14 +1295,16 @@ class MainWindow(QMainWindow):
             gui_settings.save_gui_settings(update_channel=target)
 
         self._run_commander_download(
-            tr("Downloading the unstable build...")
+            (tr("Downloading unstable build {tag}", tag=tag) if tag else tr("Downloading the unstable build"))
             if target == "unstable"
-            else tr("Downloading the stable build..."),
+            else tr("Downloading the stable build"),
             work,
             on_installed=switched,
         )
 
-    def _run_commander_download(self, label: str, work, on_installed=None) -> None:
+    def _run_commander_download(
+        self, label: str, work, on_installed=None, ready_tag: str = ""
+    ) -> None:
         """Run ``work(cancel_event, progress_cb) -> AppImage path`` with a
         progress dialog, then restart into the installed AppImage.
 
@@ -960,73 +1314,124 @@ class MainWindow(QMainWindow):
         """
         # The restart at the end quits through closeEvent, which asks about a
         # running install - answering "No" there left two instances running.
-        if self.install_busy:
-            QMessageBox.warning(
-                self,
-                tr("Busy"),
-                tr(
-                    "An install, update or dependency download is still running. "
-                    "Wait for it to finish before updating COMMANDER."
-                ),
-            )
+        if self._refuse_restart_while_busy():
             return
-        progress = QProgressDialog(label, tr("Cancel"), 0, 100, self)
+        progress = ProgressDialog(tr("Updating COMMANDER"), label, self)
         progress.setWindowModality(Qt.WindowModality.WindowModal)
-        progress.setMinimumDuration(0)
-        progress.setAutoClose(False)
-        progress.setAutoReset(False)
-        progress.setValue(0)
 
         bridge = _CommanderUpdateProgressBridge(parent=self)
-        bridge.updated.connect(progress.setValue)
+        bridge.updated.connect(lambda pct, _text: progress.setValue(pct))
         bridge.updated.connect(
             lambda _pct, text: progress.setLabelText(text)
         )
 
         def _progress(downloaded: int, total: int) -> None:
-            pct = int(downloaded * 100 / total) if total > 0 else 0
-            text = label + " " + tr(
-                "{done}/{total}", done=human_size(downloaded), total=human_size(total)
-            )
+            # total is 1 when the server sent no size (see self_update).
+            if total <= 1:
+                bridge.updated.emit(0, label + "\n" + human_size(downloaded))
+                return
+            pct = int(downloaded * 100 / total)
+            if downloaded >= total:
+                # Verify and install run next, with no progress of their own.
+                bridge.updated.emit(100, tr("Checking and installing the new version"))
+                return
+            # The bar shows the percentage; the label only needs the size.
+            text = label + "\n" + f"{human_size(downloaded)} / {human_size(total)}"
             bridge.updated.emit(pct, text)
 
         task = BackgroundTask(lambda: work(task.cancel_event, _progress), parent=self)
-        progress.canceled.connect(task.cancel_event.set)
+
+        closed = []
+
+        def close_progress() -> None:
+            # Cancel closes it at once and on_result/on_error close it again;
+            # close() deletes it, so it must not be touched a second time.
+            if closed:
+                return
+            closed.append(True)
+            bridge.updated.disconnect()
+            progress.close()
+
+        def on_cancel() -> None:
+            # A stalled download only notices the cancel when its read times
+            # out, so the window goes now instead of sitting on "Stopping".
+            task.cancel_event.set()
+            close_progress()
+
+        progress.canceled.connect(on_cancel)
 
         def on_result(path: object) -> None:
-            progress.close()
+            close_progress()
             if on_installed is not None:
                 on_installed()
-            from ..main import release_instance_lock
-
-            # release_instance_lock must run in this (still-running)
-            # process before the new one starts - see relaunch_commander()'s
-            # own docstring for why a lock held past this point makes the
-            # new COMMANDER exit immediately with no window.
-            relaunch_commander(path, release_lock=release_instance_lock)
-            QApplication.quit()
+            restart = QMessageBox.question(
+                self,
+                tr("{tag} is ready", tag=ready_tag) if ready_tag else tr("The new version is ready"),
+                tr("Restart COMMANDER now to start using it?"),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                labels={
+                    QMessageBox.StandardButton.Yes: tr("Restart now"),
+                    QMessageBox.StandardButton.No: tr("Later"),
+                },
+            )
+            if restart == QMessageBox.StandardButton.Yes:
+                self._restart_into_update(path)
+                return
+            self._ready_update = (ready_tag, path)
+            self._refresh_update_banner()
 
         def on_error(message: str) -> None:
-            progress.close()
-            self._show_commander_self_update_error(message)
+            close_progress()
+            # Cancel ends the download with an error; the user asked for it.
+            if not task.cancel_event.is_set():
+                self._show_commander_self_update_error(message)
 
         task.result.connect(on_result)
         task.error.connect(on_error)
         task.start()
         progress.show()
 
+    def _refuse_restart_while_busy(self) -> bool:
+        if not self.install_busy:
+            return False
+        QMessageBox.warning(
+            self,
+            tr("Please wait"),
+            tr(
+                "An install, update or download is still running. "
+                "Wait for it to finish, then update COMMANDER."
+            ),
+        )
+        return True
+
+    def _restart_into_update(self, path) -> None:
+        from ..main import release_instance_lock
+
+        # "Later" on a ready update, then an install, then "Restart now":
+        # the new instance would start beside a still-running install.
+        if self._refuse_restart_while_busy():
+            return
+
+        # release_instance_lock must run in this (still-running)
+        # process before the new one starts - see relaunch_commander()'s
+        # own docstring for why a lock held past this point makes the
+        # new COMMANDER exit immediately with no window.
+        relaunch_commander(path, release_lock=release_instance_lock)
+        QApplication.quit()
+
     def _show_commander_self_update_error(self, message: str) -> None:
         box = QMessageBox(self)
         box.setIcon(QMessageBox.Icon.Warning)
-        box.setWindowTitle(tr("Update failed"))
+        box.setWindowTitle(tr("COMMANDER couldn't update"))
         box.setText(message)
+        box.setInformativeText(tr("You can download the new version yourself from the releases page."))
         box.addButton(QMessageBox.StandardButton.Close)
         open_releases = box.addButton(
-            tr("Open Releases Page"), QMessageBox.ButtonRole.ActionRole
+            tr("Open releases page"), QMessageBox.ButtonRole.ActionRole
         )
         box.exec()
         if box.clickedButton() == open_releases:
-            open_url("https://github.com/SSH-Kitty/STALKER-GAMMA-COMMANDER/releases")
+            open_url(_RELEASES_URL)
 
     def _refresh_status_bar(self) -> None:
         """Re-render status bar text and re-select the combos' current items.
@@ -1037,11 +1442,13 @@ class MainWindow(QMainWindow):
         tr()-wrapped text needs this explicit refresh to pick up a language
         change instead of getting it "for free" via reconstruction.
         """
+        self._render_update_status()
+        self._status_version_button.setText(f"v{__version_label__}")
+        self._status_version_button.setToolTip(tr("Copy version info for bug reports"))
         self._status_info_label.setText(
-            f"COMMANDER {__version_label__}   |   "
-            + tr("Active profile: {name}", name=self._active_name())
-            + f"   |   {tr('Language:')}"
+            "|   " + tr("Active profile: {name}", name=self._active_name())
         )
+        self._status_language_label.setText(f"   |   {tr('Language:')}")
         self._status_theme_label.setText(f"   |   {tr('Theme:')}")
         lang_index = self._status_language_combo.findData(active_language())
         self._status_language_combo.blockSignals(True)
@@ -1062,6 +1469,55 @@ class MainWindow(QMainWindow):
         self._status_fontsize_combo.blockSignals(True)
         self._status_fontsize_combo.setCurrentIndex(max(size_index, 0))
         self._status_fontsize_combo.blockSignals(False)
+        self._fit_status_bar()
+
+    def _fit_status_bar(self) -> None:
+        """Drop the Font, then Theme, then Language boxes, then the version
+        and profile, as the window gets too narrow for them; all of it is on
+        Settings too. The update status, Discord and GitHub stay."""
+        if getattr(self, "_status_update_area", None) is None:  # not built yet
+            return
+        groups = (
+            (self._status_version_button, self._status_info_label),
+            (self._status_language_label, self._status_language_combo),
+            (self._status_theme_label, self._status_theme_combo),
+            (self._status_font_label, self._status_font_combo, self._status_fontsize_combo),
+        )
+        margins = self.statusBar().contentsMargins()
+        need = (
+            margins.left()
+            + margins.right()
+            + self._status_update_area.sizeHint().width()
+            + 24  # slack between the groups, so text never clips
+        )
+        fits = True
+        for group in groups:
+            need += sum(w.sizeHint().width() + 6 for w in group)
+            fits = fits and need <= self.width()
+            for widget in group:
+                widget.setVisible(fits)
+
+    def _copy_debug_summary(self) -> None:
+        # vulkaninfo and the CLI can each take a moment, so off the GUI thread.
+        if getattr(self, "_debug_summary_task", None) is not None:
+            return  # one at a time
+        button = self._status_version_button
+        task = BackgroundTask(debug_summary, parent=self)
+        self._debug_summary_task = task
+
+        def copied(text: str) -> None:
+            self._debug_summary_task = None
+            QGuiApplication.clipboard().setText(text)
+            button.setText(tr("Copied!"))
+            QTimer.singleShot(1500, button, self._refresh_status_bar)
+
+        def failed(error: str) -> None:
+            self._debug_summary_task = None
+            self.statusBar().showMessage(tr("Couldn't collect the debug info: {error}", error=error), 6000)
+
+        task.result.connect(copied)
+        task.error.connect(failed)
+        task.start()
 
     def _on_status_language(self, *_args) -> None:
         code = self._status_language_combo.currentData()
@@ -1088,6 +1544,7 @@ class MainWindow(QMainWindow):
     #: by main_window.py special-casing its key.
     _PAGE_CLASSES: ClassVar[dict[str, type[QWidget]]] = {
         "play": PlayPage,
+        "multiplayer": MultiplayerPage,
         "dashboard": DashboardPage,
         "install": InstallPage,
         "systemcheck": SystemCheckPage,
@@ -1095,8 +1552,8 @@ class MainWindow(QMainWindow):
         "modmanager": ModManagerPage,
         "profiles": ProfilesPage,
         "utilities": UtilitiesPage,
-        "help": HelpPage,
         "about": AboutPage,
+        "credits": CreditsPage,
         "settings": SettingsPage,
     }
 
@@ -1122,6 +1579,12 @@ class MainWindow(QMainWindow):
         page = self._create_page(key)
         self._pages[key] = page
         self.stack.addWidget(page)
+        if key == "play":
+            page.game_running_changed.connect(self._on_game_running_changed)
+            # MO2 closing with the game can end the session before the game
+            # is seen gone.
+            page.launch_state_changed.connect(lambda launching: launching or self._on_game_running_changed(False))
+        reflow.watch(page)  # rows stack when the window gets narrow
         # A page built after an install/task already started must reflect
         # that immediately - set_install_busy() only notifies pages that
         # exist at the moment it's called (see its own loop below).
@@ -1135,10 +1598,13 @@ class MainWindow(QMainWindow):
 
     def _active_name(self) -> str:
         profile = self.settings.active_profile
-        return profile.profile_name if profile else "(none)"
+        return profile.profile_name if profile else tr("(none)")
 
     def _on_stack_page_changed(self, _index: int) -> None:
+        if not gui_settings.animations_enabled():
+            return
         self._stack_fade.stop()
+        self._stack_opacity.setEnabled(True)
         self._stack_fade.start()
 
     def _on_nav(self, index: int) -> None:
@@ -1151,9 +1617,9 @@ class MainWindow(QMainWindow):
         self.tabs.style().polish(self.tabs)
         key = NAV_ITEMS[index][0]
         self.setWindowTitle(
-            "Install - STALKER COMMANDER"
+            tr("Install - STALKER COMMANDER")
             if key == "install"
-            else "STALKER COMMANDER"
+            else tr("STALKER COMMANDER")
         )
         page = self._ensure_page(key)
         self.stack.setCurrentWidget(page)
@@ -1218,6 +1684,7 @@ class MainWindow(QMainWindow):
         self.tabs.style().unpolish(self.tabs)
         self.tabs.style().polish(self.tabs)
         self._set_cog_active(True)
+        self._refresh_more_button()
         page = self._ensure_page("settings")
         self.stack.setCurrentWidget(page)
         QTimer.singleShot(0, page.refresh)
@@ -1233,6 +1700,7 @@ class MainWindow(QMainWindow):
         page = self._ensure_page(self._last_tab_key)
         self.stack.setCurrentWidget(page)
         self.tabs.setCurrentIndex(_TAB_INDEX[self._last_tab_key])
+        self._refresh_more_button()
 
     def toggle_settings(self) -> None:
         if self._settings_open:
@@ -1240,27 +1708,35 @@ class MainWindow(QMainWindow):
         else:
             self.open_settings()
 
-    def _reject_language_or_theme_change(self, busy_message: str) -> bool:
+    def _reject_language_or_theme_change(self, busy_message: str | None, force: bool = True) -> bool:
         """Show why a language/theme change is refused and revert both pickers.
 
         Returns True if the change was refused (caller should stop), False
         if it's safe to proceed. Shared by apply_theme() and apply_language()
         since both are blocked by the same two conditions: a background task
         (install_busy) or the game/Mod Organizer currently running (same
-        mo2_running() check the Launch Game button itself uses) - changing
+        game_running() check, which also sees a game started without MO2) - changing
         either while the game is running is refused even though nothing
         about apply_theme() itself is unsafe then, to keep the two pickers'
         behavior consistent and predictable for the user.
         """
-        if self.install_busy:
-            QMessageBox.warning(self, tr("Busy"), busy_message)
-        elif mo2_running():
+        # The ModDB plugin's download isn't install_busy, but the rebuild
+        # would orphan its task the same way and leave it "busy" for good.
+        # No busy_message: only the game blocks it.
+        if busy_message and (self.install_busy or moddb_controller(self).busy):
+            QMessageBox.warning(self, tr("Please wait"), busy_message)
+        elif game_running(force=force):
             QMessageBox.warning(
                 self,
-                tr("Busy"),
-                tr(
-                    "Mod Organizer / the game is currently running.\n\nClose it before running this action."
-                ),
+                tr("Please wait"),
+                tr("Mod Organizer or the game is still open. Close it, then try again."),
+            )
+        elif moddb_controller(self).running:
+            # It got the theme, fonts and language once, when it opened.
+            QMessageBox.warning(
+                self,
+                tr("Please wait"),
+                tr("The ModDB browser is open. Close it, then try again."),
             )
         else:
             return False
@@ -1275,18 +1751,43 @@ class MainWindow(QMainWindow):
     def apply_theme(self, name: str) -> None:
         if self._reject_language_or_theme_change(
             tr(
-                "Cannot change the theme while a background task is running. Wait for it to finish, then try again."
-            )
+                "The theme can't change while a task is running. Wait for it to finish, then try again."
+            ),
+            # A theme change is safe even if the game just started, so the
+            # few-seconds-old answer will do and spares two pgrep runs.
+            force=False,
         ):
             return
         gui_settings.save_gui_settings(theme=name)
         self._apply_style()
 
+    def _follow_time_of_day(self) -> None:
+        # Not while the game or the ModDB browser runs: they keep the look
+        # they started with, so COMMANDER catches up after they close.
+        if (
+            resolve_theme(active_theme()) != self._painted_theme
+            and not game_running()
+            and not moddb_controller(self).running
+        ):
+            self._apply_style()
+
+    # The overlay and the ModDB browser read the look once, when they start,
+    # so it can't change while either runs: they would differ.
     def apply_font_size(self, size: int) -> None:
+        if self._reject_language_or_theme_change(None, force=False):
+            return
         gui_settings.save_gui_settings(font_size=int(size))
         self._apply_style()
 
+    def apply_live_time(self, live_time: str) -> None:
+        if self._reject_language_or_theme_change(None, force=False):
+            return
+        gui_settings.save_gui_settings(live_time=live_time)
+        self._apply_style()
+
     def apply_font_family(self, family: str) -> None:
+        if self._reject_language_or_theme_change(None, force=False):
+            return
         gui_settings.save_gui_settings(font_family=family)
         self._apply_style()
 
@@ -1297,13 +1798,13 @@ class MainWindow(QMainWindow):
         similar task is running): every page - and the background thread
         driving that task, which the page's own widgets hold a reference
         to - would be torn down and rebuilt, terminating or orphaning it.
-        Also refused while the game/Mod Organizer is running, the same
-        ``mo2_running()`` check the Launch Game button itself uses - it
+        Also refused while the game/Mod Organizer is running
+        (``game_running()``, which also sees a game started without MO2) - it
         becomes available again once the game quits.
         """
         if self._reject_language_or_theme_change(
             tr(
-                "Cannot change the language while a background task is running. Wait for it to finish, then try again."
+                "The language can't change while a task is running. Wait for it to finish, then try again."
             )
         ):
             return
@@ -1325,14 +1826,16 @@ class MainWindow(QMainWindow):
             else NAV_ITEMS[self.tabs.currentIndex()][0]
         )
         was_settings_open = self._settings_open
+        self._flush_pending_edits()
 
         # Stop every in-flight background task (page refresh polls,
         # dependency checks, etc.) and suppress result delivery until the
         # rebuild finishes, so a signal that arrives mid-teardown cannot
         # touch a widget that is about to be destroyed. install_busy being
         # False (checked by the caller) means nothing CLI-driving is
-        # running, so this only ever cancels quick, safe-to-abandon lookups.
-        shutdown_active_runners(timeout_ms=2000)
+        # running, so this only ever cancels quick, safe-to-abandon lookups:
+        # detached at once (no wait), as the rebuilt pages start them again.
+        shutdown_active_runners(timeout_ms=0)
 
         old_central = self.takeCentralWidget()
         if old_central is not None:
@@ -1358,19 +1861,38 @@ class MainWindow(QMainWindow):
 
     def _apply_style(self) -> None:
         state = gui_settings.load_gui_settings()
-        name = state.get("theme") or "gamma"
+        name = state.get("theme") or "black"
         font_size = int(state.get("font_size") or 13)
         font_family = state.get("font_family") or "Exo 2"
         set_active_theme(name)
+        self._painted_theme = resolve_theme(name)
         app = QApplication.instance()
         if app is not None:
-            app.setPalette(build_palette(name))
-            app.setStyleSheet(
-                build_stylesheet(name, font_size=font_size, font_family=font_family)
-            )
+            # Restyling sends every widget tens of thousands of Polish and
+            # StyleChange events; through the Python app-wide filter they
+            # took half the switch. It needs none of them: a restyle
+            # neither scrolls nor touches cursors.
+            filters = [f for f in (getattr(self, "_app_filter", None),) if f is not None]
+            for event_filter in filters:
+                app.removeEventFilter(event_filter)
+            try:
+                app.setPalette(build_palette(name))
+                app.setStyleSheet(
+                    build_stylesheet(name, font_size=font_size, font_family=font_family)
+                )
+            finally:
+                for event_filter in filters:
+                    app.installEventFilter(event_filter)
         self.tabs.update()
+        QTimer.singleShot(0, self._update_overflow)
         self.backdrop.update()
         self.update()
+        self.sync_animations()
+        # Icons painted in a theme colour don't follow the stylesheet.
+        for page in getattr(self, "_pages", {}).values():
+            notify = getattr(page, "on_theme_changed", None)
+            if callable(notify):
+                notify()
         # The status bar is built exactly once and never rebuilt, so its
         # Theme/Font/size combos do not pick up a change made from the
         # Settings page's own pickers by themselves. Left showing the old
@@ -1399,9 +1921,32 @@ class MainWindow(QMainWindow):
 
     def paintEvent(self, event) -> None:
         super().paintEvent(event)
+        # The backdrop's full-window gradients are slow to paint, and every
+        # repaint anywhere in the window repaints the backdrop under it, so
+        # they are drawn once per size/theme and blitted from then on. The last
+        # two are kept, so switching back to a theme (Winter's photo is slow
+        # to decode and scale) is a blit too.
+        dpr = self.devicePixelRatioF()
+        key = (self.width(), self.height(), dpr, tuple(active_theme_tokens().items()))
+        cache = self.__dict__.setdefault("_backdrop_cache", {})
+        pixmap = cache.pop(key, None)
+        if pixmap is None:
+            pixmap = QPixmap(round(self.width() * dpr), round(self.height() * dpr))
+            pixmap.setDevicePixelRatio(dpr)
+            pixmap.fill(QColor(0, 0, 0))
+            cache_painter = QPainter(pixmap)
+            try:
+                paint_backdrop(cache_painter, self.rect(), self.screen().size())
+            finally:
+                cache_painter.end()
+        cache[key] = pixmap
+        while len(cache) > 2:
+            cache.pop(next(iter(cache)))
         painter = QPainter(self)
         try:
-            paint_backdrop(painter, self.rect())
+            painter.drawPixmap(0, 0, pixmap)
+            self.redforest.paint(painter)
+            self.snowfall.paint(painter)
         finally:
             painter.end()
 
@@ -1412,7 +1957,9 @@ class MainWindow(QMainWindow):
         Shown only when COMMANDER draws its own title bar (frameless window);
         otherwise the desktop's title bar provides these.
         """
-        self._title_strip = build_window_buttons(self, self._drag_filter)
+        self._title_strip = build_window_buttons(
+            self, self._drag_filter, on_close=lambda: self._close_to_tray() or self.close()
+        )
         return self._title_strip
 
     def apply_title_bar(self, custom: bool) -> None:
@@ -1449,24 +1996,237 @@ class MainWindow(QMainWindow):
     def changeEvent(self, event) -> None:
         if event.type() == QEvent.Type.WindowStateChange:
             self._update_max_button()
+        if event.type() in (QEvent.Type.WindowStateChange, QEvent.Type.ActivationChange):
+            self.sync_animations()
         super().changeEvent(event)
 
+    def sync_animations(self) -> None:
+        """Run the Live themes' animations only while this window is in front."""
+        visible = self.isActiveWindow() and not self.isMinimized()
+        for animation in (getattr(self, "snowfall", None), getattr(self, "redforest", None)):
+            if animation is not None:
+                animation.sync(visible)
+
+    def _flush_pending_edits(self) -> None:
+        """Save edits still waiting on a debounce timer (a profile note)."""
+        page = self._pages.get("profiles")
+        if page is not None and hasattr(page, "_flush_note"):
+            page._flush_note()
+
+    def _build_tray(self) -> None:
+        """The tray icon - shown while Settings > System tray icon is on.
+        Built once, like the shortcuts: the menu is refilled each time it
+        opens, so it follows the language, profiles and game."""
+        self._tray = QSystemTrayIcon(QApplication.windowIcon(), self)
+        menu = QMenu(self)
+        menu.aboutToShow.connect(self._fill_tray_menu)
+        self._tray.setContextMenu(menu)
+        self._tray.activated.connect(self._on_tray_activated)
+        self._hidden_for_game = False
+        self._tray_profile_task = None
+        self._fill_tray_menu()
+        # Hover text only, no pop-ups: refreshed while the icon is up.
+        self._tray_tooltip_timer = QTimer(self)
+        self._tray_tooltip_timer.setInterval(2000)
+        self._tray_tooltip_timer.timeout.connect(self._refresh_tray_tooltip)
+        self.set_tray_enabled(bool(gui_settings.load_gui_settings().get("tray_icon")))
+
+    def set_tray_enabled(self, enabled: bool) -> None:
+        self._tray.setVisible(enabled)
+        if enabled:
+            self._refresh_tray_tooltip()
+            self._tray_tooltip_timer.start()
+        else:
+            self._tray_tooltip_timer.stop()
+            if self.isHidden():
+                self.show_from_tray()
+
+    def _tray_usable(self) -> bool:
+        # Stock GNOME and Game Mode show no tray: a window hidden there
+        # would have nothing left to click.
+        return self._tray.isVisible() and QSystemTrayIcon.isSystemTrayAvailable()
+
+    def _fill_tray_menu(self) -> None:
+        menu = self._tray.contextMenu()
+        menu.clear()
+        # clear() leaves submenus alive: one more Profile menu on every open.
+        for stale in menu.findChildren(QMenu):
+            stale.deleteLater()
+        # Clicking the icon shows and hides it; this is for desktops where a
+        # click opens the menu instead (GNOME's AppIndicator extension).
+        if self.isHidden() or self.isMinimized():
+            menu.addAction(tr("Show COMMANDER"), self.show_from_tray)
+        play = self._pages.get("play")
+        launch = None
+        if play is not None and play.is_launching:
+            menu.addAction(tr("Quit game"), play._confirm_quit_game)
+            # The in-game panel: it toggles, and closes with the game (stop_key).
+            menu.addAction(tr("Graphics"), graphics_window.toggle)
+        else:
+            launch = menu.addAction(tr("Launch Game"), self._launch_from_tray)
+            launch.setEnabled(not self.install_busy)
+        profiles = menu.addMenu(tr("Profile"))
+        # Same guards as the Dashboard's switcher, minus its "game still
+        # running" question: no switching mid-game from here at all.
+        profiles.setEnabled(
+            self._tray_profile_task is None
+            and not self.install_busy
+            and not (play is not None and play.is_launching)
+            and not game_running()
+        )
+        # Read fresh: Deck Mode or the CLI may have added one meanwhile.
+        settings = load_settings()
+        active = settings.active_profile
+        group = QActionGroup(profiles)  # one tick, even when the active one is clicked
+        for profile in settings.profiles:
+            action = group.addAction(profile.profile_name)
+            action.setCheckable(True)
+            action.setChecked(active is not None and profile.profile_name == active.profile_name)
+            action.triggered.connect(lambda _checked=False, name=profile.profile_name: self._switch_profile_from_tray(name))
+            profiles.addAction(action)
+        menu.addAction(tr("Settings"), self._settings_from_tray)
+        menu.addSeparator()
+        menu.addAction(tr("Quit COMMANDER"), self._quit_from_tray)
+        # A click on every pick (the PDA one for Launch Game, like the Play
+        # buttons): a hidden window gives no other sign the click landed.
+        # Per action, not QMenu.triggered - the desktop draws this menu over D-Bus.
+        for action in [*menu.actions(), *profiles.actions()]:
+            if not action.isSeparator() and not action.menu():
+                action.triggered.connect(play_click_sound if action is launch else play_feedback_sound)
+
+    def _refresh_tray_tooltip(self) -> None:
+        lines = ["STALKER COMMANDER"]
+        play = self._pages.get("play")
+        if self.install_busy:
+            # ponytail: first running ProgressArea found; tasks without one show no percent
+            bars = [area.bar for area in self.findChildren(ProgressArea) if area._runner is not None]
+            if bars and bars[0].maximum() > 1:
+                lines.append(tr("Task running, {percent}% done", percent=bars[0].value() * 100 // bars[0].maximum()))
+            else:
+                lines.append(tr("Task running"))
+        elif play is not None and play.is_launching:
+            lines.append(tr("Game is running"))
+        if self._commander_update_tag:
+            lines.append(tr("COMMANDER update available"))
+        text = "\n".join(lines)
+        if self._tray.toolTip() != text:
+            self._tray.setToolTip(text)
+
+    def _on_tray_activated(self, reason) -> None:
+        if reason != QSystemTrayIcon.ActivationReason.Trigger:
+            return
+        if self.isVisible() and not self.isMinimized() and self.isActiveWindow():
+            self._hide_to_tray()
+        else:
+            self.show_from_tray()
+
+    def _hide_to_tray(self, *, hint: bool = True) -> bool:
+        """Hide into the tray icon; False (and nothing hidden) without one."""
+        if not self._tray_usable():
+            return False
+        self._flush_pending_edits()
+        # Hidden at logout, COMMANDER is killed rather than closed.
+        self._save_geometry()
+        # Closing another window (a dialog) while this one is hidden must
+        # not count as closing the last one and quit COMMANDER.
+        QApplication.setQuitOnLastWindowClosed(False)
+        self.hide()
+        if hint and not gui_settings.load_gui_settings().get("tray_hint_shown"):
+            gui_settings.save_gui_settings(tray_hint_shown=True)
+            notify_desktop(tr("COMMANDER is still running"), tr("Click its tray icon to open it again."))
+        return True
+
+    def _close_to_tray(self) -> bool:
+        """The close button hides instead of quitting - only when chosen."""
+        return bool(gui_settings.load_gui_settings().get("tray_close_to_tray")) and self._hide_to_tray()
+
+    def start_in_tray(self) -> bool:
+        """At login: stay in the tray, never shown; False without a tray."""
+        if not self._tray_usable():
+            return False
+        QApplication.setQuitOnLastWindowClosed(False)
+        return True
+
+    def show_from_tray(self) -> None:
+        """Bring the window back - from the tray, or from a second launch."""
+        self._hidden_for_game = False
+        QApplication.setQuitOnLastWindowClosed(True)
+        self.setWindowState(self.windowState() & ~Qt.WindowState.WindowMinimized)
+        self.show()
+        self.raise_()
+        self.activateWindow()
+
+    def _on_game_running_changed(self, running: bool) -> None:
+        """Out of the way while playing, back once the game closes."""
+        if running:
+            if (
+                self.isVisible()
+                and gui_settings.load_gui_settings().get("tray_hide_while_playing")
+                and self._hide_to_tray(hint=False)  # no pop-up over the game; it comes back
+            ):
+                self._hidden_for_game = True
+        elif self._hidden_for_game:
+            self.show_from_tray()
+
+    def _launch_from_tray(self) -> None:
+        # Through the Dashboard, so its Play button follows the launch too.
+        self._ensure_page("dashboard")._play_gamma()
+
+    def _switch_profile_from_tray(self, name: str) -> None:
+        self.refresh_settings()
+        active = self.settings.active_profile
+        if self._tray_profile_task is not None or (active is not None and active.profile_name == name):
+            return
+
+        def _done(success: bool) -> None:
+            self._tray_profile_task = None
+            if not success:
+                return
+            # The Play page too, visible or not: Launch Game in this menu
+            # uses its target list, which belongs to the old profile.
+            for page in {self.stack.currentWidget(), self._pages.get("play")}:
+                if page is not None and hasattr(page, "refresh"):
+                    page.refresh()
+
+        self._tray_profile_task = activate_profile(self, self, name, on_done=_done)
+
+    def _settings_from_tray(self) -> None:
+        self.show_from_tray()
+        self.open_settings()
+
+    def _quit_from_tray(self) -> None:
+        # Shown first: closeEvent may ask about a running install.
+        self.show_from_tray()
+        self.close()
+
     def closeEvent(self, event) -> None:
+        self._flush_pending_edits()
+        # Only the window manager's close button: a close() from code (a
+        # restart, Deck Mode switch, Quit) still quits.
+        if event.spontaneous() and self._close_to_tray():
+            event.ignore()
+            return
         if self.install_busy:
             answer = QMessageBox.question(
                 self,
-                tr("Install Running"),
-                tr("An installation, verification, update, or dependency download is currently running. Are you sure you want to close?\n\nThis will terminate the running process and may leave the prefix partially configured."),
+                tr("Close COMMANDER now?"),
+                tr("An install, check, update or download is still running. Closing now stops it partway."),
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                note=tr("The game's Wine prefix may be left half set up. Running the same task again usually fixes it."),
+                labels={QMessageBox.StandardButton.Yes: tr("Close anyway"), QMessageBox.StandardButton.No: tr("Keep running")},
             )
             if answer != QMessageBox.StandardButton.Yes:
                 event.ignore()
                 return
+        self._save_geometry()
+        event.accept()
+
+    def _save_geometry(self) -> None:
         gui_settings.save_gui_settings(
             window_width=self.normalGeometry().width(),
             window_height=self.normalGeometry().height(),
+            window_maximized=self.isMaximized(),
         )
-        event.accept()
 
     def update_mod_counter(self) -> None:
         """Refresh the topbar's always-visible active/total mod count.
@@ -1484,17 +2244,24 @@ class MainWindow(QMainWindow):
         )
         enabled, total = counts if counts is not None else (0, 0)
         incomplete = False
-        if profile is not None:
+        # Not while that install runs: its marker is saved at the start, in
+        # case COMMANDER closes midway, and is no failure yet.
+        if profile is not None and not (
+            getattr(self, "install_busy", False) and getattr(self, "install_operation", None) in ("gamma", "anomaly")
+        ):
             resume_state = gui_settings.load_gui_settings().get("gamma_install_resume")
             incomplete = _resume_state_matches(resume_state, profile)
         if incomplete:
             self.mod_counter_label.setText(
                 tr("{enabled} Mods (incomplete)", enabled=enabled)
             )
-            self.mod_counter_label.setStyleSheet(f"color: {WARN.name()};")
+            style = f"color: {WARN.name()};"
+            if self.mod_counter_label.styleSheet() != style:  # restyling every tick is not free
+                self.mod_counter_label.setStyleSheet(style)
         else:
             self.mod_counter_label.setText(tr("{enabled} Mods", enabled=enabled))
-            self.mod_counter_label.setStyleSheet("")
+            if self.mod_counter_label.styleSheet():
+                self.mod_counter_label.setStyleSheet("")
         if counts is not None:
             tooltip = tr(
                 "{enabled} of {total} mods enabled in profile “{profile_name}”",
@@ -1504,7 +2271,7 @@ class MainWindow(QMainWindow):
             )
             if incomplete:
                 tooltip += "\n" + tr(
-                    "The last install attempt failed - this modpack may be incomplete. Resume the install on the Install page to finish it."
+                    "The last install failed - resume it on the Install page."
                 )
             self.mod_counter_label.setToolTip(tooltip)
         else:
@@ -1512,6 +2279,10 @@ class MainWindow(QMainWindow):
                 tr("No active profile, or GAMMA is not installed yet.")
             )
         self.mod_counter_label.show()
+        text = self.mod_counter_label.text()
+        if text != getattr(self, "_mod_counter_synced_text", None):
+            self._mod_counter_synced_text = text
+            self._update_overflow()
 
     def refresh_settings(self) -> None:
         self.settings = load_settings()

@@ -43,12 +43,16 @@ from commander_gui.launcher import LaunchError
 from commander_gui.log_dump import create_log_dump
 from commander_gui.parsers import parse_prune_archive, strip_ansi
 from commander_gui.repair import foreign_prefix_dlls, repair_prefix_foreign_dlls
+from commander_gui.romeo import GAMMA_PROFILE, back_to_gamma
+from commander_gui.romeo import installed as romeo_installed
+from commander_gui.romeo import uninstall as uninstall_romeo
 from commander_gui.ui.backup_dialog import backup_summary, backup_title
 from commander_gui.ui.common import (
     BackgroundTask,
     CommandRunner,
     StreamTask,
-    mo2_running,
+    game_running,
+    notice,
 )
 from commander_gui.ui.utilities_page import (
     _backup_then_wipe,
@@ -58,6 +62,8 @@ from commander_gui.ui.utilities_page import (
     _save_moved_profile,
     _validate_move_destination,
     _validate_wipe_paths,
+    custom_prefix,
+    use_default_prefix,
 )
 
 from ..folder_picker import show_folder_picker
@@ -87,11 +93,11 @@ class _StatusLabel(QLabel):
         self.hide()
 
     def setText(self, text: str) -> None:
-        super().setText(text)
+        super().setText(notice(text))
         self.setVisible(bool(text))
 
 
-def _tool_row(title, description, on_run, *, role="normal"):
+def _tool_row(title, description, on_run, *, role="normal", button_text=None):
     """A tool tile: title and wrapped description, with a small Run button.
 
     Not a DeckRow: descriptions here run long enough to need wrapping past
@@ -108,12 +114,14 @@ def _tool_row(title, description, on_run, *, role="normal"):
     text.addWidget(deck_label(title, role="rowTitle"))
     text.addWidget(deck_label(description, role="caption", wrap=True))
     layout.addLayout(text, 1)
-    button = deck_button(tr("Run"), role=role, on_click=on_run)
+    button = deck_button(button_text or tr("Run"), role=role, on_click=on_run)
     # Small and the same whatever the role: a touch-sized pill beside the
     # text, not a slab under it - and a danger tile's button is no bigger
     # than anyone else's.
     button.setObjectName("deckRunButton" if role == "normal" else "deckRunDanger")
-    button.setFixedSize(px(104), px(MIN_TOUCH))
+    # At least Run's width; a longer label (Uninstall) widens it.
+    button.setFixedHeight(px(MIN_TOUCH))
+    button.setMinimumWidth(px(104))
     layout.addWidget(button, 0, Qt.AlignmentFlag.AlignVCenter)
     return box, button
 
@@ -125,6 +133,7 @@ class UtilitiesScreen(DeckScreen):
         self._move_task: StreamTask | None = None
         self._log_dump_task: StreamTask | None = None
         self._repair_task: BackgroundTask | None = None
+        self._romeo_task: BackgroundTask | None = None
         self._backup_task: StreamTask | None = None
         self._action_buttons: list = []
         self._prune_mb = 0
@@ -142,10 +151,8 @@ class UtilitiesScreen(DeckScreen):
         self.progress.hide()
         self.body.addWidget(self.progress)
 
-        # Two columns balanced by height: the two one- and two-tool groups
-        # stacked on the left, the three-tool group on the right. Paired
-        # strictly two-by-two, the lone Wine / Proton tool sat in a card
-        # half as tall as the one beside it.
+        # Two columns balanced by height: the two two-tool groups (cache,
+        # Wine) stacked on the left, game files and backups on the right.
         cache, files, wine, installation, backups = self._tool_cards()
         left = QVBoxLayout()
         left.setSpacing(px(12))
@@ -234,6 +241,16 @@ class UtilitiesScreen(DeckScreen):
                             "crashes immediately, then reinstall the dependencies."
                         ),
                         self._repair_prefix,
+                        "normal",
+                    ),
+                    (
+                        tr("Use the default Wine prefix"),
+                        tr(
+                            "Switch the selected runner back to its own default prefix "
+                            "if a custom prefix folder was set and no longer works. "
+                            "The custom folder itself is not deleted."
+                        ),
+                        self._reset_prefix,
                         "normal",
                     ),
                 ],
@@ -359,6 +376,14 @@ class UtilitiesScreen(DeckScreen):
             role="danger",
         )
         tiles.addWidget(box)
+        # Only there while ROMEO is installed (_update_destructive_enabled).
+        self.romeo_tile, self.romeo_uninstall_button = _tool_row(
+            tr("Uninstall ROMEO"),
+            tr("Removes ROMEO's mods and Mod Organizer profile, then switches COMMANDER back to G.A.M.M.A."),
+            self._start_romeo_uninstall,
+            role="danger",
+        )
+        tiles.addWidget(self.romeo_tile)
         card.body.addLayout(tiles)
         return card
 
@@ -385,10 +410,11 @@ class UtilitiesScreen(DeckScreen):
             and self._log_dump_task is None
             and self._repair_task is None
             and self._backup_task is None
+            and self._romeo_task is None
         )
 
     def _reject_if_mo2_running(self) -> bool:
-        if mo2_running(force=True):
+        if game_running(force=True):
             self.window.notify(
                 tr("Mod Organizer / the game is currently running. Close it first.")
             )
@@ -412,6 +438,70 @@ class UtilitiesScreen(DeckScreen):
         self.full_uninstall_button.setEnabled(
             idle and (anomaly_present or gamma_present or cache_present)
         )
+        romeo = gamma_present and romeo_installed(Path(profile.gamma).expanduser())
+        self.romeo_tile.setVisible(romeo)
+        self.romeo_uninstall_button.setEnabled(idle and romeo)
+
+    def _start_romeo_uninstall(self) -> None:
+        profile = self.profile()
+        if profile is None:
+            return
+        if not self._tasks_idle() or self.window.install_busy:
+            self.window.notify(tr("Another task is already running."))
+            return
+        if self._reject_if_mo2_running():
+            return
+        gamma = Path(profile.gamma).expanduser()
+        if not (gamma / "profiles" / GAMMA_PROFILE / "modlist.txt").is_file():
+            self.window.notify(tr("The G.A.M.M.A profile is missing. Run a GAMMA update first, then uninstall ROMEO."), 8000)
+            return
+
+        def _go() -> None:
+            if self.window.install_busy or self._reject_if_mo2_running():
+                return
+            self.window.set_install_busy(True)
+            self._set_actions_enabled(False)
+            task = BackgroundTask(
+                uninstall_romeo, gamma, Path(profile.anomaly).expanduser(), Path(profile.cache).expanduser(), parent=self
+            )
+            task.result.connect(lambda result: self._on_romeo_uninstalled(gamma, *result))
+            task.error.connect(self._on_romeo_uninstall_error)
+            self._romeo_task = task
+            task.start()
+            self.window.notify(tr("Uninstalling ROMEO"), 5000)
+
+        self.window.confirm(
+            tr("Uninstall ROMEO?"),
+            tr("COMMANDER deletes ROMEO's mods and its Mod Organizer profile, then switches back to G.A.M.M.A.")
+            + "\n\n•  " + tr("Your G.A.M.M.A mod list and saves aren't touched.")
+            + "\n•  " + tr("Saves made with ROMEO won't load in G.A.M.M.A."),
+            _go,
+            confirm_text=tr("Uninstall ROMEO"),
+            confirm_role="danger",
+        )
+
+    def _on_romeo_uninstalled(self, gamma: Path, removed: list[str], atmos: bool) -> None:
+        self._romeo_task = None
+        self.window.set_install_busy(False)
+        self._set_actions_enabled(True)
+        try:
+            back_to_gamma(self.window.settings, gamma, removed)
+        except OSError as exc:
+            self.window.announce_finished(
+                tr("ROMEO uninstalled"), tr("Could not write settings.json:\n{exc}", exc=exc), ok=False
+            )
+            return
+        self.window.update_mod_counter()
+        message = tr("You're back on G.A.M.M.A.")
+        if not atmos:
+            message += "\n\n" + tr("GAMMA's Atmos weather files couldn't be put back. Run a GAMMA update to restore them.")
+        self.window.announce_finished(tr("ROMEO uninstalled"), message)
+
+    def _on_romeo_uninstall_error(self, message: str) -> None:
+        self._romeo_task = None
+        self.window.set_install_busy(False)
+        self._set_actions_enabled(True)
+        self.window.announce_finished(tr("Couldn't uninstall ROMEO"), message, ok=False)
 
     # -- simple CLI-backed tools --------------------------------------------
     def _run_cli(
@@ -540,7 +630,7 @@ class UtilitiesScreen(DeckScreen):
         if not prefix:
             self.window.notify(tr("The selected runner does not use a Proton prefix."))
             return
-        self.status.setText(tr("Scanning prefix..."))
+        self.status.setText(tr("Scanning prefix"))
         task = BackgroundTask(foreign_prefix_dlls, prefix, runner, parent=self)
         self._repair_task = task
         task.result.connect(lambda found: self._on_prefix_scanned(prefix, runner, found))
@@ -599,6 +689,33 @@ class UtilitiesScreen(DeckScreen):
         self.window.set_install_busy(False)
         self._set_actions_enabled(True)
         self.window.notify(tr("Repair failed: {message}", message=message), 8000)
+
+    def _reset_prefix(self) -> None:
+        if not self._tasks_idle() or self.window.install_busy:
+            self.window.notify(tr("Another task is already running."))
+            return
+        if self._reject_if_mo2_running():
+            return
+        kind, default, saved = custom_prefix()
+        if saved is None:
+            self.window.notify(
+                tr("The selected runner already uses its default prefix:\n{path}", path=default), 6000
+            )
+            return
+
+        def _go() -> None:
+            use_default_prefix(kind)
+            self.status.setText(tr("The game now runs in:\n{path}", path=default))
+            self.window.notify(tr("Default prefix set"), 5000)
+
+        self.window.confirm(
+            tr("Use the default prefix?"),
+            tr("The game will run in the default prefix again instead of:\n{path}", path=saved)
+            + "\n\n"
+            + tr("The custom folder is not deleted. If the default prefix is new, install the dependencies again on the Install page."),
+            _go,
+            confirm_text=tr("Use default"),
+        )
 
     # -- saves & settings backup ---------------------------------------------
     def _run_backup_task(self, fn, status: str, on_done) -> None:
@@ -691,7 +808,7 @@ class UtilitiesScreen(DeckScreen):
             lambda report: create_backup(
                 name, anomaly, gamma, reason="manual", name=label, report=report
             ),
-            tr("Backing up..."),
+            tr("Backing up"),
             done,
         )
 
@@ -775,7 +892,7 @@ class UtilitiesScreen(DeckScreen):
             lambda report: restore_backup(
                 info, anomaly, gamma, saves=saves, settings=settings, report=report
             ),
-            tr("Restoring..."),
+            tr("Restoring"),
             done,
         )
 
@@ -804,7 +921,7 @@ class UtilitiesScreen(DeckScreen):
             self.window.notify(tr("Another task is already running."))
             return
         self.window.set_install_busy(True)
-        self.status.setText(tr("Creating Log Dump..."))
+        self.status.setText(tr("Creating Log Dump"))
         self.progress.reset()
         self.progress.show()
         self.progress.set_cancellable(None)
@@ -828,7 +945,7 @@ class UtilitiesScreen(DeckScreen):
             skipped = int(stats.get("skipped", 0))
             size_mb = float(stats.get("bytes", 0)) / (1024 * 1024)
         except (TypeError, ValueError, KeyError):
-            self.status.setText(tr("Log Dump Failed"))
+            self.status.setText(tr("Couldn't create the log dump"))
             return
         self.status.setText(
             tr(
@@ -947,7 +1064,7 @@ class UtilitiesScreen(DeckScreen):
             return
         self.window.set_install_busy(True, "move")
         self._set_actions_enabled(False)
-        self.status.setText(tr("Moving installation..."))
+        self.status.setText(tr("Moving installation"))
         self.progress.reset()
         self.progress.show()
         self._move_sources = sources
@@ -1054,14 +1171,22 @@ class UtilitiesScreen(DeckScreen):
                 return
             self._begin_reset(include_anomaly, wipe_paths, profile, title)
 
-        self.window.confirm(title, message, _start, confirm_role="danger", confirm_text=title)
+        def _confirmed() -> None:
+            if include_anomaly:
+                _start()  # Anomaly goes too, co-op's engine with it
+            else:
+                from .multiplayer import confirm_singleplayer  # imports this module
+
+                confirm_singleplayer(self.window, profile, tr("resetting GAMMA"), _start)
+
+        self.window.confirm(title, message, _confirmed, confirm_role="danger", confirm_text=title)
 
     def _begin_reset(self, include_anomaly, wipe_paths, profile, title) -> None:
         self._reset_includes_anomaly = include_anomaly
         self._wipe_targets = (profile.anomaly, profile.gamma)
         self.window.set_install_busy(True, "anomaly" if include_anomaly else "gamma")
         self._set_actions_enabled(False)
-        self.status.setText(tr("Wiping {title}...", title=title))
+        self.status.setText(tr("Wiping {title}", title=title))
         self.progress.reset()
         self.progress.show()
         self.progress.set_cancellable(None)
@@ -1093,7 +1218,7 @@ class UtilitiesScreen(DeckScreen):
                 8000,
             )
             return
-        self.status.setText(tr("{title}: folders wiped, reinstalling...", title=title))
+        self.status.setText(tr("{title}: folders wiped, reinstalling", title=title))
         self.window.set_page("install")
         install_page = self.window._pages["install"]
         if self._reset_includes_anomaly:
@@ -1181,7 +1306,7 @@ class UtilitiesScreen(DeckScreen):
         self._full_uninstall_targets = (profile.anomaly, profile.gamma, profile.cache)
         self.window.set_install_busy(True)
         self._set_actions_enabled(False)
-        self.status.setText(tr("Removing Anomaly, GAMMA, and cache folders..."))
+        self.status.setText(tr("Removing Anomaly, GAMMA, and cache folders"))
         self.progress.reset()
         self.progress.show()
         self.progress.set_cancellable(None)

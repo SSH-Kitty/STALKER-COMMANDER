@@ -30,6 +30,7 @@ from commander_gui.themes import (
     _FONT_FAMILY_MAP,
     _FONT_SIZE_RE,
     THEMES,
+    resolve_theme,
 )
 
 #: Smallest font the scale is allowed to produce, matching the floor the
@@ -57,7 +58,7 @@ def build_deck_stylesheet(
     from .scale import scale
 
     factor = scale() if ui_scale is None else ui_scale
-    tokens = dict(THEMES.get(name) or THEMES["gamma"])
+    tokens = dict(THEMES.get(resolve_theme(name)) or THEMES["gamma"])
     tokens["card_glass"] = _translucent(tokens.get("card", "#141b15"), 240)
     qss = _DECK_TEMPLATE.safe_substitute(tokens)
     if factor != 1.0:
@@ -76,9 +77,9 @@ def build_deck_stylesheet(
 
 def _translucent(color: str, alpha: int) -> str:
     """``color`` (any form QColor parses) as an ``rgba()`` at ``alpha``."""
-    from PySide6.QtGui import QColor
+    from commander_gui.themes import parse_color
 
-    parsed = QColor(color)
+    parsed = parse_color(color, color)
     if not parsed.isValid():
         return color
     return f"rgba({parsed.red()}, {parsed.green()}, {parsed.blue()}, {alpha})"
@@ -794,6 +795,18 @@ QLabel#deckStatValue {
     color: $accent;
     background: transparent;
 }
+/* A Verify Integrity tile's number, coloured by what it found. */
+QLabel#deckStatValue[state="problem"] {
+    color: $danger_text;
+}
+QLabel#deckStatValue[state="warn"] {
+    color: $warn;
+}
+QLabel#deckStatValue[state="idle"],
+QLabel#deckStatValue[state="running"],
+QLabel#deckStatValue[state="info"] {
+    color: $text_info;
+}
 QLabel#deckSection {
     font-size: 17px;
     font-weight: bold;
@@ -937,14 +950,18 @@ QPushButton#deckHeroDanger:focus {
    Deck Mode uses in-window overlays, but a handful of shared helpers in
    commander_gui.ui.common raise a real QMessageBox. Size those up too so
    they are usable with a thumbstick rather than merely present. */
-QMessageBox {
+QMessageBox, QDialog#messageDialog, QDialog#popupWindow {
     background-color: $card;
 }
-QMessageBox QLabel {
+QMessageBox QLabel, QDialog#messageDialog QLabel {
     font-size: 18px;
     color: $text;
 }
-QMessageBox QPushButton {
+QDialog#messageDialog QLabel#section1, QDialog#popupWindow QLabel#section1 {
+    font-size: 24px;
+    font-weight: bold;
+}
+QMessageBox QPushButton, QDialog#messageDialog QPushButton {
     min-width: 140px;
     min-height: 56px;
 }

@@ -108,8 +108,19 @@ class WinetricksStatusTests(unittest.TestCase):
     def test_full_status_spawns_nothing_either(self):
         with patch.object(subprocess, "run", side_effect=AssertionError):
             status = check_winetricks_full_status(str(self.tmp))
-        for tool in ("wine", "protontricks", "umu"):
-            self.assertIn(tool, status)
+        self.assertIn("umu", status)
+        # Never run by COMMANDER, so never reported as missing.
+        self.assertNotIn("protontricks", status)
+
+    def test_wine_only_counts_without_umu(self):
+        # Bazzite: umu-run present, wine absent and not installable. Wine
+        # must not show up as a missing dependency.
+        with patch("commander_gui.winetricks.umu_binary", return_value="/usr/bin/umu-run"):
+            status = check_winetricks_full_status(str(self.tmp))
+        self.assertNotIn("wine", status)
+        with patch("commander_gui.winetricks.umu_binary", return_value=""):
+            status = check_winetricks_full_status(str(self.tmp))
+        self.assertIn("wine", status)
 
 
 # =====================================================================
@@ -455,6 +466,25 @@ class NoStrayWineEnvTests(unittest.TestCase):
                     if '"WINEPREFIX":' in line and not line.lstrip().startswith("#"):
                         offenders.append(f"{path.relative_to(REPO_ROOT)}:{number}")
         self.assertEqual(offenders, [], f"Wine env built outside the runner layer: {offenders}")
+
+
+class WineRequirementTests(unittest.TestCase):
+    """System Wine is only a dependency of the bare "wine" runner (SteamOS has none)."""
+
+    def _errors(self, runner):
+        from commander_gui import dependencies
+
+        with patch.object(
+            dependencies.gui_settings, "load_gui_settings", return_value={"runner": runner}
+        ), patch.object(dependencies, "check_umu", return_value=(False, None)), patch.object(
+            dependencies, "check_winetricks", return_value=(False, None)
+        ), patch.object(dependencies, "check_wine", return_value="no wine"):
+            return dependencies.check_all_dependencies()
+
+    def test_wine_only_required_for_wine_runner(self):
+        self.assertEqual(self._errors("auto"), [])
+        self.assertEqual(self._errors("umu"), [])
+        self.assertEqual(self._errors("wine"), ["no wine"])
 
 
 if __name__ == "__main__":

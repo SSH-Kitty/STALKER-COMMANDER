@@ -15,6 +15,7 @@ that API:
 
 from __future__ import annotations
 
+import http.client
 import json
 import re
 import urllib.parse
@@ -22,11 +23,13 @@ import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .atomic import write_bytes, write_text
 from .i18n import tr
+from .integrity import GAMMA_MARKERS
 from .network import read_response_bytes
 from .network import urlopen_with_retry as urlopen
 from .parsers import UpdateDiff
-from .repair import USER_AGENT, ModPackRecord, parse_modpack_records
+from .repair import USER_AGENT, ModPackRecord, _name_only, parse_modpack_records
 
 VERSION_FILENAME = "G.A.M.M.A_definition_version.txt"
 PATCHNOTES_FILENAME = "Patchnotes.md"
@@ -61,23 +64,32 @@ class UpdateStatus:
     patchnotes: str | None = None
     diffs: list[UpdateDiff] = field(default_factory=list)
     error: str | None = None
+    #: The install has a modpack list but no gamma/version.txt (a GOG or
+    #: hand-made install). One ``update apply`` syncs the GAMMA repos and
+    #: writes it, so this counts as an update even with no addon changes.
+    version_unknown: bool = False
+    #: One-off explanation for the Updates page (the list was rebuilt).
+    note: str | None = None
 
     @property
     def update_available(self) -> bool:
         # The version marker is fetched even when the addon list fails, so
         # a newer version is an update whatever went wrong with the list -
         # checking the error first hid it exactly when the list was down.
-        if self.latest and self.installed and self.latest != self.installed:
-            # Build numbers: a local build ahead of a lagging remote marker
-            # is not an update.
-            if self.latest.isdigit() and self.installed.isdigit():
-                if int(self.latest) > int(self.installed):
-                    return True
-            else:
-                return True
+        # The remote marker is a build number; anything else (a captive
+        # portal's HTML page) is not a version and never an update.
+        if (
+            self.latest
+            and self.installed
+            and self.latest != self.installed
+            and self.latest.isdigit()
+            # A local build ahead of a lagging remote marker is not an update.
+            and (not self.installed.isdigit() or int(self.latest) > int(self.installed))
+        ):
+            return True
         if self.error:
             return False
-        return bool(self.diffs)
+        return bool(self.diffs) or self.version_unknown
 
 
 def format_version(
@@ -108,6 +120,11 @@ def status_summary(status: UpdateStatus) -> tuple[str, str]:
     """
     if status.error and not status.update_available:
         return status.error, "warn"
+    if status.version_unknown:
+        text = tr("GAMMA version unknown. Install updates once to sync it.")
+        if status.diffs:
+            text += " " + tr("- {count} change(s)", count=len(status.diffs))
+        return text, "warn"
     if status.installed is None:
         return tr("GAMMA is not installed yet - run a full install first."), "warn"
     if status.update_available:
@@ -134,9 +151,9 @@ def installed_version(gamma_dir: str | None) -> str | None:
         return None
     try:
         text = Path(gamma_dir, "version.txt").read_text(
-            encoding="utf-8", errors="replace"
+            encoding="utf-8-sig", errors="replace"
         )
-    except (OSError, ValueError, UnicodeError):
+    except (OSError, ValueError, UnicodeError, http.client.HTTPException):
         return None
     version = text.strip()
     return version or None
@@ -173,22 +190,11 @@ def _raw_repo_url(profile, filename: str) -> str:
     """Raw.githubusercontent URL for a file in the GAMMA repo."""
     owner, repo = _repo_owner_and_name(profile)
     branch = _repo_branch(profile)
+    quote = urllib.parse.quote  # a "#" or "?" in the profile must not end the path
     return (
-        f"https://raw.githubusercontent.com/{owner}/{repo}/"
-        f"refs/heads/{branch}/{filename}"
+        f"https://raw.githubusercontent.com/{quote(owner)}/{quote(repo)}/"
+        f"refs/heads/{quote(branch, safe='/')}/{filename}"
     )
-
-
-def changelog_web_url(profile) -> str:
-    """Browser-facing (non-raw) GitHub URL for the repo's Patchnotes.md.
-
-    For the "View full changelog on GitHub" link - same owner/repo/branch
-    resolution as _raw_repo_url(), just a normal blob view a person can
-    actually open instead of a raw-text fetch URL.
-    """
-    owner, repo = _repo_owner_and_name(profile)
-    branch = _repo_branch(profile)
-    return f"https://github.com/{owner}/{repo}/blob/{branch}/{PATCHNOTES_FILENAME}"
 
 
 def remote_version(profile) -> str | None:
@@ -201,10 +207,10 @@ def remote_version(profile) -> str | None:
         with urlopen(req, timeout=REMOTE_TIMEOUT) as resp:
             version = (
                 read_response_bytes(resp, _MAX_VERSION_BYTES)
-                .decode("utf-8", errors="replace")
+                .decode("utf-8-sig", errors="replace")
                 .strip()
             )
-    except (OSError, ValueError, UnicodeError):
+    except (OSError, ValueError, UnicodeError, http.client.HTTPException):
         return None
     return version or None
 
@@ -212,9 +218,8 @@ def remote_version(profile) -> str | None:
 def fetch_latest_patchnotes(profile) -> str | None:
     """Fetch the repo's full ``Patchnotes.md`` body; None if unreachable.
 
-    latest_version_human() only ever needed a version-number regex match
-    out of this same fetch and discarded the rest - this keeps the full
-    text so callers (the Updates page's "What's New" panel) can show it.
+    Keeps the full text, not just the version number, so callers (the
+    Updates page's "What's New" panel) can show it.
     """
     try:
         req = urllib.request.Request(
@@ -225,7 +230,7 @@ def fetch_latest_patchnotes(profile) -> str | None:
             text = read_response_bytes(resp, _MAX_MARKDOWN_BYTES).decode(
                 "utf-8", errors="replace"
             )
-    except (OSError, ValueError, UnicodeError):
+    except (OSError, ValueError, UnicodeError, http.client.HTTPException):
         return None
     return text or None
 
@@ -243,8 +248,8 @@ def parse_patchnotes_sections(text: str) -> list[tuple[str, str]]:
     Patchnotes.md is not just the latest release's notes - it's the
     whole history, one level-1 Markdown heading per release (confirmed
     against the real file: 0.9.5, 0.9.4, 0.9.3.1, 0.9.3, three separate
-    0.9.1 entries), stacked oldest-last. ``latest_version_human()``/
-    ``fetch_latest_patchnotes()`` only ever needed the very first one;
+    0.9.1 entries), stacked oldest-last. The version check only ever
+    needed the very first one;
     this is for showing the rest too, each as its own collapsible entry,
     in the same (already latest-first) order the file itself uses.
 
@@ -267,13 +272,41 @@ def parse_patchnotes_sections(text: str) -> list[tuple[str, str]]:
     return sections
 
 
-def latest_version_human(profile) -> str | None:
-    """Fetch the human-readable GAMMA version (e.g. "0.9.5").
+_LONG_NAME_RE = re.compile(
+    r"S\.?T\.?A\.?L\.?K\.?E\.?R\.?\s+G\.?A\.?M\.?M\.?A\.?", re.IGNORECASE
+)
+_PATCH_NOTES_RE = re.compile(r"\s*[-–:]?\s*patch\s*notes\s*$", re.IGNORECASE)
+_TITLE_VERSION_RE = re.compile(r"[0-9]+(?:\.[0-9]+)+")
 
-    Taken from the repo's ``Patchnotes.md`` heading (``# **GAMMA 0.9.5**``),
-    falling back to the README badge ``gamma-v0.9.5``. None if unreachable.
+
+def release_title(title: str) -> str:
+    """"S.T.A.L.K.E.R. G.A.M.M.A. 0.9.4 Patch Notes" -> "GAMMA 0.9.4".
+
+    The heading wording has drifted between releases; shortened this way
+    they read as one list and fit a row.
     """
-    return _version_from_patchnotes_or_readme(profile, fetch_latest_patchnotes(profile))
+    short = _PATCH_NOTES_RE.sub("", _LONG_NAME_RE.sub("GAMMA", title)).strip(" -–:")
+    return short or title
+
+
+def new_releases(titles: list[str], seen: str | None, update_available: bool) -> list[bool]:
+    """Which releases (latest first) the player hasn't installed yet.
+
+    ``seen`` is the last GAMMA version this profile was up to date on. The
+    installed build number can't be mapped to a release heading, so without
+    it only the newest release counts as new.
+    """
+    if not update_available:
+        return [False] * len(titles)
+    seen_version = _numeric_version_tuple(seen) if seen else None
+    if seen_version is None:
+        return [index == 0 for index in range(len(titles))]
+    flags = []
+    for title in titles:
+        match = _TITLE_VERSION_RE.search(title)
+        version = _numeric_version_tuple(match.group(0)) if match else None
+        flags.append(version is not None and version > seen_version)
+    return flags
 
 
 def _version_from_patchnotes_or_readme(profile, patchnotes: str | None) -> str | None:
@@ -295,7 +328,7 @@ def _version_from_patchnotes_or_readme(profile, patchnotes: str | None) -> str |
             text = read_response_bytes(resp, _MAX_MARKDOWN_BYTES).decode(
                 "utf-8", errors="replace"
             )
-    except (OSError, ValueError, UnicodeError):
+    except (OSError, ValueError, UnicodeError, http.client.HTTPException):
         return None
     return _version_from_text(text)
 
@@ -308,10 +341,12 @@ _COMMANDER_REPO = "https://github.com/SSH-Kitty/STALKER-GAMMA-COMMANDER"
 #: never looked newer than the one before it.
 #:
 #: Unstable builds (GitHub pre-releases) add "-unstable" and an optional
-#: counter: "1.3.1-unstable", "1.3.1-unstable2", ...
+#: counter: "1.3.1-unstable", "1.3.1-unstable2", ... A release *title* typed
+#: by hand ("COMMANDER 1.4.0 Unstable", which the Welcome screen compares
+#: against) has a space there instead; without it that read as stable 1.4.0.
 _VERSION_NUMERIC_RE = re.compile(
     r"(?P<base>[0-9]+(?:\.[0-9]+)*)(?:[Hh](?P<hotfix>[0-9]+))?"
-    r"(?:-unstable(?P<unstable>[0-9]*))?",
+    r"(?:[- ]unstable(?P<unstable>[0-9]*))?",
     re.IGNORECASE,
 )
 
@@ -321,10 +356,11 @@ def _numeric_version_tuple(text: str) -> tuple[int, ...] | None:
     if not match:
         return None
     base = tuple(int(part) for part in match.group("base").split("."))
-    # Padded to major.minor.patch before the hotfix is appended: otherwise
-    # "v1.3H5" -> (1, 3, 5) outranked "1.3.2" -> (1, 3, 2, 0), and "1.3"
-    # vs "1.3.0" compared unequal.
-    base = (base + (0, 0, 0))[:3] if len(base) < 3 else base
+    # A fixed width before the hotfix is appended: otherwise "v1.3H5" ->
+    # (1, 3, 5) outranked "1.3.2" -> (1, 3, 2, 0), "1.3" vs "1.3.0" compared
+    # unequal, and a four-part "1.2.9.1" compared its 4th part against
+    # "1.2.9H1"'s hotfix.
+    base = (base + (0, 0, 0, 0))[:4]
     # Then (stage, n): a stable build is (1, 0) and "-unstableN" is (0, N),
     # so 1.3.1-unstable < 1.3.1-unstable2 < 1.3.1 < 1.3.1H1.
     unstable = match.group("unstable")
@@ -367,7 +403,7 @@ def _latest_stable_tag() -> str | None:
         )
         with urlopen(req, timeout=REMOTE_TIMEOUT) as resp:
             final_url = resp.geturl()
-    except (OSError, ValueError):
+    except (OSError, ValueError, http.client.HTTPException):
         return None
     match = re.search(r"/releases/tag/([^/]+)/?$", final_url)
     return urllib.parse.unquote(match.group(1)) if match else None
@@ -385,7 +421,7 @@ def _feed_tags() -> list[str]:
         )
         with urlopen(req, timeout=REMOTE_TIMEOUT) as resp:
             text = read_response_bytes(resp, _MAX_FEED_BYTES).decode("utf-8", "replace")
-    except (OSError, ValueError):
+    except (OSError, ValueError, http.client.HTTPException):
         return []
     return [urllib.parse.unquote(tag) for tag in _FEED_TAG_RE.findall(text)]
 
@@ -468,7 +504,10 @@ def newer_unstable_tag(current_version: str) -> str | None:
 
 
 def check_commander_update(current_version: str, channel: str = "stable") -> str | None:
-    """Return the newer COMMANDER release tag, or None if up to date/unreachable.
+    """Return the newer COMMANDER release tag, or None if up to date.
+
+    Raises OSError when GitHub can't be reached, so callers don't show
+    "up to date" for a check that never happened.
 
     ``channel`` "stable" (the default) only ever looks at the release GitHub
     marks as latest, which is never a pre-release - stable users are not
@@ -491,7 +530,9 @@ def check_commander_update(current_version: str, channel: str = "stable") -> str
         candidates = _feed_tags()
     if not candidates:
         tag = _latest_stable_tag()
-        candidates = [tag] if tag else []
+        if not tag:
+            raise OSError("GitHub couldn't be reached")
+        candidates = [tag]
     best: tuple[tuple[int, ...], str] | None = None
     for tag in candidates:
         version = _numeric_version_tuple(tag)
@@ -544,6 +585,12 @@ def local_modpack_records(
     install for another profile. *mo2_profile* only wins a tie (a copy made
     by ``seed_new_mo2_profile()`` keeps the original's timestamp).
     """
+    profile_dir = _newest_modpack_list_dir(gamma_dir, mo2_profile)
+    return None if profile_dir is None else _read_modpack_list(profile_dir)
+
+
+def _newest_modpack_list_dir(gamma_dir: str, mo2_profile: str) -> Path | None:
+    """The profile folder holding the newest modpack list (see above)."""
     found = []
     try:
         for candidate in Path(gamma_dir, "profiles").iterdir():
@@ -558,8 +605,32 @@ def local_modpack_records(
         return None
     if not found:
         return None
-    profile_dir = max(found, key=lambda item: item[:2])[2]
-    return _read_modpack_list(profile_dir)
+    return max(found, key=lambda item: item[:2])[2]
+
+
+def adopt_modpack_list(gamma_dir: str, mo2_profile: str) -> bool:
+    """Copy the newest modpack list into *mo2_profile* if it has none.
+
+    Updates reads the list from whichever profile holds it, but the CLI's
+    ``update apply`` only reads the active profile's own JSON and stops with
+    "modpack_maker_list.json file not found". Never overwrites. Returns
+    whether files were copied.
+    """
+    dest = Path(gamma_dir, "profiles", mo2_profile)
+    if not dest.is_dir() or (dest / "modpack_maker_list.json").exists():
+        return False
+    source = _newest_modpack_list_dir(gamma_dir, mo2_profile)
+    if source is None or source == dest:
+        return False
+    copied = False
+    for name in _MODPACK_LIST_FILES:
+        if (source / name).is_file() and not (dest / name).exists():
+            try:
+                write_bytes(dest / name, (source / name).read_bytes())
+                copied = True
+            except OSError:
+                pass
+    return copied
 
 
 #: What the CLI's full install leaves in an MO2 profile folder.
@@ -602,6 +673,122 @@ def _read_modpack_list(profile_dir: Path) -> dict[str, ModPackRecord] | None:
     except ValueError:
         return None
     return None
+
+
+def _meta_installation_file(mod_dir: Path) -> str:
+    """The archive name MO2's meta.ini says this mod was installed from."""
+    try:
+        text = (mod_dir / "meta.ini").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    for line in text.splitlines():
+        key, sep, value = line.partition("=")
+        if sep and key.strip().lower() == "installationfile":
+            value = value.strip().strip('"')
+            # Can be a full Windows or POSIX path; only the name matters.
+            return value.replace("\\", "/").rsplit("/", 1)[-1]
+    return ""
+
+
+def _cli_json_record(line: str) -> dict:
+    """One TSV line as the CLI's ``ModPackMakerRecord`` JSON (camelCase).
+
+    Mirrors stalker-gamma-cli's serializer so ``update apply`` can read it:
+    instructions is a list split on ":" (``"0"`` is an empty list), patch
+    drops its leading ``"- "`` (the CLI adds it back when reading), and a
+    field missing from the line is null.
+    """
+    parts = [part.strip() for part in line.split("\t")]
+
+    def field_at(index: int) -> str | None:
+        return parts[index] if index < len(parts) else None
+
+    instructions = field_at(1)
+    patch = field_at(2)
+    if patch is not None:
+        while patch.startswith("- "):
+            patch = patch[2:]
+    return {
+        "dlLink": parts[0],
+        "instructions": None
+        if instructions is None
+        else ([] if instructions == "0" else instructions.split(":")),
+        "patch": patch,
+        "addonName": field_at(3),
+        "modDbUrl": field_at(4),
+        "zipName": field_at(5),
+        "md5ModDb": field_at(6),
+    }
+
+
+def rebuild_modpack_list(
+    gamma_dir: str, mo2_profile: str, remote_text: str
+) -> int | None:
+    """Write the missing modpack list from what is really in ``gamma/mods``.
+
+    A GOG (or hand-made) GAMMA install never ran ``full-install``, so the
+    profile has no modpack_maker_list and neither Updates nor the CLI's
+    ``update apply`` can work. Copying the official list would claim every
+    addon is current; instead each official line is checked against disk:
+
+    * mod folder missing: the line is left out, so it shows as Added;
+    * folder present and its meta.ini names the current archive: kept;
+    * folder present without that proof: the MD5 is blanked, so it shows as
+      Modified and the update re-downloads it.
+
+    Returns how many addons could not be confirmed (missing or unproven),
+    or None if nothing was written.
+    Never overwrites an existing list.
+    """
+    profile_dir = Path(gamma_dir, "profiles", mo2_profile)
+    if not profile_dir.is_dir() or any(
+        (profile_dir / name).exists() for name in _MODPACK_LIST_FILES
+    ):
+        return None
+    folders: dict[str, Path] = {}
+    try:
+        for entry in Path(gamma_dir, "mods").iterdir():
+            if entry.is_dir():
+                folders.setdefault(_name_only(entry.name), entry)
+    except OSError:
+        return None
+
+    lines: list[str] = []
+    unconfirmed = 0
+    for line in remote_text.splitlines():
+        if not line.strip():
+            continue
+        parsed = parse_modpack_records(line)
+        record = next(iter(parsed.values()), None)
+        if record is None:
+            lines.append(line)  # a category header
+            continue
+        folder = folders.get(_name_only(record.folder_name))
+        archives = [name.lower() for name in record.archive_names()]
+        if folder is not None and _meta_installation_file(folder).lower() in archives:
+            lines.append(line)
+            continue
+        unconfirmed += 1
+        if folder is None:
+            continue
+        parts = line.split("\t")
+        if len(parts) > 6 and parts[6].strip():
+            parts[6] = ""
+            lines.append("\t".join(parts))
+        # No MD5 to blank: leaving the line out (Added) is what forces it.
+
+    txt = profile_dir / "modpack_maker_list.txt"
+    js = profile_dir / "modpack_maker_list.json"
+    try:
+        write_text(js, json.dumps([_cli_json_record(line) for line in lines], indent=2))
+        write_text(txt, "\n".join(lines) + "\n")
+    except OSError:
+        # Either file alone would block a retry ("a list exists") and leave
+        # the two out of step, so neither is kept.
+        js.unlink(missing_ok=True)
+        txt.unlink(missing_ok=True)
+        return None
+    return unconfirmed
 
 
 def diff_records(
@@ -666,15 +853,19 @@ def check_updates(profile) -> UpdateStatus:
 
     status.installed = installed_version(gamma_dir)
 
+    no_list = tr(
+        "No modpack list found in this profile. Run a full install so the "
+        "installer can generate the installed-addon list."
+    )
     local = local_modpack_records(gamma_dir, mo2_profile)
-    if local is None:
-        status.error = tr(
-            "No modpack list found in this profile. Run a full install so the "
-            "installer can generate the installed-addon list."
-        )
+    # A GOG or hand-made install has MO2 but never got the list: it is
+    # rebuilt below from the mods folder once the official list is in.
+    if local is None and not all(Path(gamma_dir, m).is_file() for m in GAMMA_MARKERS):
+        status.error = no_list
         return status
 
     remote: dict[str, ModPackRecord] = {}
+    remote_text = ""
     mod_pack_url = getattr(profile, "mod_pack_maker_url", "") or ""
     list_failed = False
     if mod_pack_url:
@@ -683,17 +874,33 @@ def check_updates(profile) -> UpdateStatus:
                 mod_pack_url, headers={"User-Agent": USER_AGENT}
             )
             with urlopen(req, timeout=REMOTE_TIMEOUT) as resp:
-                remote = parse_modpack_records(
-                    read_response_bytes(resp, _MAX_MODPACK_BYTES).decode(
-                        "utf-8", errors="replace"
-                    )
+                remote_text = read_response_bytes(resp, _MAX_MODPACK_BYTES).decode(
+                    "utf-8", errors="replace"
                 )
-        except (OSError, ValueError, UnicodeError) as exc:
+                remote = parse_modpack_records(remote_text)
+        except (OSError, ValueError, UnicodeError, http.client.HTTPException) as exc:
             status.error = tr("Could not reach the official mod list: {exc}", exc=exc)
             list_failed = True
     else:
         status.error = tr("The profile has no modpack maker URL configured.")
         list_failed = True
+
+    if local is None:
+        unconfirmed = (
+            rebuild_modpack_list(gamma_dir, mo2_profile, remote_text) if remote else None
+        )
+        if unconfirmed is not None:
+            local = local_modpack_records(gamma_dir, mo2_profile)
+        if local is None:
+            status.error = no_list if not status.error else f"{no_list}\n{status.error}"
+            return status
+        status.note = tr(
+            "COMMANDER built the installed-mod list from your mods folder (GOG or "
+            "manual install). {count} mod(s) could not be confirmed and are "
+            "reinstalled with the next update.",
+            count=unconfirmed,
+        )
+    status.version_unknown = status.installed is None
 
     # If the remote list is empty but local addons exist, treat as a fetch
     # failure rather than reporting every local addon as "Removed".
@@ -708,8 +915,8 @@ def check_updates(profile) -> UpdateStatus:
     # fetch it so a list outage does not hide an available update.
     status.latest = remote_version(profile)
     # One fetch shared between the human version label and the "What's
-    # New" panel - latest_version_human()'s own README fallback is only
-    # used if this single Patchnotes.md fetch didn't yield a match.
+    # New" panel - the README fallback is only used if this single
+    # Patchnotes.md fetch didn't yield a match.
     status.patchnotes = fetch_latest_patchnotes(profile)
     status.latest_human = _version_from_patchnotes_or_readme(profile, status.patchnotes)
     # The human label is only reliable for the latest release; an installed

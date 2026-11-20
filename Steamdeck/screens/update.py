@@ -11,14 +11,19 @@ interface.
 from __future__ import annotations
 
 import re
+from datetime import datetime, timezone
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QVBoxLayout, QWidget
 
-from commander_gui.cli_runner import cli_command
+from commander_gui import modded_exes
+from commander_gui.atomic import write_bytes
+from commander_gui.cli_runner import cli_command, cli_resume_args
 from commander_gui.game_backup import backup_settings_before
 from commander_gui.i18n import tr
 from commander_gui.integrity import invalidate_baseline
+from commander_gui.keep_state import capture, discard, restore
+from commander_gui.modlist import modlist_path_for
 from commander_gui.parsers import parse_progress_line, strip_ansi
 from commander_gui.settings import cli_ok
 from commander_gui.themes import active_theme_tokens
@@ -26,27 +31,41 @@ from commander_gui.ui.common import (
     BackgroundTask,
     CommandRunner,
     aggregate_progress_value,
-    mo2_running,
+    free_space_bytes,
+    game_running,
+    human_size,
+    notice,
+)
+from commander_gui.ui.update_page import (
+    _LOW_DISK_SPACE_WARNING_BYTES,
+    UpdatePage,
+    _format_relative_time,
 )
 from commander_gui.updates import (
     check_updates,
     parse_patchnotes_sections,
+    release_title,
     status_summary,
 )
 
 from .. import gamepad as pad
+from ..exes_card import DeckExesCard
 from ..scale import px
 from ..widgets import (
     ROW_GAP,
+    DeckCard,
     DeckProgress,
     DeckRow,
     DeckTextPanel,
+    DeckToggleRow,
     deck_button,
     deck_label,
     repolish,
+    side_by_side,
 )
 from .base import DeckScreen
 from .install import battery_warning
+from .multiplayer import confirm_singleplayer
 
 #: Releases listed under Patch notes (Patchnotes.md holds the whole history).
 _MAX_RELEASES = 6
@@ -63,20 +82,6 @@ def _plain_notes(body: str) -> str:
     return "\n".join(lines).strip()
 
 
-_LONG_NAME = re.compile(r"S\.?T\.?A\.?L\.?K\.?E\.?R\.?\s+G\.?A\.?M\.?M\.?A\.?", re.IGNORECASE)
-_PATCH_NOTES = re.compile(r"\s*[-–:]?\s*patch\s*notes\s*$", re.IGNORECASE)
-
-
-def _release_title(title: str) -> str:
-    """"S.T.A.L.K.E.R. G.A.M.M.A. 0.9.4 Patch Notes" -> "GAMMA 0.9.4".
-
-    The heading wording has drifted between releases; shortened this way
-    they read as one list and fit a row.
-    """
-    short = _PATCH_NOTES.sub("", _LONG_NAME.sub("GAMMA", title)).strip(" -–:")
-    return short or title
-
-
 class _ReleaseNotes(QWidget):
     """One release: a header row that opens and closes its notes."""
 
@@ -85,7 +90,7 @@ class _ReleaseNotes(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(px(8))
-        self.header = DeckRow(_release_title(title), tr("Show") + "  ▾", chevron=False)
+        self.header = DeckRow(release_title(title), tr("Show") + "  ▾", chevron=False)
         self.header.activated.connect(self.toggle)
         layout.addWidget(self.header)
         self.panel = DeckTextPanel(_plain_notes(body) or tr("No patch notes."), min_height=160, max_height=420)
@@ -137,6 +142,25 @@ class UpdateScreen(DeckScreen):
             widget.hide()
             self.body.addWidget(widget)
 
+        # Update options: the desktop Options tab's two that matter on a
+        # handheld - space on a 64 GB Deck, and a way back from a bad update.
+        options = DeckCard()
+        options.body.addWidget(deck_label(tr("Update options"), role="rowTitle"))
+        self.minimal_row = DeckToggleRow(tr("Delete downloads after unpacking"), False)
+        self.undo_row = DeckRow(tr("Undo last update"))
+        self.undo_row.activated.connect(self._undo_last_update)
+        options.body.addLayout(side_by_side(self.minimal_row, self.undo_row))
+        options.body.addWidget(
+            deck_label(
+                tr("Saves disk space, but the next update has to download everything it needs again.")
+                + "  "
+                + tr("Restore the modlist.txt saved right before the last update was applied."),
+                role="caption",
+                wrap=True,
+            )
+        )
+        self.body.addWidget(options)
+
         self.body.addWidget(deck_label(tr("Patch notes"), role="rowTitle"))
         # One collapsible entry per release, newest first and all closed:
         # the whole history as one wall of text filled most of the screen.
@@ -149,10 +173,14 @@ class UpdateScreen(DeckScreen):
         self.body.addLayout(self.notes_box)
         self.notes_empty = deck_label("", role="caption", wrap=True)
         self.notes_box.addWidget(self.notes_empty)
+        self.exes = DeckExesCard(self)
+        self.body.addWidget(self.exes.card)
         self.body.addStretch(1)
 
     # -- state ------------------------------------------------------------
     def refresh(self) -> None:
+        self.exes.refresh()
+        self._render_undo()
         profile = self.profile()
         if profile is None:
             self.summary_label.setText(
@@ -164,14 +192,103 @@ class UpdateScreen(DeckScreen):
         self.action_button.setEnabled(
             not self.window.install_busy and self._task is None
         )
+        if self._resume_args():
+            self.action_button.setText(tr("Resume update"))
         if self._status is None and self._task is None:
             self._check()
 
+    def _resume_args(self) -> list[str]:
+        """``["--resume"]`` while a failed or cancelled update apply can be resumed."""
+        profile = self.profile()
+        return cli_resume_args(profile.gamma if profile else None, "update apply")
+
+    def forget_cached_checks(self) -> None:
+        """A different profile is active: its updates aren't the old one's.
+
+        Without this the old profile's diffs stayed listed and "Apply
+        updates" ran against the new profile. A check still in flight for
+        the old profile is dropped.
+        """
+        task, self._task = self._task, None
+        if task is not None:
+            for signal in (task.result, task.error):
+                try:
+                    signal.disconnect()
+                except (RuntimeError, TypeError):
+                    pass
+        self._status = None
+        self._render_changes([])
+        self.action_button.setText(tr("Check for updates"))
+
     def on_busy_changed(self, busy: bool) -> None:
         self.action_button.setEnabled(not busy and self._runner is None)
+        self.exes.refresh()
+        self._render_undo()
+
+    # -- undo last update -------------------------------------------------
+    # The snapshot is the desktop page's own (modlist.txt.pre-update.bak),
+    # so an update applied in either interface can be undone in either.
+    _pre_update_snapshot_path = UpdatePage._pre_update_snapshot_path
+    _snapshot_modlist_before_update = UpdatePage._snapshot_modlist_before_update
+
+    def _render_undo(self) -> None:
+        snapshot = self._pre_update_snapshot_path()
+        self.undo_row.setEnabled(
+            snapshot is not None and not self.window.install_busy and self._runner is None
+        )
+        self.minimal_row.setEnabled(self._runner is None)
+        if snapshot is None:
+            self.undo_row.set_value(tr("Nothing to undo yet."))
+            return
+        try:
+            saved = datetime.fromtimestamp(snapshot.stat().st_mtime, timezone.utc)
+        except OSError:
+            self.undo_row.set_value("")
+            return
+        self.undo_row.set_value(tr("Saved {when}", when=_format_relative_time(saved)))
+
+    def _undo_last_update(self) -> None:
+        if self.window.install_busy or self._runner is not None:
+            return
+        snapshot = self._pre_update_snapshot_path()
+        profile = self.profile()
+        if snapshot is None or profile is None:
+            return
+        modlist_path = modlist_path_for(profile.gamma, profile.mo2_profile)
+        if modlist_path is None:
+            return
+
+        def _undo() -> None:
+            # Re-checked: an update may have started while this was open.
+            if self.window.install_busy or self._runner is not None:
+                self.window.notify(tr("Another task is already running."))
+                return
+            # Forced: modlist.txt is about to be overwritten.
+            if game_running(force=True):
+                self.window.notify(tr("Mod Organizer or the game is still open. Close it, then undo the update."), 6000)
+                return
+            try:
+                # Atomic: a full disk must not leave modlist.txt cut short.
+                write_bytes(modlist_path, snapshot.read_bytes())
+            except OSError as exc:
+                self.window.notify(tr("The old mod list couldn't be put back.\n\n{exc}", exc=exc), 8000)
+                return
+            self.window.update_mod_counter()
+            self.window.notify(tr("Your mod list is back to how it was before the last update."), 5000)
+            self._render_undo()
+
+        self.window.confirm(
+            tr("Undo the last update?"),
+            tr("Your mod list (modlist.txt) goes back to how it was just before the last update.")
+            + "\n\n"
+            + tr("Changes made to the mod list since then are lost."),
+            _undo,
+            confirm_text=tr("Undo update"),
+            confirm_role="danger",
+        )
 
     def _on_action(self) -> None:
-        if self._status is not None and self._status.update_available:
+        if self._resume_args() or (self._status is not None and self._status.update_available):
             self._confirm_apply()
         else:
             self._check()
@@ -183,7 +300,7 @@ class UpdateScreen(DeckScreen):
             return
         self.action_button.setEnabled(False)
         self.update_hints()
-        self.summary_label.setText(tr("Checking..."))
+        self.summary_label.setText(tr("Checking"))
         self._reset_summary_color()
         self._task = BackgroundTask(check_updates, profile, parent=self)
         self._task.result.connect(self._on_checked)
@@ -196,7 +313,9 @@ class UpdateScreen(DeckScreen):
         self.action_button.setEnabled(not self.window.install_busy)
 
         text, kind = status_summary(status)
-        self.summary_label.setText(text)
+        note = getattr(status, "note", None)
+        text = notice(text)
+        self.summary_label.setText(f"{text}\n\n{note}" if note else text)
         # kind is "accent" or "warn", matching desktop's own #accent/#warn
         # object names for this exact text (see update_page.py's
         # _set_status()).
@@ -205,7 +324,9 @@ class UpdateScreen(DeckScreen):
         )
         repolish(self.summary_label)
         self.action_button.setText(
-            tr("Apply updates")
+            tr("Resume update")
+            if self._resume_args()
+            else tr("Apply updates")
             if getattr(status, "update_available", False)
             else tr("Check for updates")
         )
@@ -343,7 +464,10 @@ class UpdateScreen(DeckScreen):
         )
         hints = [("A", "Select")]
         if self.action_button.isEnabled() and self.action_button.isVisible():
-            hints.append(("X", "Apply updates" if available else "Check"))
+            hints.append((
+                "X",
+                "Resume update" if self._resume_args() else "Apply updates" if available else "Check",
+            ))
         # Y goes to the changes list, or the patch notes - only when there
         # is one of them to go to.
         if self.changes.isVisible():
@@ -369,18 +493,38 @@ class UpdateScreen(DeckScreen):
     def _confirm_apply(self) -> None:
         if self.window.install_busy:
             return
-        if mo2_running():
-            self.window.notify(tr("Mod Organizer is running"))
+        if game_running(force=True):
+            self.window.notify(tr("Close the game first"))
             return
         self.window.confirm(
             tr("Update GAMMA"),
-            tr(
-                "Downloads and applies every changed addon. Your user.ltx "
-                "and MCM settings are preserved."
+            (
+                tr("The last update didn't finish. COMMANDER picks it up where it stopped. Mods that are already done are skipped.")
+                if self._resume_args()
+                else tr(
+                    "Downloads and applies every changed addon. Your user.ltx "
+                    "and MCM settings are preserved."
+                )
             )
+            + self._space_warning()
             + battery_warning(),
-            self._apply_if_still_idle,
+            lambda: confirm_singleplayer(
+                self.window, self.profile(), tr("updating GAMMA"), self._apply_if_still_idle
+            ),
             confirm_text=tr("Apply"),
+        )
+
+    def _space_warning(self) -> str:
+        """The desktop Updates page's low-space question, as a line here."""
+        profile = self.profile()
+        if profile is None:
+            return ""
+        free = free_space_bytes(profile.cache or profile.gamma)
+        if free is None or free >= _LOW_DISK_SPACE_WARNING_BYTES:
+            return ""
+        return "\n\n" + tr(
+            "Only {free} is free. GAMMA updates can need several GB to download and unpack, so the update may fail partway.",
+            free=human_size(free),
         )
 
     def _apply_if_still_idle(self) -> None:
@@ -388,21 +532,35 @@ class UpdateScreen(DeckScreen):
         if self.window.install_busy:
             self.window.notify(tr("Another task is already running."))
             return
-        if mo2_running():
-            self.window.notify(tr("Mod Organizer is running"))
+        if game_running(force=True):
+            self.window.notify(tr("Close the game first"))
             return
         self._apply()
 
     def _apply(self) -> None:
+        resume = self._resume_args()
         args = [
             "update",
             "apply",
             "--preserve-user-settings",
             "--preserve-mcm-settings",
+            *resume,
         ]
+        if self.minimal_row.is_checked():
+            args.append("--minimal")
+        # A resumed run keeps the snapshot from the run that stopped: that
+        # run may already have replaced the mod list.
+        if not resume or self._pre_update_snapshot_path() is None:
+            self._snapshot_modlist_before_update()
         error = backup_settings_before(self.profile(), "update")
         if error:
             self.window.notify(tr("Settings backup failed: {message}", message=error), 6000)
+        # Kept across a failed run and its resume, like the desktop page.
+        if getattr(self, "_kept", None) is None:
+            profile = self.profile()
+            # Exes COMMANDER installed: the update must not swap them back
+            # (the desktop page ticks "Keep my current engine executables").
+            self._kept = capture(profile, keep_exes=bool(profile and modded_exes.load_state(profile.anomaly)))
         self._heavy = {}
         self.window.set_install_busy(True, "gamma")
         self.progress.reset()
@@ -434,16 +592,24 @@ class UpdateScreen(DeckScreen):
                 event.operation,
             )
         )
-        self.progress.status_message(f"{event.operation}  {event.name}")
+        self.progress.status_message(f"{event.operation}  {event.name}  {event.size}".rstrip())
 
     def _on_applied(self, rc: int, output: str) -> None:
         cancelled = self._runner is not None and self._runner.was_cancelled
         self.progress.on_finished(rc, output)
         self._runner = None
+        kept = getattr(self, "_kept", None)
+        if kept is not None and not cancelled and cli_ok(rc, output, ""):
+            self._kept = None
+            restore(kept)
+        elif kept is not None and not self._resume_args():
+            self._kept = None
+            discard(kept)
         self.window.set_install_busy(False)
         self.progress.hide()
         self.action_button.show()
         self.action_button.setFocus()
+        self._render_undo()
         if cancelled:
             self.window.notify(tr("Cancelled"))
         elif cli_ok(rc, output, ""):
@@ -461,6 +627,8 @@ class UpdateScreen(DeckScreen):
             self.window.announce_finished(
                 tr("GAMMA update failed"), tr("Failed") + f" (exit {rc})", ok=False
             )
+        if self._resume_args():
+            self.action_button.setText(tr("Resume update"))
 
     def on_back(self) -> bool:
         if self._runner is not None:

@@ -7,17 +7,17 @@ and a "Don't show again" box in the bottom-right corner - the same
 
 Drawn inside the main window rather than as a QDialog: a dimmed scrim over
 the whole window and a panel in the theme's card colour at partial opacity,
-so the app behind still shows through. Both are painted from
-``active_theme_tokens()`` on every paint, and a theme change restyles the
-whole application (which repaints this too), so it follows the theme live.
+so the app behind still shows through. The scrim is a dimmed snapshot of
+the window, painted opaque: a see-through overlay made Qt repaint the whole
+window behind it (backdrop, pages) on every hover and scroll inside it.
 """
 
 from __future__ import annotations
 
 import os
 
-from PySide6.QtCore import QEvent, QRectF, Qt
-from PySide6.QtGui import QColor, QPainter, QPen
+from PySide6.QtCore import QEvent, QPoint, QRect, QRectF, Qt, QTimer
+from PySide6.QtGui import QColor, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QCheckBox,
     QFrame,
@@ -30,11 +30,13 @@ from PySide6.QtWidgets import (
 )
 
 from .. import __version__, __version_label__, gui_settings
-from ..themes import active_theme_tokens
+from ..themes import token_color as _token
 from ..updates import (
     _numeric_version_tuple,
     effective_update_channel,
     fetch_latest_release_notes,
+    is_unstable_version,
+    newer_unstable_tag,
 )
 from .about_page import _DISCORD, _GITHUB, CREDITS
 from .brand_icons import brand_icon, icon_size
@@ -44,6 +46,7 @@ from .common import (
     BackgroundTask,
     info_label,
     open_url,
+    open_web_links,
     section_label,
     tr,
 )
@@ -70,21 +73,16 @@ def version_status(latest_title: str | None) -> tuple[str, str]:
     Shared with Deck Mode's Welcome screen.
     """
     if latest_title is None:
-        return tr("Checking..."), "dim"
+        return tr("Checking"), "dim"
     installed = _numeric_version_tuple(__version__)
     latest = _numeric_version_tuple(latest_title)
     if installed is None or latest is None:
         return tr("Couldn't check"), "dim"
     if installed > latest:
-        return tr("Development build"), "ok"
+        return tr("Unreleased build"), "ok"
     if installed == latest:
         return tr("Up to date"), "ok"
     return tr("Update available"), "warn"
-
-
-def _token(name: str, fallback: str) -> QColor:
-    color = QColor(active_theme_tokens().get(name, fallback))
-    return color if color.isValid() else QColor(fallback)
 
 
 def _clear_background(frame: QFrame) -> None:
@@ -100,7 +98,7 @@ def _clear_background(frame: QFrame) -> None:
 
 
 class _GlassPanel(QFrame):
-    """A rounded panel painted in the live theme's card colour."""
+    """A square panel painted in the live theme's card colour."""
 
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
@@ -110,7 +108,7 @@ class _GlassPanel(QFrame):
             fill.setAlpha(_PANEL_ALPHA)
             painter.setBrush(fill)
             painter.setPen(QPen(_token("border_strong", "#3a4a36"), 2))
-            painter.drawRoundedRect(QRectF(self.rect()).adjusted(1, 1, -1, -1), 16, 16)
+            painter.drawRect(QRectF(self.rect()).adjusted(1, 1, -1, -1))
         finally:
             painter.end()
         super().paintEvent(event)
@@ -164,10 +162,21 @@ class _VersionBar(QFrame):
         text, kind = version_status(latest_title)
         color = {"ok": OK_GREEN.name(), "warn": WARN.name()}.get(kind)
         self.status.setText("\u25cf  " + text if color else text)
+        self.status.unsetCursor()
         self.status.setStyleSheet(f"color: {color}; font-weight: bold;" if color else "")
         self.status.setObjectName("" if color else "dim")
         self.status.style().unpolish(self.status)
         self.status.style().polish(self.status)
+
+    def offer_unstable(self) -> None:
+        """A stable build, up to date, with a newer unstable one published:
+        a link the overlay takes to Settings' COMMANDER build section."""
+        self.status.setText(
+            f'<a href="build" style="color: {OK_GREEN.name()}; text-decoration: none;">'
+            f'\u25cf  {tr("Unstable build available")}</a>'
+        )
+        # Only the offer is a link; the plain statuses aren't clickable.
+        self.status.setCursor(Qt.CursorShape.PointingHandCursor)
 
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
@@ -183,17 +192,32 @@ class _VersionBar(QFrame):
 
 
 class WelcomeOverlay(QWidget):
-    """Covers the main window; closes with ✕, Escape or a click outside."""
+    """Covers the main window; closes with ✕, Escape or a click outside.
 
-    def __init__(self, window) -> None:
+    With ``update_tag`` it is the update banner's "See what's new": the same
+    screen headed by the new version, with Later / Update now in place of
+    "Don't show again"; Update now closes it and calls ``on_update``.
+    """
+
+    def __init__(self, window, update_tag: str | None = None, on_update=None) -> None:
         super().__init__(window)
         self.window = window
         self._task: BackgroundTask | None = None
         #: The patch notes as shown, so Credits can swap back to them.
         self._notes: tuple[str, str, bool] | None = None
         self._showing_credits = False
+        self._on_update = on_update
         self.setObjectName("welcomeOverlay")
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
+        # Paints every pixel (the snapshot), so Qt never repaints the window
+        # underneath for an update in here.
+        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
+        self._backdrop = QPixmap()
+        # Re-snapshot once a resize has settled into the new layout.
+        self._regrab = QTimer(self)
+        self._regrab.setSingleShot(True)
+        self._regrab.setInterval(80)
+        self._regrab.timeout.connect(self._grab_backdrop)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
         outer = QVBoxLayout(self)
@@ -205,14 +229,19 @@ class WelcomeOverlay(QWidget):
         self.panel = _GlassPanel()
         self.panel.setObjectName("welcomePanel")
         _clear_background(self.panel)
-        self.panel.setMaximumWidth(980)
+        self.panel.setMaximumWidth(1100)
         self.panel.setMinimumWidth(640)
         panel_layout = QVBoxLayout(self.panel)
         panel_layout.setContentsMargins(24, 18, 24, 18)
         panel_layout.setSpacing(12)
 
         title_row = QHBoxLayout()
-        title_row.addWidget(section_label(tr("Welcome to COMMANDER"), level=1), 1)
+        heading = (
+            tr("COMMANDER {tag} is out", tag=update_tag)
+            if update_tag
+            else tr("Welcome to COMMANDER")
+        )
+        title_row.addWidget(section_label(heading, level=1), 1)
         close = QPushButton("✕")
         close.setObjectName("secondary")
         close.setFixedSize(36, 36)
@@ -223,6 +252,7 @@ class WelcomeOverlay(QWidget):
         title_row.addWidget(close, 0, Qt.AlignmentFlag.AlignTop)
         panel_layout.addLayout(title_row)
         self.version_bar = _VersionBar()
+        self.version_bar.status.linkActivated.connect(lambda _link: self._open_build_settings())
         panel_layout.addWidget(self.version_bar)
 
         body = QHBoxLayout()
@@ -233,9 +263,9 @@ class WelcomeOverlay(QWidget):
         notes_column.addWidget(self.notes_title)
         self.notes = QTextBrowser()
         self.notes.setObjectName("welcomeNotes")
-        self.notes.setOpenExternalLinks(True)
+        open_web_links(self.notes)
         self.notes.setMinimumHeight(300)
-        self.notes.setPlainText(tr("Loading patch notes..."))
+        self.notes.setPlainText(tr("Loading patch notes"))
         notes_column.addWidget(self.notes, 1)
         body.addLayout(notes_column, 3)
 
@@ -286,15 +316,28 @@ class WelcomeOverlay(QWidget):
         panel_layout.addLayout(body, 1)
 
         bottom = QHBoxLayout()
-        bottom.addStretch(1)
-        self.hide_check = QCheckBox(tr("Don't show again"))
-        self.hide_check.setChecked(
-            bool(gui_settings.load_gui_settings().get("welcome_hidden"))
-        )
-        self.hide_check.toggled.connect(
-            lambda on: gui_settings.save_gui_settings(welcome_hidden=bool(on))
-        )
-        bottom.addWidget(self.hide_check)
+        bottom.setSpacing(8)
+        if update_tag:
+            bottom.addWidget(info_label(tr("COMMANDER restarts when the update is installed.")), 1)
+            update = QPushButton(tr("Update now"))
+            update.setObjectName("primary")
+            update.setMinimumSize(130, 38)
+            update.clicked.connect(self._update_now)
+            bottom.addWidget(update)
+            later = QPushButton(tr("Later"))
+            later.setMinimumSize(110, 38)
+            later.clicked.connect(self.close_overlay)
+            bottom.addWidget(later)
+        else:
+            bottom.addStretch(1)
+            self.hide_check = QCheckBox(tr("Don't show again"))
+            self.hide_check.setChecked(
+                bool(gui_settings.load_gui_settings().get("welcome_hidden"))
+            )
+            self.hide_check.toggled.connect(
+                lambda on: gui_settings.save_gui_settings(welcome_hidden=bool(on))
+            )
+            bottom.addWidget(self.hide_check)
         panel_layout.addLayout(bottom)
 
         row.addWidget(self.panel, 6)
@@ -304,28 +347,123 @@ class WelcomeOverlay(QWidget):
 
         window.installEventFilter(self)
         self.setGeometry(window.rect())
+        self._grab_backdrop()
         self._load_notes()
 
     # -- geometry / closing ------------------------------------------------
     def eventFilter(self, obj, event) -> bool:
         if obj is self.window and event.type() == QEvent.Type.Resize:
             self.setGeometry(self.window.rect())
+            self._regrab.start()
         return super().eventFilter(obj, event)
+
+    def _lights(self) -> QWidget | None:
+        lights = getattr(self.window, "_lights", None)
+        return lights if lights is not None and lights.isVisible() else None
+
+    def _grab_backdrop(self) -> None:
+        """Snapshot the window without this overlay, the snow, lights or leaves.
+
+        Winter's snow and fairy lights and the Red Forest's leaves keep moving
+        under the overlay, so paintEvent draws them live over the still
+        snapshot (the Red Forest's trees and fire stay still in it).
+        """
+        shown = self.isVisible()
+        focus = self.focusWidget() if shown else None
+        if shown:
+            self.hide()
+        lights = self._lights()
+        if lights is not None:
+            lights.hide()
+        snowfall = getattr(self.window, "snowfall", None)
+        flakes = snowfall.flakes if snowfall is not None else []
+        if snowfall is not None:
+            snowfall.flakes = []
+        redforest = getattr(self.window, "redforest", None)
+        leaves = redforest.leaves if redforest is not None else []
+        if redforest is not None:
+            redforest.leaves = []
+        try:
+            pixmap = self.window.grab()
+        finally:
+            if snowfall is not None:
+                snowfall.flakes = flakes
+            if redforest is not None:
+                redforest.leaves = leaves
+            if lights is not None:
+                lights.show()
+        if shown:
+            self.show()
+            (focus or self).setFocus(Qt.FocusReason.OtherFocusReason)
+        self._backdrop = pixmap
+        self.update()
 
     def paintEvent(self, _event) -> None:
         painter = QPainter(self)
         try:
+            # Stretched until a resize's re-snapshot lands.
+            painter.drawPixmap(self.rect(), self._backdrop)
+            snowfall = getattr(self.window, "snowfall", None)
+            if snowfall is not None:
+                snowfall.paint(painter)
+            redforest = getattr(self.window, "redforest", None)
+            if redforest is not None:
+                redforest.paint_leaves(painter)
+            lights = self._lights()
+            if lights is not None:
+                lights.render(painter, lights.mapTo(self.window, QPoint(0, 0)))
             painter.fillRect(self.rect(), QColor(0, 0, 0, _SCRIM_ALPHA))
         finally:
             painter.end()
 
+    # The window's own title bar stays usable under the overlay: drag to
+    # move, double-click to maximize, and its window buttons still work.
+    def _title_bar_at(self, pos: QPoint) -> bool:
+        bar = getattr(self.window, "_topbar", None)
+        if bar is None or not getattr(self.window, "custom_title_bar", False):
+            return False
+        return QRect(bar.mapTo(self.window, QPoint(0, 0)), bar.size()).contains(pos)
+
+    def _window_button_at(self, pos: QPoint) -> QPushButton | None:
+        strip = getattr(self.window, "_title_strip", None)
+        if strip is None or not strip.isVisible():
+            return None
+        child = strip.childAt(strip.mapFrom(self.window, pos))
+        return child if isinstance(child, QPushButton) else None
+
+    def _drag(self, event) -> bool:
+        drag = getattr(self.window, "_drag_filter", None)
+        return drag is not None and drag.eventFilter(self, event)
+
     def mousePressEvent(self, event) -> None:
+        pos = event.position().toPoint()
+        if self._title_bar_at(pos):
+            button = self._window_button_at(pos)
+            if button is not None:
+                button.click()
+            else:
+                self._drag(event)
+            return
         # A click on the dimmed area outside the panel closes it, like
         # clicking away from any popup.
-        if not self.panel.geometry().contains(event.position().toPoint()):
+        if not self.panel.geometry().contains(pos):
             self.close_overlay()
             return
         super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:
+        if not self._drag(event):
+            super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        self._drag(event)
+        super().mouseReleaseEvent(event)
+
+    def mouseDoubleClickEvent(self, event) -> None:
+        if self._title_bar_at(event.position().toPoint()):
+            self._drag(event)
+            return
+        super().mouseDoubleClickEvent(event)
 
     def keyPressEvent(self, event) -> None:
         if event.key() == Qt.Key.Key_Escape:
@@ -337,6 +475,11 @@ class WelcomeOverlay(QWidget):
         self.window.removeEventFilter(self)
         self.hide()
         self.deleteLater()
+
+    def _update_now(self) -> None:
+        self.close_overlay()
+        if self._on_update is not None:
+            self._on_update()
 
     # -- content -----------------------------------------------------------
     def _load_notes(self) -> None:
@@ -351,6 +494,8 @@ class WelcomeOverlay(QWidget):
 
     def _show_notes(self, result: object) -> None:
         self._task = None
+        # The pages behind have had time to load their data by now.
+        self._regrab.start()
         if not isinstance(result, tuple) or len(result) != 2 or not result[1]:
             self.version_bar.set_latest("")
             self._notes = (
@@ -364,13 +509,15 @@ class WelcomeOverlay(QWidget):
             title, body = result
             self._notes = (tr("Patch notes"), str(body), True)
             self.version_bar.set_latest(str(title))
+            if not is_unstable_version(__version__) and version_status(str(title))[1] == "ok":
+                self._check_unstable()
         if not self._showing_credits:
             self._render_notes()
 
     def _render_notes(self) -> None:
         if self._notes is None:
             self.notes_title.setText(tr("Patch notes"))
-            self.notes.setPlainText(tr("Loading patch notes..."))
+            self.notes.setPlainText(tr("Loading patch notes"))
             return
         title, body, html = self._notes
         self.notes_title.setText(title)
@@ -383,6 +530,17 @@ class WelcomeOverlay(QWidget):
 
     def _open(self, url: str) -> None:
         open_url(url)
+
+    def _check_unstable(self) -> None:
+        task = BackgroundTask(newer_unstable_tag, __version__, parent=self)
+        self._unstable_task = task  # kept alive until it answers
+        task.result.connect(lambda tag: tag and self.version_bar.offer_unstable())
+        task.start()
+
+    def _open_build_settings(self) -> None:
+        self.close_overlay()
+        self.window.open_settings()
+        self.window._ensure_page("settings").show_build()
 
     def _show_credits(self) -> None:
         """Credits in the notes box; pressed again, back to the notes."""
@@ -398,8 +556,8 @@ class WelcomeOverlay(QWidget):
             self.credits_button.setText("\u2605  " + tr("Credits"))
 
 
-def show_welcome(window) -> WelcomeOverlay:
-    overlay = WelcomeOverlay(window)
+def show_welcome(window, update_tag: str | None = None, on_update=None) -> WelcomeOverlay:
+    overlay = WelcomeOverlay(window, update_tag, on_update)
     overlay.show()
     overlay.raise_()
     overlay.setFocus(Qt.FocusReason.OtherFocusReason)

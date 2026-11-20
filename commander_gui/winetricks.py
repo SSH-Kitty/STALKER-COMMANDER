@@ -31,7 +31,8 @@ import re
 import shutil
 from pathlib import Path
 
-from .dependencies import _externally_managed, configured_tool
+from . import atomic
+from .dependencies import configured_tool
 from .launcher import runner_build_dir
 
 #: Verbs installed by the "Install Dependencies" action, in order.
@@ -49,16 +50,9 @@ WINETRICKS_VERBS = (
 #: Hardcoded UMU release version for zipapp downloads. Pinned to an exact
 #: release (never "latest") so a run always fetches a known-good build.
 #:
-#: Unlike the Proton-GE downloads in proton_installer.py and COMMANDER's own
-#: self_update.py, upstream umu-launcher releases do not publish a checksum
-#: asset alongside the zipapp tarball, so there is nothing to verify the
-#: download against without querying api.github.com for it - and this
-#: project deliberately avoids that rate-limited API for routine operations
-#: (see updates.py's module docstring). The residual risk is the same one
-#: self_update.py documents for its own same-release checksum: a compromised
-#: GitHub release for this repo could still serve a tampered build. If
-#: upstream ever starts publishing a checksum file, verify against it here
-#: the same way self_update.py's ``_published_sha512`` does.
+#: Upstream publishes no checksum asset for the zipapp tarball, so the
+#: SHA-256 below was computed once for this exact pinned release, the same
+#: way WINETRICKS_SCRIPT_SHA256 is. Bump both together.
 UMU_VERSION = "1.4.4"
 if not re.fullmatch(r"[0-9][0-9A-Za-z.]*", UMU_VERSION):
     raise ValueError(f"Unexpected UMU_VERSION format: {UMU_VERSION!r}")
@@ -66,20 +60,30 @@ UMU_ZIPAPP_URL = (
     f"https://github.com/Open-Wine-Components/umu-launcher/releases/"
     f"download/{UMU_VERSION}/umu-launcher-{UMU_VERSION}-zipapp.tar"
 )
+UMU_ZIPAPP_SHA256 = "eb590691841f7fad3fc3ad8fd5db4ccb87849fe7948e62b28ece7a4ee48cc851"
 
 def winetricks_binary() -> str:
     """Path to winetricks, or '' when it is not on PATH."""
     return configured_tool("winetricks") or shutil.which("winetricks") or ""
 
 
-def protontricks_binary() -> str:
-    """Path to protontricks, or '' when it is not on PATH."""
-    return configured_tool("protontricks") or shutil.which("protontricks") or ""
-
-
 def umu_binary() -> str:
     """Path to umu-run, or '' when it is not on PATH."""
     return configured_tool("umu-run") or shutil.which("umu-run") or ""
+
+
+def forget_verbs(prefix, verbs: tuple[str, ...] = WINETRICKS_VERBS) -> None:
+    """Drop ``verbs`` from the prefix's winetricks.log so they reinstall.
+
+    umu-run refuses a verb listed there ("already installed") before
+    winetricks, and its --force, ever runs.
+    """
+    log = Path(prefix) / "winetricks.log"
+    try:
+        lines = log.read_text(encoding="utf-8", errors="surrogateescape").splitlines()
+        atomic.write_bytes(log, "".join(f"{ln}\n" for ln in lines if ln.strip() not in verbs).encode("utf-8", "surrogateescape"), lock=False)
+    except OSError:
+        pass
 
 
 def winetricks_install_command(
@@ -142,19 +146,6 @@ def winetricks_install_command(
     return [binary, "-q", *verbs], env
 
 
-def protontricks_install_command() -> list[str]:
-    """User-level install for protontricks (pipx first, then pip --user).
-
-    Returns an empty list when neither pipx nor a usable pip is available
-    (e.g. on systems with PEP 668 externally-managed Python).
-    """
-    if shutil.which("pipx"):
-        return ["pipx", "install", "protontricks"]
-    if _externally_managed():
-        return []
-    return ["python3", "-m", "pip", "install", "--user", "protontricks"]
-
-
 def umu_install_command() -> list[str]:
     """Download umu-run zipapp to ``~/.local/bin/`` via curl + tar.
 
@@ -180,6 +171,7 @@ def umu_install_command() -> list[str]:
             'trap \'rm -f "$tmp_tar" "$tmp_bin"\' EXIT && '
             f'curl -fL --retry 3 --connect-timeout 30 --max-time 600 '
             f'"{UMU_ZIPAPP_URL}" -o "$tmp_tar" && '
+            f'echo "{UMU_ZIPAPP_SHA256}  $tmp_tar" | sha256sum -c - && '
             'member="$(tar -tf "$tmp_tar" | grep -E "(^|/)umu-run$" | head -n1)" && '
             '[ -n "$member" ] && '
             'tar -xOf "$tmp_tar" "$member" > "$tmp_bin" && '
@@ -191,8 +183,8 @@ def umu_install_command() -> list[str]:
 
 
 #: Pinned upstream winetricks release tag. winetricks is a single POSIX
-#: shell script (not a compiled binary), so - unlike umu-run above - it can
-#: be verified against a checksum computed once for this exact pinned tag.
+#: shell script (not a compiled binary), so it can be verified
+#: against a checksum computed once for this exact pinned tag.
 WINETRICKS_VERSION = "20260125"
 if not re.fullmatch(r"[0-9]+", WINETRICKS_VERSION):
     raise ValueError(f"Unexpected WINETRICKS_VERSION format: {WINETRICKS_VERSION!r}")
@@ -273,13 +265,16 @@ def check_winetricks_full_status(
     verbs: tuple[str, ...] = WINETRICKS_VERBS,
     timeout: int = 30,
 ) -> dict[str, bool]:
-    """Return {name: installed} for verbs *and* tool availability (wine, protontricks, umu-run).
+    """Return {name: installed} for verbs *and* tool availability (umu-run, wine).
 
     Combines the ``winetricks.log`` read with instant ``shutil.which()``
-    checks for wine, protontricks, and umu-run. Starts no process.
+    checks for umu-run and wine (wine only when umu-run is
+    missing). Starts no process.
     """
     status = check_winetricks_status(prefix, verbs, timeout)
-    status["wine"] = bool(configured_tool("wine") or shutil.which("wine"))
-    status["protontricks"] = bool(protontricks_binary())
     status["umu"] = bool(umu_binary())
+    # umu-run launches through Proton, so system Wine is only a dependency
+    # without it (immutable distros like Bazzite cannot install it anyway).
+    if not status["umu"]:
+        status["wine"] = bool(configured_tool("wine") or shutil.which("wine"))
     return status

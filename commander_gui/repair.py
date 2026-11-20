@@ -10,6 +10,7 @@ against the official archive checksum) and re-extracts just those mods.
 
 from __future__ import annotations
 
+import http.client
 import re
 import shutil
 import time
@@ -134,7 +135,7 @@ def fetch_modpack_records(url: str, timeout: float = 20) -> dict[str, ModPackRec
             text = read_response_bytes(resp, 32 * 1024 * 1024).decode(
                 "utf-8", errors="replace"
             )
-    except (OSError, ValueError, UnicodeError):
+    except (OSError, ValueError, UnicodeError, http.client.HTTPException):
         return {}
     return parse_modpack_records(text)
 
@@ -233,6 +234,7 @@ def classify_problems(
     scan: Md5ScanResult,
     records: dict[str, ModPackRecord],
     extra_broken_folders: Iterable[str] = (),
+    repo_owned: Iterable[str] = (),
 ) -> RepairPlan:
     """Split the scan problems into repairable / unrepairable / added.
 
@@ -247,8 +249,14 @@ def classify_problems(
     MD5 baseline in the first place produces no changed/removed entries of
     its own, so without this it would be reported forever but never
     actually offered for repair.
+
+    ``repo_owned`` lists the files that come from GAMMA's own repositories
+    (``integrity.gamma_repo_files``): those are checked and repaired against
+    the repositories, so they are left out here - and so is a missing or
+    empty folder made of them, which has no modpack record to repair from.
     """
     plan = RepairPlan()
+    repo_owned = set(repo_owned)
 
     def folder_of(rel: str) -> str | None:
         parts = rel.split("/")
@@ -256,8 +264,10 @@ def classify_problems(
             return parts[1]
         return None
 
-    for key, rels in (("changed", scan.changed), ("removed", scan.removed)):
-        for rel in set(rels):
+    changed_rels = set(scan.changed) - repo_owned
+    removed_rels = set(scan.removed) - repo_owned
+    for key, rels in (("changed", changed_rels), ("removed", removed_rels)):
+        for rel in rels:
             folder = folder_of(rel)
             if folder is None:
                 continue
@@ -265,18 +275,21 @@ def classify_problems(
             plan.file_counts[folder] = (
                 (changed + 1, removed) if key == "changed" else (changed, removed + 1)
             )
-    broken_folders = {folder_of(rel) for rel in set(scan.changed) | set(scan.removed)}
-    broken_folders.discard(None)
-    broken_folders.update(extra_broken_folders)
+    scan_folders = {folder_of(rel) for rel in changed_rels | removed_rels}
+    scan_folders.discard(None)
+    repo_folders = {folder_of(rel) for rel in repo_owned}
+    broken_folders = scan_folders | set(extra_broken_folders)
     unrepairable_rels = [
         rel
-        for rel in sorted(set(scan.changed) | set(scan.removed))
+        for rel in sorted(changed_rels | removed_rels)
         if folder_of(rel) is None
     ]
 
     by_name = records_by_name(records)
     for folder in sorted(broken_folders):
         record = find_record_for_folder(folder, records, by_name=by_name)
+        if record is None and folder in repo_folders and folder not in scan_folders:
+            continue
         if record is not None:
             if folder not in plan.repairable:
                 plan.repairable.append(folder)
@@ -291,7 +304,11 @@ def classify_problems(
     return plan
 
 
-def repair_preview(plan: RepairPlan | None, anomaly_problems: Iterable[str] = ()) -> str:
+def repair_preview(
+    plan: RepairPlan | None,
+    anomaly_problems: Iterable[str] = (),
+    repo_files: Iterable[str] = (),
+) -> str:
     """The full, plain-text list of what a repair will do - shown behind
     "Show Details..." in the repair prompt, so nothing it touches is hidden
     behind a "... and N more"."""
@@ -300,6 +317,13 @@ def repair_preview(plan: RepairPlan | None, anomaly_problems: Iterable[str] = ()
     if anomaly_problems:
         out.append(f"Anomaly files to re-install ({len(anomaly_problems)}):")
         out.extend(f"  {line}" for line in anomaly_problems)
+        out.append("")
+    repo_files = list(repo_files)
+    if repo_files:
+        out.append(
+            f"GAMMA's own files to copy back from the download cache ({len(repo_files)}):"
+        )
+        out.extend(f"  {rel.removeprefix('mods/')}" for rel in repo_files)
         out.append("")
     if plan is not None and plan.repairable:
         out.append(f"GAMMA mods to re-install ({len(plan.repairable)}):")
@@ -325,11 +349,80 @@ def repair_preview(plan: RepairPlan | None, anomaly_problems: Iterable[str] = ()
         )
         out.extend(f"  {name}" for name in plan.added_only)
         out.append("")
+    if plan is not None and plan.repairable:
+        out.append(
+            "Mods whose archive in the download cache is intact are unpacked again"
+        )
+        out.append("from it; only the others are downloaded.")
+        out.append("")
     out.append("Also kept safe:")
     out.append("  - your modlist.txt (order, enabled/disabled, your own mods) is restored afterwards")
     out.append("  - user.ltx and MCM settings are backed up first (a repair never touches saves)")
     out.append("  - mod folders are set aside, not deleted, until their reinstall succeeds")
     return "\n".join(out).rstrip()
+
+
+# ------------------------------------------- unpacking again from the cache
+
+RESUME_FILENAME = "resume.txt"
+
+
+def resume_keys(records: dict[str, ModPackRecord]) -> dict[str, str]:
+    """Record folder name -> the key full-install's resume.txt tracks it by.
+
+    The CLI groups ModDB addons sharing an archive and keys the group by its
+    first addon: ``"<AddonName> | <ZipName>"`` (IDownloadableRecord.ResumeKey,
+    DownloadableRecordFactory). Only ModDB addons with an MD5-checked archive
+    are listed: GitHub archives have no checksum to trust, and addons
+    without a ZipName are keyed by their download link instead.
+    """
+    leaders: dict[str, ModPackRecord] = {}
+    keys: dict[str, str] = {}
+    for record in sorted(records.values(), key=lambda record: record.counter):
+        if "moddb" not in record.dl_link or not (record.patch and record.zip_name):
+            continue
+        leader = leaders.setdefault(record.zip_name, record)
+        key = f"{leader.addon_name} | {leader.zip_name}"
+        if not any(char in key for char in "\t\r\n"):
+            keys[record.folder_name] = key
+    return keys
+
+
+def write_reextract_resume(gamma_dir: str, keys: Iterable[str]) -> bool:
+    """Make ``full-install --resume`` unpack these archives again.
+
+    A resume.txt entry in the "Extract" state means "downloaded, not yet
+    unpacked": the CLI unpacks it even with --skip-extract-on-hash-match,
+    and downloads it only if the cached archive fails its MD5 check. Every
+    other addon is handled as in a plain run. Returns False, writing
+    nothing, when a resume.txt already exists - that one belongs to an
+    interrupted install and must survive.
+    """
+    keys = sorted(set(keys))
+    path = Path(gamma_dir) / RESUME_FILENAME
+    if not keys or path.exists() or path.is_symlink():
+        return False
+    lines = [
+        "# stalker-gamma resume file. Run the same command with --resume to continue.",
+        "# command: full-install",
+        "# status\trecord",
+        *(f"Extract\t{key}" for key in keys),
+    ]
+    try:
+        write_bytes(path, ("\n".join(lines) + "\n").encode("utf-8"), lock=False)
+    except OSError:
+        return False
+    return True
+
+
+def remove_resume_file(gamma_dir: str) -> None:
+    """Drop the resume.txt a repair wrote (or the CLI left after it failed):
+    the repair puts everything back itself, and a later install must not
+    resume from it."""
+    try:
+        (Path(gamma_dir) / RESUME_FILENAME).unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 _QUARANTINE_DIRNAME = ".verify-quarantine"
@@ -341,6 +434,9 @@ class QuarantineItem:
 
     original: Path
     quarantined: Path
+    #: The mod folder itself, not one of its archives. ``original.parent``
+    #: can't tell: gamma/mods may be a symlink to a folder of any name.
+    is_mod: bool = False
 
 
 @dataclass
@@ -373,7 +469,9 @@ def quarantine_mod_and_archive(
     """
     result = QuarantineRecord(folder=folder)
     base = Path(gamma_dir)
-    mods_root = base / "mods"
+    # Resolved like downloads below: gamma/mods moved to another drive and
+    # symlinked back must not make every mod "outside mods/".
+    mods_root = (base / "mods").resolve()
     mod_path = mods_root / folder
     # This moves user data, so never act on a name that escapes mods/.
     if not _is_direct_child(mods_root, mod_path):
@@ -382,7 +480,7 @@ def quarantine_mod_and_archive(
         if mod_path.is_dir():
             dest = _quarantine_dest(mods_root / _QUARANTINE_DIRNAME, folder)
             mod_path.rename(dest)
-            result.items.append(QuarantineItem(original=mod_path, quarantined=dest))
+            result.items.append(QuarantineItem(original=mod_path, quarantined=dest, is_mod=True))
         if mod_path.exists():
             raise OSError(f"Mod folder still exists after quarantine: {mod_path}")
         if record is not None:
@@ -427,9 +525,18 @@ def restore_from_quarantine(record: QuarantineRecord) -> list[str]:
     failures: list[str] = []
     for item in record.items:
         try:
-            if item.quarantined.exists() and not item.original.exists():
-                item.original.parent.mkdir(parents=True, exist_ok=True)
-                item.quarantined.rename(item.original)
+            if not item.quarantined.exists():
+                continue
+            if item.original.exists() or item.original.is_symlink():
+                # A cancelled/failed reinstall left a partial copy in the
+                # way. Park it in the quarantine (purged later) rather than
+                # skip the item: skipping left the only good copy in the
+                # quarantine for the next purge to delete.
+                item.original.rename(
+                    _quarantine_dest(item.quarantined.parent, item.original.name + ".partial")
+                )
+            item.original.parent.mkdir(parents=True, exist_ok=True)
+            item.quarantined.rename(item.original)
         except OSError as exc:
             failures.append(f"{item.quarantined} -> {item.original}: {exc}")
     return failures
@@ -446,7 +553,7 @@ class SettleResult:
 
 def _mod_item(record: QuarantineRecord) -> QuarantineItem | None:
     for item in record.items:
-        if item.original.parent.name == "mods":
+        if item.is_mod:
             return item
     return None
 

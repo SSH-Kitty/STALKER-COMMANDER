@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 
 from PySide6.QtGui import QColor, QFontDatabase, QPalette
@@ -12,10 +13,10 @@ from PySide6.QtWidgets import QApplication
 THEME_INFO = [
     ("gamma", "GAMMA"),
     ("black", "GAMMA Black"),
-    ("dusk", "Dusk"),
     ("midnight", "Midnight"),
-    ("terminal", "Terminal"),
     ("reactor", "Reactor"),
+    ("redforest", "Red Forest (Live)"),
+    ("winter", "Winter (Live)"),
 ]
 
 # These are the COMMANDER core colors. The smaller assistant UI derives all
@@ -23,11 +24,19 @@ THEME_INFO = [
 THEMES = {
     "gamma": {"bg": "#0d130c", "panel": "#141b15", "card": "#1f2b20", "border": "#26321f", "text": "#e2ead8", "dim": "#7f8f78", "accent": "#9fe96f", "strong": "#8fe45c", "selection": "#5fb548", "danger": "#e0554f", "warn": "#d9a04c"},
     "black": {"bg": "#000000", "panel": "#0a0a0a", "card": "#141414", "border": "#1f1f1f", "text": "#e0e0e0", "dim": "#777777", "accent": "#9fe96f", "strong": "#8fe45c", "selection": "#5fb548", "danger": "#e0554f", "warn": "#d9a04c"},
-    "dusk": {"bg": "#140d06", "panel": "#1d140a", "card": "#2a1c10", "border": "#3a2a18", "text": "#f0e2cc", "dim": "#9c8261", "accent": "#ff9f45", "strong": "#ff8f2e", "selection": "#c8721e", "danger": "#b04f3d", "warn": "#e0a24a"},
     "midnight": {"bg": "#0b1016", "panel": "#111824", "card": "#1a2432", "border": "#1d2a3a", "text": "#dbe6f0", "dim": "#6e8496", "accent": "#6fd3a8", "strong": "#5ec99b", "selection": "#3f9d7a", "danger": "#b0554f", "warn": "#d9a04c"},
-    "terminal": {"bg": "#000000", "panel": "#060b06", "card": "#0a120a", "border": "#123912", "text": "#33cc55", "dim": "#1f7a33", "accent": "#33ff66", "strong": "#2ee75c", "selection": "#1f8a3a", "danger": "#a0443f", "warn": "#cc9933"},
     "reactor": {"bg": "#010a0a", "panel": "#061616", "card": "#0a2020", "border": "#0f3232", "text": "#cdeaea", "dim": "#4a7a7a", "accent": "#00a3a3", "strong": "#00c2c2", "selection": "#0a9494", "danger": "#b0554f", "warn": "#d9a04c"},
+    "winter": {"bg": "#e8edf1", "panel": "#f4f7f9", "card": "#ffffff", "border": "#c4ced6", "text": "#1b252d", "dim": "#56636d", "accent": "#3a6d37", "strong": "#2f6d2b", "selection": "#9fc49a", "danger": "#b84a40", "warn": "#9a5f0c"},
 }
+# Winter's time-of-day looks (see commander_gui.themes.resolve_theme).
+THEMES["winter_dawn"] = THEMES["winter"]
+THEMES["winter_night"] = {"bg": "#11161b", "panel": "#161d24", "card": "#1f2830", "border": "#2e3a44", "text": "#dde5ea", "dim": "#8a97a1", "accent": "#8fcf72", "strong": "#9fe07f", "selection": "#4f8a45", "danger": "#b0554f", "warn": "#d9a04c"}
+THEMES["winter_dusk"] = {**THEMES["winter_night"], "bg": "#1a1517", "panel": "#211a1d", "card": "#2c2326", "border": "#3e3236"}
+# Red Forest's time-of-day looks, the same way.
+THEMES["redforest"] = {"bg": "#f2e9de", "panel": "#fbf6f0", "card": "#ffffff", "border": "#d8c6b2", "text": "#2a1e18", "dim": "#6f5d52", "accent": "#a8481a", "strong": "#9a3f14", "selection": "#e0b090", "danger": "#b84a40", "warn": "#9a5f0c"}
+THEMES["redforest_dawn"] = THEMES["redforest"]
+THEMES["redforest_night"] = {"bg": "#11161b", "panel": "#161d24", "card": "#1f2830", "border": "#2e3a44", "text": "#dde5ea", "dim": "#8a97a1", "accent": "#f0a24a", "strong": "#ffb35c", "selection": "#c46a24", "danger": "#b0554f", "warn": "#d9a04c"}
+THEMES["redforest_dusk"] = {**THEMES["redforest_night"], "bg": "#1a1517", "panel": "#211a1d", "card": "#2c2326", "border": "#3e3236"}
 
 _ACTIVE = "gamma"
 
@@ -42,25 +51,16 @@ def load_saved_theme() -> str:
         value = json.loads(config_path().read_text(encoding="utf-8")).get("theme")
     except (OSError, ValueError, AttributeError):
         value = None
-    return value if value in THEMES else "gamma"
+    return value if isinstance(value, str) and value in dict(THEME_INFO) else "black"
 
 
-def save_theme(name: str) -> None:
-    if name not in THEMES:
-        return
-    path = config_path()
+def load_saved_font_size() -> int:
+    """COMMANDER's base font size (Settings > Font size), 13 by default."""
     try:
-        try:
-            settings = json.loads(path.read_text(encoding="utf-8"))
-            if not isinstance(settings, dict):
-                settings = {}
-        except (OSError, ValueError):
-            settings = {}
-        settings["theme"] = name
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
-    except OSError:
-        pass
+        value = int(json.loads(config_path().read_text(encoding="utf-8")).get("font_size", 13))
+    except (OSError, ValueError, TypeError, AttributeError, OverflowError):
+        value = 13
+    return min(22, max(9, value))
 
 
 def set_active_theme(name: str) -> None:
@@ -73,19 +73,49 @@ def set_active_theme(name: str) -> None:
         commander_themes.set_active_theme(name)
 
 
+def _tokens() -> dict[str, str]:
+    from commander_gui.themes import resolve_theme
+
+    return THEMES[resolve_theme(_ACTIVE)]
+
+
 def active_theme() -> str:
     return _ACTIVE
 
 
 def token(name: str) -> str:
-    values = THEMES[_ACTIVE]
+    values = _tokens()
     aliases = {"PANEL": "panel", "CARD": "card", "BG": "bg", "BORDER": "border", "TEXT": "text", "DIM": "dim", "ACCENT": "accent", "RED": "danger", "AMBER": "warn", "SECTION_ACCENT": "accent", "WORDMARK_ACCENT": "accent", "NAV_TEXT": "dim", "INFO_TEXT": "dim", "TEXT_BRIGHT": "text", "GREY": "dim"}
     return values.get(aliases.get(name, name), values["text"])
 
 
+_FONT_SIZE_RE = re.compile(r"font-size:(\d+)px")
+#: COMMANDER's Settings > Font choices (commander_gui/themes.py).
+_FONT_FAMILIES = ("Exo 2", "Noto Sans", "DejaVu Sans", "Liberation Sans", "Inter")
+
+
+def load_saved_font_family() -> str:
+    """COMMANDER's font (Settings > Font), Exo 2 by default."""
+    try:
+        value = json.loads(config_path().read_text(encoding="utf-8")).get("font_family")
+    except (OSError, ValueError, AttributeError):
+        value = None
+    return value if isinstance(value, str) and value in _FONT_FAMILIES else "Exo 2"
+
+
 def _stylesheet() -> str:
-    t = THEMES[_ACTIVE]
-    return f"""QWidget {{ background:{t['bg']}; color:{t['text']}; font-family:\"Exo 2\",\"DejaVu Sans\",sans-serif; font-size:13px; }}
+    """The theme's QSS, with every font size scaled to COMMANDER's setting."""
+    scale = load_saved_font_size() / 13.0
+    return _FONT_SIZE_RE.sub(
+        lambda m: f"font-size:{max(1, round(int(m.group(1)) * scale))}px",
+        _base_stylesheet(),
+    )
+
+
+def _base_stylesheet() -> str:
+    t = _tokens()
+    family = load_saved_font_family()
+    return f"""QWidget {{ background:{t['bg']}; color:{t['text']}; font-family:\"{family}\",\"DejaVu Sans\",sans-serif; font-size:13px; }}
 QLabel {{ background:transparent; }} QWidget#topbar {{ background:{t['panel']}; border-bottom:1px solid {t['border']}; }}
 QWidget#quickActions, QWidget#wordmarkBlock {{ background:transparent; }} QPushButton {{ background:{t['card']}; color:{t['text']}; border:1px solid {t['border']}; border-radius:6px; padding:6px 14px; }}
 QPushButton:hover {{ border-color:{t['accent']}; }} QPushButton#primary {{ background:{t['accent']}; color:{t['bg']}; font-weight:600; border:none; }}
@@ -97,6 +127,7 @@ QTableWidget, QListWidget, QTreeWidget, QTextEdit, QPlainTextEdit {{ background:
 QSplitter::handle {{ background:transparent; }} QToolButton {{ background:transparent; border:none; color:{t['dim']}; }}
 QPushButton:checked {{ border-color:{t['accent']}; color:{t['accent']}; }} QPushButton:disabled {{ color:{t['dim']}; }}
 QPushButton#linkButton {{ background:transparent; border:none; color:{t['accent']}; padding:2px 4px; }} QPushButton#linkButton:hover {{ text-decoration:underline; }}
+QDialog#messageDialog {{ background:{t['panel']}; border:1px solid {t['border']}; }} QDialog#messageDialog QLabel#section1 {{ color:{t['text']}; font-size:20px; font-weight:bold; }} QDialog#messageDialog QLabel#warn {{ color:{t['warn']}; }} QDialog#messageDialog QLabel#accent {{ color:{t['accent']}; }} QPushButton#danger {{ background:{t['danger']}; color:{t['text']}; border:none; }}
 QFrame#verdictCard {{ background:{t['panel']}; border:1px solid {t['border']}; border-left:4px solid {t['accent']}; border-radius:10px; }}
 QFrame#verdictCard[verdict="bad"] {{ border-left-color:{t['danger']}; }} QFrame#verdictCard[verdict="warn"] {{ border-left-color:{t['warn']}; }}
 QLabel#verdictIcon {{ background:{t['accent']}; color:{t['bg']}; border-radius:22px; font-size:24px; font-weight:bold; }}
@@ -138,7 +169,7 @@ def apply_theme(app: QApplication, name: str | None = None) -> None:
         set_active_theme(load_saved_theme())
     load_font()
     app.setStyle("Fusion")
-    t = THEMES[_ACTIVE]
+    t = _tokens()
     palette = QPalette()
     for role in (QPalette.ColorRole.Window, QPalette.ColorRole.Base, QPalette.ColorRole.AlternateBase):
         palette.setColor(role, QColor(t["bg"]))

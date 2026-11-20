@@ -14,6 +14,7 @@ import re
 import shutil
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -147,6 +148,9 @@ class DeckDetectionTests(unittest.TestCase):
         self.assertEqual(
             steam_deck_model(dmi_path=self._dmi("Galileo\n"), env={}), "oled"
         )
+        self.assertEqual(
+            steam_deck_model(dmi_path=self._dmi("Fremont"), env={}), "machine"
+        )
 
     def test_other_hardware(self):
         self.assertIsNone(
@@ -170,13 +174,21 @@ class DeckDetectionTests(unittest.TestCase):
             self.assertIsNone(steam_deck_model(dmi_path=path, env={}))
 
     def test_game_mode_needs_both_signals(self):
-        self.assertFalse(in_game_mode({"SteamDeck": "1"}))
-        self.assertFalse(in_game_mode({"XDG_CURRENT_DESKTOP": "gamescope"}))
+        missing = self.tmp / "nope"
+        gamescope = {"XDG_CURRENT_DESKTOP": "gamescope"}
+        self.assertFalse(in_game_mode({"SteamDeck": "1"}, dmi_path=missing))
+        self.assertFalse(in_game_mode(gamescope, dmi_path=missing))
         self.assertTrue(
-            in_game_mode(
-                {"SteamDeck": "1", "XDG_CURRENT_DESKTOP": "gamescope"}
-            )
+            in_game_mode({"SteamDeck": "1", **gamescope}, dmi_path=missing)
         )
+
+    def test_game_mode_on_steam_machine_without_env(self):
+        # The Steam Machine's Game Mode is not known to set SteamDeck=1.
+        machine = self._dmi("Fremont")
+        self.assertTrue(
+            in_game_mode({"XDG_CURRENT_DESKTOP": "gamescope"}, dmi_path=machine)
+        )
+        self.assertFalse(in_game_mode({}, dmi_path=machine))
 
 
 # =====================================================================
@@ -771,7 +783,7 @@ class DeckLayoutTests(DeckWindowFixture):
         overlay = self.window.current_overlay()
         self.assertIsNotNone(overlay)
         texts = " ".join(label.text() for label in overlay.findChildren(QLabel))
-        self.assertIn("Game Crashed", texts)
+        self.assertIn("The game crashed", texts)
         rumble.assert_called_once()
         self.window.dismiss_overlay()
 
@@ -822,6 +834,19 @@ class DeckLayoutTests(DeckWindowFixture):
         first.header.activated.emit()
         self.pump()
         self.assertFalse(first.is_open())
+
+    def test_update_screen_forgets_the_old_profiles_updates(self):
+        from types import SimpleNamespace
+
+        page = self.goto("update")
+        status = SimpleNamespace(update_available=True, diffs=[], patchnotes="")
+        with patch("Steamdeck.screens.update.status_summary", return_value=("Update available", "warn")):
+            page._on_checked(status)
+        self.assertIs(page._status, status)
+        page.forget_cached_checks()
+        self.assertIsNone(page._status)
+        self.assertIsNone(page._task)
+        self.assertEqual(page.action_button.text(), "Check for updates")
 
     def test_mod_list_scrolls_smoothly_by_pixel(self):
         from PySide6.QtWidgets import QAbstractItemView
@@ -910,6 +935,31 @@ class DeckLayoutTests(DeckWindowFixture):
         # still True here - left alone, tearDown's window.close() would hit
         # the real "An install is still running, quit anyway?" QMessageBox
         # and hang forever with nothing to click it.
+        install._finish_run()
+
+    def test_offline_toggle_reaches_full_install_args(self):
+        import tempfile
+
+        from commander_gui import gui_settings
+
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        archive = Path(tmp.name) / "offline.tar"
+        archive.write_bytes(b"x")
+        gui_settings.save_gui_settings(offline_archive=str(archive))
+        install = self.goto("install")
+        install.minimal_row.set_checked(True, notify=True)
+        install.offline_row.set_checked(True, notify=True)
+        self.assertFalse(install.minimal_row.is_checked())
+        self.assertIn("offline", install.install_button.text())
+        with (
+            patch("Steamdeck.screens.install.cli_command", return_value=["stub"]) as cli,
+            patch("Steamdeck.screens.install.CommandRunner"),
+        ):
+            install._start_install()
+        args = cli.call_args[0][0]
+        self.assertNotIn("--minimal", args)
+        self.assertEqual(args[-2:], ["--offline-archive-path", str(archive)])
         install._finish_run()
 
     def test_interactive_widgets_are_touch_sized(self):
@@ -1036,7 +1086,7 @@ class DeckUtilitiesTests(DeckWindowFixture):
 
         utilities = self.goto("utilities")
         with (
-            patch("Steamdeck.screens.utilities.mo2_running", return_value=False),
+            patch("Steamdeck.screens.utilities.game_running", return_value=False),
             patch(
                 "Steamdeck.screens.utilities.cli_command", return_value=["stub"]
             ) as cli,
@@ -1069,7 +1119,7 @@ class DeckUtilitiesTests(DeckWindowFixture):
 
         utilities = self.goto("utilities")
         with (
-            patch("Steamdeck.screens.utilities.mo2_running", return_value=True),
+            patch("Steamdeck.screens.utilities.game_running", return_value=True),
             patch("Steamdeck.screens.utilities.CommandRunner") as runner_cls,
         ):
             utilities._purge_shader_cache()
@@ -1080,6 +1130,18 @@ class DeckUtilitiesTests(DeckWindowFixture):
             self.pump()
             runner_cls.assert_not_called()
         self.assertFalse(self.window.install_busy)
+
+    def test_ge_proton_install_button_needs_the_exact_build(self):
+        install = self.goto("install")
+        install._proton_version = "GE-Proton9-1"
+        protons = [("GE-Proton9-10", "/s/compatibilitytools.d/GE-Proton9-10/proton")]
+        with patch("Steamdeck.screens.install.find_extra_protons", return_value=protons):
+            install._update_proton_button()
+        self.assertNotIn("installed", install.proton_install_button.text())
+        protons.append(("GE-Proton9-1", "/s/compatibilitytools.d/GE-Proton9-1/proton"))
+        with patch("Steamdeck.screens.install.find_extra_protons", return_value=protons):
+            install._update_proton_button()
+        self.assertIn("installed", install.proton_install_button.text())
 
     def test_busy_blocks_a_tool_before_any_confirm_is_shown(self):
         utilities = self.goto("utilities")
@@ -1138,7 +1200,7 @@ class DeckUtilitiesTests(DeckWindowFixture):
         ):
             utilities._on_move_done(moved)
         self.assertFalse(self.window.install_busy)
-        self.assertEqual(utilities.status.text(), "Move complete.")
+        self.assertEqual(utilities.status.text(), "Move complete")
 
         with (
             patch("Steamdeck.screens.utilities._rewrite_mo2_ini_paths"),
@@ -1332,6 +1394,22 @@ class DeckBehaviourTests(DeckWindowFixture):
         # Generously bounded: the regression this guards against was ten
         # seconds, so anything near a second would already be the bug back.
         self.assertLess(elapsed, 1.0, f"cancel took {elapsed:.2f}s")
+
+    def test_rebuild_does_not_wait_for_background_checks(self):
+        import time
+
+        from commander_gui.ui.common import BackgroundTask
+
+        task = BackgroundTask(time.sleep, 1.5, parent=self.window.current_page())
+        task.start()
+        self.pump(2)
+        thread = task._thread
+        started = time.perf_counter()
+        self.window.rebuild()
+        elapsed = time.perf_counter() - started
+        thread.wait(5000)  # no thread left running for later tests
+        self.pump()
+        self.assertLess(elapsed, 1.0, f"rebuild took {elapsed:.2f}s")
 
     def test_install_busy_fans_out_to_every_screen(self):
         for key in SCREEN_KEYS:
@@ -1588,6 +1666,14 @@ class DeckGamepadTests(unittest.TestCase):
         self.monitor.feed(pad.EV_ABS, pad.ABS_HAT0X, -1)
         self.monitor.feed(pad.EV_ABS, pad.ABS_HAT0X, 0)
         self.assertEqual(self.actions, [pad.DOWN, pad.LEFT])
+        self.assertFalse(self.monitor._repeat.isActive())
+
+    def test_dropped_events_release_a_held_direction(self):
+        pad = self.pad
+        self.monitor.feed(pad.EV_ABS, pad.ABS_HAT0Y, 1)
+        self.assertTrue(self.monitor._repeat.isActive())
+        # The release was among the events the kernel dropped.
+        self.monitor.feed(pad.EV_SYN, pad.SYN_DROPPED, 0)
         self.assertFalse(self.monitor._repeat.isActive())
 
     def test_stick_has_hysteresis(self):
@@ -1995,6 +2081,25 @@ class DeckOverhaulTests(DeckWindowFixture):
         DeckSettingsTests._reset_cache()
         self.assertEqual(gui_settings.load_gui_settings().get("gamma_install_resume"), {})
         self.assertFalse(self.window.install_busy)
+
+    def test_anomaly_reinstall_chains_into_gamma_with_keep_settings(self):
+        """Reinstall Anomaly must put GAMMA back on top, with the pop-up's
+        "Keep user.ltx and MCM settings" choice, and only once."""
+        install = self.goto("install")
+        install.preserve_user_row.set_checked(True)
+        install.preserve_mcm_row.set_checked(True)
+        with (
+            patch("Steamdeck.screens.install.cli_command", return_value=["stub"]),
+            patch("Steamdeck.screens.install.CommandRunner"),
+        ):
+            install._start_anomaly_reinstall(True, False, True)
+            install._runner = None
+            with patch.object(install, "_start_install") as start_gamma:
+                install._on_finished(0, "")
+        start_gamma.assert_called_once_with()
+        self.assertFalse(install.preserve_user_row.is_checked())
+        self.assertFalse(install.preserve_mcm_row.is_checked())
+        self.assertIsNone(install._chain_preserve)
 
     def test_force_stop_kills_the_launch_and_records_playtime(self):
         import time
@@ -2425,21 +2530,50 @@ class DeckRound4Tests(DeckWindowFixture):
         play._on_state_changed(False)
 
     def test_mo2_only_follows_the_launch_kind(self):
+        import time
         from types import SimpleNamespace
 
         play = self.goto("play")
         controller = play.controller
         profile = SimpleNamespace(gamma="", anomaly="", mo2_profile="", profile_name="Deck")
+        failures = []
+        controller.failed.connect(lambda title, message: failures.append(message))
         with (
             patch("Steamdeck.launch.resolve_runner", side_effect=OSError("stop")),
         ):
             controller.launch(profile, target=None)
+            deadline = time.monotonic() + 5
+            while not failures and time.monotonic() < deadline:
+                self.pump(1)
+        self.assertEqual(failures, ["stop"])
         # Failed launch leaves nothing active.
         self.assertFalse(controller.mo2_only())
         controller._mo2_only = True
         controller._active = True
         self.assertTrue(controller.mo2_only())
         controller._active = False
+
+    def test_a_launch_stopped_while_preparing_never_starts(self):
+        import time
+        from types import SimpleNamespace
+
+        controller = self.goto("play").controller
+        profile = SimpleNamespace(gamma="", anomaly="", mo2_profile="", profile_name="Deck")
+        prepared = {
+            "runner_env": {}, "command": ["true"], "env": {}, "cwd": None,
+            "watch_exe": None, "pre_pids": set(), "pre_mo2": set(), "crash_baseline": set(),
+        }
+        with (
+            patch("Steamdeck.launch._prepare_launch", return_value=prepared),
+            patch("Steamdeck.launch.launch_detached") as launched,
+        ):
+            controller.launch(profile, target=None)
+            controller.force_stop()  # before the worker reports back
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline:
+                self.pump(1)
+        launched.assert_not_called()
+        self.assertFalse(controller.is_active())
 
     def test_welcome_overlay_and_dont_show_again(self):
         gui_settings.save_gui_settings(welcome_hidden=False)
@@ -2681,7 +2815,9 @@ class DeckVersionTests(unittest.TestCase):
 
         self.assertEqual(Steamdeck.__version__, commander_gui.__version__)
         self.assertEqual(Steamdeck.__version_label__, commander_gui.__version_label__)
-        self.assertEqual(commander_gui.__version_label__, "1.3.1")
+        self.assertNotIn("dev", commander_gui.__version_label__.lower())
+        if "-unstable" in commander_gui.__version__:
+            self.assertIn("Unstable", commander_gui.__version_label__)
 
 
 class DeckAuditTests(DeckWindowFixture):
@@ -2788,6 +2924,25 @@ class DeckCrashDetectionTests(unittest.TestCase):
         controller.crashed.connect(lambda: seen.append(True))
         return controller, seen
 
+    def test_an_mo2_open_before_launch_is_not_this_session(self):
+        import time
+
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.dict(os.environ, {"XDG_CONFIG_HOME": tmp}),
+        ):
+            controller, _seen = self._controller(tmp)
+            controller._watch_exe = None
+            controller._pre_launch_mo2 = {111}
+            controller._started_at = time.time()
+            controller._log_path = Path(tmp) / "launch.log"
+            with patch("Steamdeck.launch.mo2_pids", return_value={111}):
+                controller._poll()
+            self.assertFalse(controller._game_seen)
+            with patch("Steamdeck.launch.mo2_pids", return_value={111, 222}):
+                controller._poll()
+            self.assertTrue(controller._game_seen)
+
     def test_new_dump_after_a_session_reports_a_crash(self):
         with (
             tempfile.TemporaryDirectory() as tmp,
@@ -2868,6 +3023,26 @@ _TWO_STEP_FOMOD = """<config>
 """
 
 
+class DeckPlainAnomalyTests(unittest.TestCase):
+    """A profile with Anomaly alone: Play launches AnomalyLauncher.exe, no MO2."""
+
+    def test_anomaly_alone_gets_the_launcher_target(self):
+        from types import SimpleNamespace
+
+        from Steamdeck.launch import DeckLaunchController
+        from Steamdeck.screens.play import play_label
+
+        with tempfile.TemporaryDirectory() as tmp:
+            anomaly = Path(tmp)
+            (anomaly / "AnomalyLauncher.exe").write_bytes(b"MZ")
+            profile = SimpleNamespace(anomaly=str(anomaly), gamma="", mo2_profile="")
+            controller = DeckLaunchController()
+            self.assertEqual(controller.targets(profile)[0], ["Anomaly"])
+            launcher = controller.executables(profile)[0]
+            self.assertEqual(Path(launcher.binary).name, "AnomalyLauncher.exe")
+            self.assertEqual(play_label(profile), "Play Anomaly")
+
+
 class DeckControllerNavigationTests(DeckWindowFixture):
     def focused(self):
         return self.app.focusWidget()
@@ -2933,7 +3108,8 @@ class DeckControllerNavigationTests(DeckWindowFixture):
         self.assertIs(self.focused(), settings.language_row)
 
     def test_play_starts_on_the_play_button(self):
-        play = self.goto("play")
+        play = self.window._ensure_page("play")
+        self.goto("dashboard")
         self.window._nav_buttons["dashboard"].setFocus()
         self.window.cycle_page(1)  # dashboard -> play, first visit
         self.pump()
@@ -3263,3 +3439,294 @@ class DeckGamepadStickTests(unittest.TestCase):
         self.monitor.feed(pad.EV_KEY, pad.BTN_DPAD_DOWN, 0)
         self.assertEqual(self.actions.count(pad.DOWN), pad.REPEAT_FAST_AFTER + 1)
 
+
+
+# =====================================================================
+# Multiplayer screen (xrRazom Co-op)
+# =====================================================================
+class DeckMultiplayerTests(DeckWindowFixture):
+    def setUp(self):
+        super().setUp()
+        for target, kwargs in (
+            ("commander_gui.coop.find_downloaded_zip", {"return_value": None}),
+            ("commander_gui.coop.public_ip", {"side_effect": OSError("offline")}),
+        ):
+            patcher = patch(target, **kwargs)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        (self.anomaly / "bin").mkdir(exist_ok=True)
+        (self.anomaly / "bin" / "anomalydx11.exe").write_bytes(b"MZgamma")
+        (self.anomaly / "appdata").mkdir(exist_ok=True)
+        (self.anomaly / "appdata" / "user.ltx").write_text("xrr_player_name Stalker\n")
+        self.zip = self.tmp / "xrRazom-1.4-Slim.zip"
+        with zipfile.ZipFile(self.zip, "w") as archive:
+            archive.writestr("xrRazom-release.txt", "xrRazom 1.4 - Slim\n")
+            archive.writestr("Anomaly/bin/AnomalyDX11.exe", b"MZcoop")
+            archive.writestr("Anomaly/bin/steam_appid.txt", "41700")
+            archive.writestr("gamedata/scripts/xrr_core.script", "-- core")
+
+    def _install(self):
+        from commander_gui import coop
+
+        coop.install(self.zip, self.anomaly, self.gamma, "G.A.M.M.A")
+
+    def test_not_installed_shows_the_install_steps(self):
+        screen = self.goto("multiplayer")
+        self.assertTrue(screen.install_box.isVisible())
+        self.assertFalse(screen.dash_box.isVisible())
+        self.assertFalse(screen.settings_box.isVisible())
+        # The hero never idles grey: it opens the zip browser.
+        self.assertTrue(screen.zip_button.isEnabled())
+        self.assertIs(screen.default_focus(), screen.zip_button)
+
+    def test_settings_are_written_to_user_ltx(self):
+        self._install()
+        screen = self.goto("multiplayer")
+        self.assertTrue(screen.dash_box.isVisible())
+        self.assertIn("Singleplayer", screen.status_chip.text())
+        screen._toggles["xrr_friendly_fire"].set_checked(True, notify=True)
+        screen._nudge("xrr_max_players", 1)
+        text = (self.anomaly / "appdata" / "user.ltx").read_text()
+        self.assertIn("xrr_friendly_fire on", text)
+        self.assertIn("xrr_max_players 4", text)
+        screen._nudge("xrr_max_players", 1)  # clamped at 4
+        self.assertIn("xrr_max_players 4", (self.anomaly / "appdata" / "user.ltx").read_text())
+
+    def test_joining_locks_the_hosting_tab(self):
+        self._install()
+        screen = self.goto("multiplayer")
+        screen.role_choice._choose(True)
+        self.assertTrue(screen.tab_choice.button(0).isEnabled())
+        self.assertEqual(screen.tab_choice.value(), 0)
+        screen.role_choice._choose(False)
+        self.assertFalse(screen.tab_choice.button(0).isEnabled())
+        self.assertEqual(screen.tab_choice.value(), 1)
+
+    def test_confirm_singleplayer_goes_straight_on_when_co_op_is_off(self):
+        from Steamdeck.screens.multiplayer import confirm_singleplayer
+
+        ran = []
+        confirm_singleplayer(self.window, self.window.settings.active_profile, "updating GAMMA", lambda: ran.append(1))
+        self.assertEqual(ran, [1])
+        self.assertIsNone(self.window.current_overlay())
+
+    def test_play_hands_a_co_op_launch_to_the_multiplayer_screen(self):
+        from commander_gui import coop
+
+        self._install()
+        coop.switch_to_coop(self.anomaly, self.gamma, "G.A.M.M.A")
+        play = self.goto("play")
+        screen = self.window._ensure_page("multiplayer")
+        profile = self.window.settings.active_profile
+        with (
+            patch.object(screen, "start_coop") as start_coop,
+            patch.object(play.controller, "launch") as launch,
+        ):
+            play._launch(profile, "Anomaly")
+        start_coop.assert_called_once_with(profile, "Anomaly")
+        launch.assert_not_called()
+
+    def test_dpad_reaches_every_control_once_installed(self):
+        """The screen-wide D-pad walk runs before co-op is installed; this
+        one covers the installed screen, every tab, all four directions."""
+        from PySide6.QtCore import Qt
+        from PySide6.QtTest import QTest
+
+        from Steamdeck.focus import audit_focusables
+
+        self._install()
+        screen = self.goto("multiplayer")
+        for tab in range(5):
+            screen._show_tab(tab)
+            self.pump()
+            seen, queue = [], [screen.hero]
+            while queue:
+                widget = queue.pop(0)
+                if widget in seen:
+                    continue
+                seen.append(widget)
+                for key in (Qt.Key.Key_Down, Qt.Key.Key_Up, Qt.Key.Key_Left, Qt.Key.Key_Right):
+                    widget.setFocus(Qt.FocusReason.OtherFocusReason)
+                    self.pump(2)
+                    QTest.keyClick(self.window, key)
+                    self.pump(2)
+                    focused = self.app.focusWidget()
+                    if focused is not None and screen.isAncestorOf(focused):
+                        queue.append(focused)
+            missed = [w for w in audit_focusables(screen) if w not in seen]
+            self.assertEqual(missed, [], f"tab {tab}")
+
+    def test_play_buttons_say_co_op_when_co_op_is_on(self):
+        from commander_gui import coop
+
+        dashboard = self.goto("dashboard")
+        self.assertNotIn("Co-op", dashboard.banner_button.text())
+        self._install()
+        coop.switch_to_coop(self.anomaly, self.gamma, "G.A.M.M.A")
+        dashboard = self.goto("dashboard")
+        self.assertEqual(dashboard._banner_target, "play")
+        self.assertIn("Play GAMMA Co-op", dashboard.banner_button.text())
+        self.assertIn("Play GAMMA Co-op", self.goto("play").hero.text())
+        self.window.show_quick_menu()
+        self.assertIn("Play GAMMA Co-op", self.window.current_overlay().buttons[0].text())
+        self.window.dismiss_overlay()
+
+    def test_overlay_buttons_are_never_cut_off(self):
+        """The quick menu's four buttons ("Play GAMMA Co-op" the longest)
+        were wider together than the panel's cap, so every label clipped."""
+        from commander_gui import coop
+
+        self._install()
+        coop.switch_to_coop(self.anomaly, self.gamma, "G.A.M.M.A")
+        self.goto("dashboard")
+        self.window.show_quick_menu()
+        self.pump(10)
+        for button in self.window.current_overlay().buttons:
+            self.assertGreaterEqual(button.width(), button.sizeHint().width(), button.text())
+        self.window.dismiss_overlay()
+
+
+# =====================================================================
+# Features ported from the desktop: Verify Integrity, Undo last update,
+# mod list backups, Delete profile, Switch install, default prefix,
+# Compare with a friend
+# =====================================================================
+class DeckVerifyEngineContractTests(unittest.TestCase):
+    """Deck Verify runs the desktop Install page's own methods (see
+    Steamdeck/verify.py). A desktop change that makes them touch a widget
+    the Deck card doesn't have, or open a desktop dialog, fails here
+    instead of in Game Mode."""
+
+    def _engine_sources(self):
+        import ast
+        import inspect
+        import textwrap
+
+        from commander_gui.ui.install_page import InstallPage
+        from Steamdeck.verify import _ENGINE
+
+        for name in _ENGINE:
+            self.assertTrue(hasattr(InstallPage, name), name)
+            source = textwrap.dedent(inspect.getsource(getattr(InstallPage, name)))
+            yield name, ast.parse(source)
+
+    def test_engine_methods_open_no_desktop_dialogs(self):
+        import ast
+
+        for name, tree in self._engine_sources():
+            names = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
+            for dialog in ("QMessageBox", "QFileDialog", "QDialog"):
+                self.assertNotIn(dialog, names, f"InstallPage.{name} opens a {dialog}; override it in DeckVerifyCard")
+
+    def test_engine_only_uses_what_the_deck_card_provides(self):
+        import ast
+
+        from Steamdeck.verify import DeckVerifyCard
+
+        read, written = set(), set()
+        trees = list(self._engine_sources())
+        for _name, tree in trees:
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id == "self":
+                    (written if isinstance(node.ctx, ast.Store) else read).add(node.attr)
+        card_init = DeckVerifyCard.__init__.__code__.co_names
+        missing = sorted(
+            attr for attr in read - written
+            if not hasattr(DeckVerifyCard, attr) and attr not in card_init
+        )
+        self.assertEqual(missing, [], "give DeckVerifyCard a stand-in for these")
+
+
+class DeckPortedFeatureTests(DeckWindowFixture):
+    def test_verify_runs_through_the_desktop_engine_and_releases_the_lock(self):
+        page = self.goto("install")
+        card = page.verify_card
+        card.anomaly_row.set_checked(False)
+        with patch("commander_gui.ui.common.gamma_installed", return_value=False):
+            card._start_verify()
+            for _ in range(400):
+                self.pump(2)
+                if not card.busy():
+                    break
+        self.assertFalse(card.busy())
+        self.assertFalse(self.window.install_busy)
+        self.assertTrue(card.verify_button.isEnabled())
+        self.assertTrue(card.verify_findings.count() >= 1)
+
+    def test_repair_question_is_a_deck_overlay_with_cancel_first(self):
+        card = self.goto("install").verify_card
+        profile = self.window.settings.active_profile
+        card._pending_repair = (False, True, False, (profile.anomaly, profile.gamma, profile.cache))
+        with patch.object(type(card), "_repair_prompt_text", return_value=("Reinstall Mod A", "mods/Mod A")):
+            card._on_repair_clicked()
+        overlay = self.window.current_overlay()
+        self.assertIsNotNone(overlay)
+        self.assertIs(overlay.default_button, overlay.buttons[-1])
+
+    def test_mods_restore_original_order_and_backups(self):
+        page = self.goto("mods")
+        pristine = self.modlist.with_name(self.modlist.name + ".gammagui.bak")
+        pristine.write_text(self.modlist.read_text(encoding="utf-8"), encoding="utf-8")
+        self.modlist.write_text(
+            "+Weapons_separator\n+Gamma Mod\n-Beta Mod\n+Alpha Mod\n", encoding="utf-8"
+        )
+        page.refresh()
+        with patch("Steamdeck.modlist_io.mo2_running", return_value=False):
+            page._restore_original_order()
+            self.window.current_overlay().buttons[0].click()
+            self.pump()
+            self.assertEqual(
+                self.modlist.read_text(encoding="utf-8").splitlines()[1:],
+                ["+Alpha Mod", "-Beta Mod", "+Gamma Mod"],
+            )
+            page._create_backup()
+        self.assertTrue(list(self.modlist.parent.glob("modlist-*.bak")))
+
+    def test_undo_last_update_puts_the_snapshot_back(self):
+        page = self.goto("update")
+        self.assertFalse(page.undo_row.isEnabled())
+        before = self.modlist.read_text(encoding="utf-8")
+        page._snapshot_modlist_before_update()
+        self.modlist.write_text("+Other\n", encoding="utf-8")
+        page._render_undo()
+        self.assertTrue(page.undo_row.isEnabled())
+        with patch("Steamdeck.screens.update.game_running", return_value=False):
+            page._undo_last_update()
+            self.window.current_overlay().buttons[0].click()
+            self.pump()
+        self.assertEqual(self.modlist.read_text(encoding="utf-8"), before)
+
+    def test_default_prefix_forgets_the_custom_one(self):
+        from commander_gui.ui.utilities_page import custom_prefix
+
+        gui_settings.save_gui_settings(runner="umu", prefixes={"umu": str(self.tmp / "pfx")})
+        _kind, _default, saved = custom_prefix()
+        self.assertEqual(saved, str(self.tmp / "pfx"))
+        page = self.goto("utilities")
+        with patch("Steamdeck.screens.utilities.game_running", return_value=False):
+            page._reset_prefix()
+            self.window.current_overlay().buttons[0].click()
+            self.pump()
+        self.assertIsNone(custom_prefix()[2])
+
+    def test_switch_install_lists_saved_installs(self):
+        other = [str(self.tmp / "sd" / name) for name in ("anomaly", "gamma", "cache")]
+        gui_settings.save_gui_settings(game_installs=[other])
+        page = self.goto("install")
+        page.install_switcher.open()
+        from Steamdeck.widgets import DeckPicker
+
+        picker = self.window.current_overlay().findChild(DeckPicker)
+        self.assertEqual(picker.list.count(), 2)  # the one in use, then the SD card
+
+    def test_compare_with_friend(self):
+        from commander_gui import coop
+        from commander_gui.ui.multiplayer_page import compare_with_friend
+
+        mine = {"gamma": "1", "xrrazom": "2", "mods": ["A", "B"]}
+        self.assertEqual(compare_with_friend(mine, coop.mod_list_code(mine))[0], "healthy")
+        level, _text, findings = compare_with_friend(
+            mine, coop.share_text({"gamma": "1", "xrrazom": "2", "mods": ["A", "C"]})
+        )
+        self.assertEqual(level, "attention")
+        self.assertEqual({f.title for f in findings}, {"Mods only your friend has", "Mods only you have"})
