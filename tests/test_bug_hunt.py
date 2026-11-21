@@ -97,6 +97,18 @@ class RedForestRepaintTests(unittest.TestCase):
         QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
 
 
+class WindowsExitCodeAdviceTests(unittest.TestCase):
+    def test_known_windows_codes_say_what_to_do_in_any_spelling(self):
+        from assistant.knowledge import launch_exit_code
+
+        for code in ("-1073741515", "3221225781", "0xC0000135"):
+            self.assertIn("Visual C++", launch_exit_code(code)[1], code)
+        self.assertIn("without AVX", launch_exit_code("-1073741795")[1])
+        self.assertIn("antivirus", launch_exit_code("-1073741502")[1])
+        self.assertIn("non-zero exit code", launch_exit_code("1")[1])
+        self.assertIn("non-zero exit code", launch_exit_code("garbage")[1])
+
+
 class AssistantPathTests(unittest.TestCase):
     """The Assistant must look where COMMANDER writes, on every platform
     (it used ~/.config on Windows too: no dumps, wrong theme)."""

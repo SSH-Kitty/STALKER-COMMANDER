@@ -4023,4 +4023,7 @@ TRANSLATIONS: dict[str, str] = {
     'Lossless Scaling not found': 'Lossless Scaling не найден',
     'Pick LosslessScaling.exe yourself.': 'Укажите LosslessScaling.exe вручную.',
     'Select Lossless Scaling': 'Выберите Lossless Scaling',
+    "Windows couldn't find a file (DLL) the program needs, most often the Visual C++ or DirectX runtime. Install them on COMMANDER's Install page (Install Dependencies), then launch again.": 'Windows не нашла файл (DLL), нужный программе, — чаще всего это среда Visual C++ или DirectX. Установите их на странице «Установка» в COMMANDER («Установить зависимости») и запустите снова.',
+    "A file (DLL) the program needs failed to start. Install the Visual C++ and DirectX runtimes again on COMMANDER's Install page; if that doesn't help, check whether your antivirus is blocking the game.": 'Файл (DLL), нужный программе, не смог запуститься. Переустановите среды Visual C++ и DirectX на странице «Установка» в COMMANDER; если не поможет, проверьте, не блокирует ли игру антивирус.',
+    "The program used a processor instruction this CPU doesn't have. Pick the version of the game without AVX, Anomaly (DX11), on COMMANDER's Play page.": 'Программа использовала инструкцию, которой нет у этого процессора. Выберите версию игры без AVX — Anomaly (DX11) — на странице «Играть» в COMMANDER.',
 }

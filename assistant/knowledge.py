@@ -80,11 +80,43 @@ QTPDF_HARMLESS = (
 
 
 
+#: Windows exit codes (NTSTATUS) with a known cause and fix.
+_WINDOWS_EXIT_CODES = {
+    0xC0000135: (  # STATUS_DLL_NOT_FOUND
+        "Windows couldn't find a file (DLL) the program needs, most often the Visual C++ or "
+        "DirectX runtime. Install them on COMMANDER's Install page (Install Dependencies), "
+        "then launch again."
+    ),
+    0xC0000142: (  # STATUS_DLL_INIT_FAILED
+        "A file (DLL) the program needs failed to start. Install the Visual C++ and DirectX "
+        "runtimes again on COMMANDER's Install page; if that doesn't help, check whether your "
+        "antivirus is blocking the game."
+    ),
+    0xC000001D: (  # STATUS_ILLEGAL_INSTRUCTION
+        "The program used a processor instruction this CPU doesn't have. Pick the version of "
+        "the game without AVX, Anomaly (DX11), on COMMANDER's Play page."
+    ),
+}
+
+
+def _ntstatus(code: str) -> int | None:
+    """``code`` as an unsigned 32-bit NTSTATUS: logs write it signed
+    (-1073741515), unsigned (3221225781) or in hex (0xC0000135)."""
+    try:
+        value = int(code.strip(), 0)
+    except ValueError:
+        return None
+    return value & 0xFFFFFFFF
+
+
 def launch_exit_code(code: str) -> tuple[str, str]:
     """Title/detail pair for a non-zero exit code line."""
+    known = _WINDOWS_EXIT_CODES.get(_ntstatus(code) or 0)
     return (
         tr("The game or Mod Organizer closed with an error (exit code {code}).", code=code),
-        tr(
+        tr(known)
+        if known
+        else tr(
             "A non-zero exit code means the program closed abnormally. The lines "
             "around this entry in launcher.log may show the underlying cause."
         ),

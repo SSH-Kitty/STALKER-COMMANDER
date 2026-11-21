@@ -4023,4 +4023,7 @@ TRANSLATIONS: dict[str, str] = {
     'Lossless Scaling not found': 'Lossless Scaling nu a fost găsit',
     'Pick LosslessScaling.exe yourself.': 'Alege singur LosslessScaling.exe.',
     'Select Lossless Scaling': 'Selectează Lossless Scaling',
+    "Windows couldn't find a file (DLL) the program needs, most often the Visual C++ or DirectX runtime. Install them on COMMANDER's Install page (Install Dependencies), then launch again.": 'Windows nu a găsit un fișier (DLL) de care programul are nevoie, de obicei runtime-ul Visual C++ sau DirectX. Instalează-le din pagina Instalare a COMMANDER (Instalează dependențe), apoi pornește din nou.',
+    "A file (DLL) the program needs failed to start. Install the Visual C++ and DirectX runtimes again on COMMANDER's Install page; if that doesn't help, check whether your antivirus is blocking the game.": 'Un fișier (DLL) de care programul are nevoie nu a putut porni. Reinstalează runtime-urile Visual C++ și DirectX din pagina Instalare a COMMANDER; dacă nu ajută, verifică dacă antivirusul blochează jocul.',
+    "The program used a processor instruction this CPU doesn't have. Pick the version of the game without AVX, Anomaly (DX11), on COMMANDER's Play page.": 'Programul a folosit o instrucțiune pe care acest procesor nu o are. Alege versiunea jocului fără AVX, Anomaly (DX11), în pagina Joacă a COMMANDER.',
 }
