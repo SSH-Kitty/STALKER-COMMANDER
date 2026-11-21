@@ -19,7 +19,6 @@ from unittest.mock import Mock, patch
 from commander_gui import assistant_launcher, autostart, gui_settings, network
 from commander_gui.assistant_launcher import assistant_command, launch_assistant
 from commander_gui.atomic import write_text
-from commander_gui.themes import FONT_FAMILIES
 from commander_gui.dependencies import (
     check_umu,
     check_winetricks,
@@ -71,6 +70,7 @@ from commander_gui.self_update import (
     relaunch_commander,
 )
 from commander_gui.settings import CliProfile, CliSettings, cli_ok, load_settings
+from commander_gui.themes import FONT_FAMILIES
 from commander_gui.ui import common
 from commander_gui.ui.common import (
     BackgroundTask,

@@ -92,9 +92,9 @@ def token(name: str) -> str:
 
 _FONT_SIZE_RE = re.compile(r"font-size:(\d+)px")
 #: COMMANDER's Settings > Font choices (commander_gui/themes.py).
-from commander_gui.themes import FONT_FAMILIES as _FONT_FAMILIES  # noqa: E402
-from commander_gui.themes import MONO_FONT as _MONO_FONT  # noqa: E402
-from commander_gui.themes import migrate_font_family as _migrate_font  # noqa: E402
+from commander_gui.themes import FONT_FAMILIES as _FONT_FAMILIES
+from commander_gui.themes import MONO_FONT as _MONO_FONT
+from commander_gui.themes import migrate_font_family as _migrate_font
 
 
 def load_saved_font_family() -> str:

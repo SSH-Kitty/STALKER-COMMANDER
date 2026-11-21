@@ -15,11 +15,15 @@ Palette = the "black" theme in commander_gui/themes.py (the default).
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(ROOT))
+from commander_gui import __version_label__ as VERSION  # noqa: I001 - needs ROOT on sys.path first
+
 ART = ROOT / "commander_gui" / "assets" / "commander_artwork"
 FONT = ROOT / "commander_gui" / "fonts" / "Exo2-Variable.ttf"
 ICON = ROOT / "cli" / "stalker-gamma.png"
@@ -120,7 +124,7 @@ def draw_large(width: int, height: int) -> Image.Image:
     # Footer.
     f1, f2 = font(int(13 * s), "Bold"), font(int(10 * s), "Regular")
     # Setup draws a divider line across the bottom of the panel: keep the text above it.
-    d.text((int(W * 0.12), H - int(H * 0.125)), "INSTALLER  v1.4.0", font=f1, fill=ACCENT)
+    d.text((int(W * 0.12), H - int(H * 0.125)), f"INSTALLER  v{VERSION}", font=f1, fill=ACCENT)
     d.text((int(W * 0.12), H - int(H * 0.080)), "by SSH-Kitty", font=f2, fill=DIM)
     return img.resize((width, height), Image.LANCZOS)
 
@@ -155,7 +159,7 @@ def draw_preview(panel: Image.Image) -> Image.Image:
     body = font(16, "Regular")
     y = 150
     for line in (
-        "This will install STALKER COMMANDER 1.4.0 on your computer.",
+        f"This will install STALKER COMMANDER {VERSION} on your computer.",
         "",
         "COMMANDER installs, updates, launches and repairs",
         "S.T.A.L.K.E.R. Anomaly with the GAMMA modpack.",

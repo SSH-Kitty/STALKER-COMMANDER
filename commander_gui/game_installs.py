@@ -151,7 +151,7 @@ def _replace_roots(text: str, roots: dict[str, Path]) -> str:
 
 
 def needs_fix(anomaly: str | Path, gamma: str | Path) -> bool:
-    """Whether ModOrganizer.ini still has Windows paths COMMANDER can point
+    r"""Whether ModOrganizer.ini still has Windows paths COMMANDER can point
     at *anomaly* or *gamma*. Paths on other drives don't count: they are
     left alone, so asking again on every switch would never end.
 

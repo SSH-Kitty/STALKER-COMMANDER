@@ -173,6 +173,10 @@ def child_environment(base: Mapping[str, str] | None = None) -> dict[str, str]:
     Outside an AppImage this returns ``base`` unchanged.
     """
     environ = dict(os.environ if base is None else base)
+    # Windows build: the CA bundle entry.py gave COMMANDER's own Python.
+    bundled_ca = environ.pop("COMMANDER_BUNDLED_CA", "")
+    if bundled_ca and environ.get("SSL_CERT_FILE") == bundled_ca:
+        environ.pop("SSL_CERT_FILE", None)
     appdir = environ.get("APPDIR", "")
     if not appdir or not environ.get("APPIMAGE"):
         return environ

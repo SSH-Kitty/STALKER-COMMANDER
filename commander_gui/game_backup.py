@@ -387,7 +387,7 @@ def _safe_member(name: str) -> PurePosixPath | None:
     """
     if not name or "\\" in name or "\0" in name or name.startswith("/"):
         return None
-    raw = name[:-1] if name.endswith("/") else name
+    raw = name.removesuffix("/")
     parts = raw.split("/")
     for part in parts:
         if part in ("", ".", "..") or ":" in part:

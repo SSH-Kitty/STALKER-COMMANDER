@@ -104,19 +104,53 @@ def _memory() -> str:
     return f"{gib('MemTotal')} total, {gib('MemAvailable')} available, swap {gib('SwapTotal')}"
 
 
+#: Windows' "Display adapters" device class: one numbered subkey per driver.
+_DISPLAY_CLASS = r"SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}"
+
+
+def _windows_gpus() -> list[str]:
+    """Display adapters and driver versions, from the registry.
+
+    What Win32_VideoController reports, without starting a hidden PowerShell
+    for it (slow, and a pattern antivirus heuristics flag). Basic display
+    drivers left by removed GPUs have no DriverDesc and are skipped.
+    """
+    import winreg
+
+    found = []
+    try:
+        root = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, _DISPLAY_CLASS)
+    except OSError as exc:
+        return [f"GPU: unavailable ({exc.__class__.__name__})"]
+    with root:
+        index = 0
+        while True:
+            try:
+                name = winreg.EnumKey(root, index)
+            except OSError:
+                break
+            index += 1
+            if not name.isdigit():
+                continue  # "Properties" and the like
+            try:
+                with winreg.OpenKey(root, name) as key:
+                    desc = winreg.QueryValueEx(key, "DriverDesc")[0]
+                    try:
+                        version = winreg.QueryValueEx(key, "DriverVersion")[0]
+                    except OSError:
+                        version = "?"
+            except OSError:
+                continue
+            line = f"GPU: {desc} | {version}"
+            if line not in found:
+                found.append(line)
+    return found or ["GPU: none found"]
+
+
 def _gpus() -> list[str]:
     """Vulkan devices and their drivers; the DRM drivers when vulkaninfo is missing."""
     if os.name == "nt":
-        try:
-            out = subprocess.run(
-                ["powershell", "-NoProfile", "-Command",
-                 "(Get-CimInstance Win32_VideoController | ForEach-Object { $_.Name + ' | ' + $_.DriverVersion }) -join \"`n\""],
-                capture_output=True, encoding="utf-8", errors="replace", timeout=15, check=False,
-                creationflags=0x08000000,  # CREATE_NO_WINDOW
-            ).stdout
-            return [f"GPU: {line.strip()}" for line in out.splitlines() if line.strip()] or ["GPU: none found"]
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            return [f"GPU: unavailable ({exc.__class__.__name__})"]
+        return _windows_gpus()
     try:
         result = subprocess.run(
             ["vulkaninfo", "--summary"],

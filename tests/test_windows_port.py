@@ -377,7 +377,7 @@ class FolderPickerTests(unittest.TestCase):
         roots = [str(root) for _name, root, _used in listed]
         self.assertIn("C:\\", roots)
         self.assertEqual(roots, sorted(roots, key=str.lower))
-        self.assertTrue(all(name.endswith(":") or name.endswith(":)") for name, _root, _used in listed))
+        self.assertTrue(all(name.endswith((":", ":)")) for name, _root, _used in listed))
 
     def test_hidden_and_system_entries_are_hidden(self):
         import ctypes

@@ -162,7 +162,7 @@ class _PipeSocket:
     Reads wait at most ``_TIMEOUT_SECONDS``, like the Linux socket's.
     """
 
-    def __init__(self, pipe, timeout: float = None) -> None:
+    def __init__(self, pipe, timeout: float | None = None) -> None:
         self._pipe = pipe
         self._timeout = _TIMEOUT_SECONDS if timeout is None else timeout
 

@@ -311,15 +311,19 @@ def _terminate_process_group(
     """Terminate a detached process group, falling back to its process."""
     try:
         if os.name == "nt":
+            # By full path: a bare name is looked up in the working
+            # directory before System32. Bounded: this runs on quit.
+            system32 = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32"
             subprocess.run(
-                ["taskkill", "/PID", str(pid), "/T", "/F"],
+                [str(system32 / "taskkill.exe"), "/PID", str(pid), "/T", "/F"],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 check=False,
+                timeout=10,
             )
         else:
             os.killpg(pid, signal.SIGTERM)
-    except OSError:
+    except (OSError, subprocess.TimeoutExpired):
         pass
     if os.name == "nt":
         if process is not None and process.poll() is None:

@@ -171,7 +171,11 @@ class CopyInstallTest(unittest.TestCase):
 @unittest.skipUnless(os.name == "nt", "Windows only")
 class NativeWindowsInstallTest(unittest.TestCase):
     def test_a_native_install_is_never_rewritten_for_linux(self):
-        from commander_gui.game_installs import fix_windows_paths, needs_fix, split_cache
+        from commander_gui.game_installs import (
+            fix_windows_paths,
+            needs_fix,
+            split_cache,
+        )
 
         with tempfile.TemporaryDirectory() as tmp:
             anomaly, gamma = Path(tmp) / "Anomaly", Path(tmp) / "GAMMA"

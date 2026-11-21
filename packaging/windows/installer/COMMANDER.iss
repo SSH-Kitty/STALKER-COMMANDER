@@ -36,7 +36,19 @@ AppPublisher={#AppPublisher}
 AppPublisherURL={#AppUrl}
 AppSupportURL={#AppUrl}/issues
 AppUpdatesURL={#AppUrl}/releases
+AppCopyright=Copyright (C) {#AppPublisher}. GPL-3.0-or-later.
+; Setup's own Details tab: blank fields are one more "unknown program" signal
+; to antivirus heuristics.
 VersionInfoVersion={#NumericVersion}
+VersionInfoCompany={#AppPublisher}
+VersionInfoCopyright=Copyright (C) {#AppPublisher}. GPL-3.0-or-later.
+VersionInfoDescription={#AppName} Setup
+VersionInfoProductName={#AppName}
+VersionInfoProductVersion={#NumericVersion}
+VersionInfoProductTextVersion={#AppVersion}
+VersionInfoOriginalFileName=STALKER-COMMANDER-Setup-{#AppVersion}.exe
+; Qt 6.11 (PySide6) needs Windows 10 1809 or newer.
+MinVersion=10.0.17763
 
 ; Per user by default (no administrator prompt); the user can switch to all users.
 PrivilegesRequired=lowest
@@ -50,6 +62,10 @@ UninstallDisplayIcon={app}\{#AppExe}
 UninstallDisplayName={#AppName}
 CloseApplications=yes
 RestartApplications=no
+; Created by a running COMMANDER (commander_gui/main.py). Closing the window
+; only sends it to the tray, so Setup could not close it and then failed on
+; files in use; with the mutex Setup asks the user to quit it first.
+AppMutex=STALKER-COMMANDER-running
 
 ; Looks: COMMANDER's black theme. "modern dark" forces dark mode; includetitlebar
 ; draws the title bar in the same style.
@@ -87,6 +103,11 @@ FinishedLabel=COMMANDER is installed. Your game folders and settings were left u
 Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription: "Shortcuts:"
 Name: "runtimes"; Description: "Install the Visual C++ and DirectX runtimes the game needs (recommended; asks for administrator permission)"; GroupDescription: "Game requirements:"; Check: RuntimesMissing
 
+[InstallDelete]
+; An upgrade copies over the old install: Qt plugins or .pyd files the new
+; version no longer has would be left in _internal and could be loaded.
+Type: filesandordirs; Name: "{app}\_internal"
+
 [Files]
 Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 ; Played once, on the last page (see [Code]); never installed.
@@ -98,6 +119,12 @@ Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExe}"; Tasks: desktopico
 
 [Run]
 Filename: "{app}\{#AppExe}"; Description: "Launch {#AppName}"; Flags: nowait postinstall skipifsilent
+
+[Registry]
+; "Start COMMANDER when I log in" (commander_gui/autostart.py) writes this
+; value; never created here, only removed on uninstall so it does not point
+; at a deleted exe.
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: none; ValueName: "STALKER COMMANDER"; Flags: uninsdeletevalue dontcreatekey
 
 ; Uninstall removes only what Setup installed. Settings in %APPDATA%\stalker-gamma
 ; and the user's Anomaly / GAMMA folders are deliberately not touched.
@@ -139,15 +166,22 @@ begin
 end;
 
 // True when the file is signed by Microsoft; the same check as winruntimes.py.
+// Only for downloads without a fixed hash (aka.ms serves the latest Visual C++
+// redist) and for DXSETUP.exe, unpacked from the hash-checked DirectX package.
 function SignedByMicrosoft(const FileName: String): Boolean;
 var
   ResultCode: Integer;
-  Command: String;
+  Command, Quoted: String;
 begin
+  // A ' in the path (a Windows account named O'Brien puts one in {tmp}) ends
+  // the PowerShell string early: double it, as PowerShell's quoting wants.
+  Quoted := FileName;
+  StringChangeEx(Quoted, '''', '''''', True);
   Command :=
-    '-NoProfile -NonInteractive -Command "$s = Get-AuthenticodeSignature -LiteralPath ''' + FileName + '''; ' +
-    'if ($s.Status -eq ''Valid'' -and $s.SignerCertificate.Subject -like ''*Microsoft Corporation*'') { exit 0 } else { exit 1 }"';
-  Result := Exec('powershell.exe', Command, '', SW_HIDE, ewWaitUntilTerminated, ResultCode) and (ResultCode = 0);
+    '-NoProfile -NonInteractive -Command "$s = Get-AuthenticodeSignature -LiteralPath ''' + Quoted + '''; ' +
+    'if ($s.Status -eq ''Valid'' -and $s.SignerCertificate.Subject -like ''*O=Microsoft Corporation,*'') { exit 0 } else { exit 1 }"';
+  Result := Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'), Command, '', SW_HIDE,
+    ewWaitUntilTerminated, ResultCode) and (ResultCode = 0);
 end;
 
 // Runs a Microsoft installer with administrator rights (one UAC prompt each).
@@ -156,7 +190,7 @@ var
   ResultCode: Integer;
 begin
   Result := ShellExec('runas', FileName, Params, '', SW_SHOWNORMAL, ewWaitUntilTerminated, ResultCode)
-    and ((ResultCode = 0) or (ResultCode = 1638) or (ResultCode = 3010));
+    and ((ResultCode = 0) or (ResultCode = 1638) or (ResultCode = 3010) or (ResultCode = 1641));
 end;
 
 procedure InstallRuntimes;
@@ -174,8 +208,10 @@ begin
   Page.Clear;
   Page.Add('https://aka.ms/vs/17/release/vc_redist.x64.exe', 'vc_redist.x64.exe', '');
   // The offline June 2010 package: the small web installer no longer works.
+  // It never changes, so Setup checks it against its SHA-256 while downloading
+  // (the same value as winruntimes.py).
   Page.Add('https://download.microsoft.com/download/8/4/A/84A35BF1-DAFE-4AE8-82AF-AD2AE20B6B14/directx_Jun2010_redist.exe',
-    'directx_Jun2010_redist.exe', '');
+    'directx_Jun2010_redist.exe', '053f76dcbb28802e23341b6a787e3b0791c0fa5c8d4d011b1044172dbf89c73b');
   Page.Show;
   try
     try
@@ -189,7 +225,8 @@ begin
 
   if Failed = '' then
   begin
-    if not SignedByMicrosoft(Vc) or not SignedByMicrosoft(Dx) then
+    // Dx was already checked against its SHA-256 by Page.Download.
+    if not SignedByMicrosoft(Vc) then
       Failed := 'A download was not signed by Microsoft, so it was not run.'
     else
     begin
@@ -197,6 +234,8 @@ begin
         Failed := 'The Visual C++ runtime did not install.'
       else if not RunElevated(Dx, '/Q "/T:' + DxDir + '"') or not FileExists(DxDir + '\DXSETUP.exe') then
         Failed := 'The DirectX runtime could not be unpacked.'
+      else if not SignedByMicrosoft(DxDir + '\DXSETUP.exe') then
+        Failed := 'The DirectX installer was not signed by Microsoft, so it was not run.'
       else if not RunElevated(DxDir + '\DXSETUP.exe', '/silent') then
         Failed := 'The DirectX runtime did not install.';
     end;

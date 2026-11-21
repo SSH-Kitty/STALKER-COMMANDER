@@ -429,6 +429,22 @@ def _hide_child_consoles() -> None:
     subprocess.Popen = _NoWindowPopen  # type: ignore[misc]
 
 
+_RUNNING_MUTEX = None
+
+
+def _announce_running() -> None:
+    """Windows: hold the named mutex Setup's ``AppMutex`` looks for, so an
+    upgrade asks the user to quit COMMANDER (closing the window only sends
+    it to the tray) instead of failing on files in use."""
+    global _RUNNING_MUTEX
+    try:
+        import ctypes
+
+        _RUNNING_MUTEX = ctypes.windll.kernel32.CreateMutexW(None, False, "STALKER-COMMANDER-running")
+    except (AttributeError, OSError):
+        _RUNNING_MUTEX = None
+
+
 def _stable_working_directory() -> None:
     """Windows: start from COMMANDER's own data folder, whoever started it.
 
@@ -443,7 +459,7 @@ def _stable_working_directory() -> None:
 
     try:
         load_settings()
-    except Exception:  # noqa: BLE001 - the settings page reports problems later
+    except Exception:  # noqa: BLE001, S110 - the settings page reports problems later
         pass
     base = settings_dir()
     try:
@@ -464,6 +480,7 @@ def main(argv: list[str] | None = None) -> int:
 
         install_windows_rmtree()
         allow_ctrl_c_for_children()  # the CLI's cancel is a Ctrl+C
+        _announce_running()
         _stable_working_directory()
     _ensure_local_bin_on_path()
     argv = list(sys.argv if argv is None else argv)
