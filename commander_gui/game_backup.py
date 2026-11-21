@@ -33,7 +33,7 @@ import time
 import zipfile
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from .i18n import tr
 
@@ -366,11 +366,51 @@ def delete_backup(info: BackupInfo) -> None:
 
 
 # -- restoring ----------------------------------------------------------------
+_WINDOWS_RESERVED = frozenset(
+    {"con", "prn", "aux", "nul"}
+    | {f"com{i}" for i in range(1, 10)}
+    | {f"lpt{i}" for i in range(1, 10)}
+)
+
+
 def _safe_member(name: str) -> PurePosixPath | None:
-    path = PurePosixPath(name)
-    if path.is_absolute() or ".." in path.parts or not path.parts or "\\" in name:
+    """The member's path when it is a plain relative path, else None.
+
+    Splits the raw name itself rather than trusting ``PurePosixPath.parts``,
+    which silently folds ``a//b`` into ``a/b``: callers slice the raw name
+    (``name[len("Anomaly/"):]``), so ``Anomaly//Windows/x.dll`` would leave
+    ``/Windows/x.dll`` - rooted at the drive once joined on Windows. A part
+    holding ``:`` (``C:``, NTFS streams) or a drive/UNC prefix is refused for
+    the same reason, as are Windows device names and parts that end in a dot
+    or space (Windows drops those, so two members could land on one file).
+    """
+    if not name or "\\" in name or "\0" in name or name.startswith("/"):
         return None
-    return path
+    raw = name[:-1] if name.endswith("/") else name
+    parts = raw.split("/")
+    for part in parts:
+        if part in ("", ".", "..") or ":" in part:
+            return None
+        if part != part.rstrip(" ."):
+            return None
+        if os.name == "nt" and part.split(".", 1)[0].strip().lower() in _WINDOWS_RESERVED:
+            return None
+    windows = PureWindowsPath(raw)
+    if windows.drive or windows.root:
+        return None
+    return PurePosixPath(raw)
+
+
+def _inside(root: Path, target: Path) -> bool:
+    """True when ``target`` is lexically under ``root`` - a second check
+    behind ``_safe_member``. Lexical on purpose: a user's symlinked saves or
+    mod folder must not count as "outside"."""
+    base = os.path.normcase(os.path.abspath(root))
+    full = os.path.normcase(os.path.abspath(target))
+    try:
+        return os.path.commonpath([base, full]) == base and full != base
+    except ValueError:  # different drives on Windows
+        return False
 
 
 def _mcm_target(gamma: Path, rel: str) -> Path:
@@ -413,12 +453,16 @@ def restore_plan(
             continue
         top = member.parts[0]
         if saves and top == "saves" and len(member.parts) > 1:
-            plan.append((name, saves_dir(anomaly_dir).joinpath(*member.parts[1:])))
+            dest = saves_dir(anomaly_dir).joinpath(*member.parts[1:])
+            if _inside(saves_dir(anomaly_dir), dest):
+                plan.append((name, dest))
         elif settings and user_ltx and name == "user.ltx":
             plan.append((name, user_ltx_path(anomaly_dir)))
         elif settings and mcm and top == "mcm" and member.name == MCM_FILE:
             rel = PurePosixPath(*member.parts[1:]).as_posix()
-            mcm_members.append((name, _mcm_target(gamma_dir, rel)))
+            dest = _mcm_target(gamma_dir, rel)
+            if _inside(gamma_dir, dest):
+                mcm_members.append((name, dest))
     # Overwrite-folder copies last: MO2 gives that folder the final say.
     mcm_members.sort(key=lambda item: item[0].startswith("mcm/overwrite/"))
     plan.extend(mcm_members)

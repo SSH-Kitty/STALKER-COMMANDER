@@ -1,3 +1,4 @@
+import json
 import os
 import tempfile
 import unittest
@@ -85,7 +86,11 @@ class CoopTests(unittest.TestCase):
         self.assertEqual(info["version"], "1.4")
         exe = self.anomaly / "bin" / "anomalydx11.exe"
         self.assertEqual(exe.read_bytes(), b"MZcoop")
-        self.assertEqual([p.name for p in (self.anomaly / "bin").glob("*.exe")], ["anomalydx11.exe"])
+        # One exe, not two differing by case (NTFS may keep either spelling).
+        names = [p.name for p in (self.anomaly / "bin").glob("*.exe")]
+        self.assertEqual([n.lower() for n in names], ["anomalydx11.exe"])
+        if os.name != "nt":
+            self.assertEqual(names, ["anomalydx11.exe"])
         self.assertTrue((self.anomaly / "gamedata" / "scripts" / "x.script").is_file())
         self.assertTrue((self.gamma / "mods" / coop.MOD_NAME / "gamedata" / "scripts" / "xrr_core.script").is_file())
         lines = self.modlist.read_text().splitlines()
@@ -651,6 +656,7 @@ class MultiplayerPageTests(unittest.TestCase):
         dx9 = Mo2Executable(title="Anomaly (DX9)", binary="C:/a/bin/AnomalyDX9.exe", arguments="-smap2048")
         self.assertEqual(plain_coop_exe(dx9, self.anomaly).arguments, "-smap2048 -nosplashwindow")
 
+    @unittest.skipIf(os.name == "nt", "Windows files have no POSIX mode bits")
     def test_copied_files_keep_their_mode(self):
         src = self.anomaly / "src.bin"
         src.write_text("x")
@@ -835,6 +841,53 @@ class CoopHardeningTests(unittest.TestCase):
                 archive.writestr("../evil", "x")
             with zipfile.ZipFile(zip_path) as archive, self.assertRaises(coop.CoopError):
                 coop._extract(archive, "../evil", Path(tmp) / "out" / "evil")
+
+    def test_inspect_rejects_doubled_slash_and_drive_names(self):
+        # PurePosixPath folds "Anomaly//x" to "Anomaly/x", but the installer
+        # slices the raw name, which would leave a drive-rooted "/Windows/x".
+        for evil in ("Anomaly//Windows/x.dll", "Anomaly/C:/Users/x.dll", "Anomaly///srv/share/x",
+                     "gamedata/C:evil", "gamedata/x.txt:stream", "gamedata/trailing./x"):
+            with self.subTest(evil=evil), tempfile.TemporaryDirectory() as tmp:
+                zip_path = _make_zip(Path(tmp) / "a.zip")
+                with zipfile.ZipFile(zip_path, "a") as archive:
+                    archive.writestr(evil, "x")
+                with self.assertRaises(coop.CoopError):
+                    coop.inspect_zip(zip_path)
+
+
+class SafeMemberTests(unittest.TestCase):
+    def test_plain_paths_pass_and_tricks_fail(self):
+        from commander_gui.game_backup import _safe_member
+
+        for good in ("saves/quicksave_1.scop", "Anomaly/bin/AnomalyDX11.exe", "mcm/a b/axr_options.ltx",
+                     "saves/"):
+            self.assertIsNotNone(_safe_member(good), good)
+        for bad in ("", "/etc/passwd", "../x", "a/../x", "a//b", "a/./b", "C:/x", "C:x", "a/C:/x",
+                    "a\\b", "//srv/share/x", "a/b.", "a/b ", "a/x:ads"):
+            self.assertIsNone(_safe_member(bad), bad)
+
+    def test_inside_is_lexical(self):
+        from commander_gui.game_backup import _inside
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "root"
+            self.assertTrue(_inside(root, root / "a" / "b"))
+            self.assertFalse(_inside(root, root))
+            self.assertFalse(_inside(root, Path(tmp) / "rootx" / "a"))
+            self.assertFalse(_inside(root, root / ".." / "a"))
+
+
+class ImportSessionTraversalTests(unittest.TestCase):
+    setUp, tearDown, _install = CoopTests.setUp, CoopTests.tearDown, CoopTests._install
+
+    def test_import_rejects_drive_relative_member(self):
+        self._install()
+        export = Path(self._tmp.name) / "export.zip"
+        with zipfile.ZipFile(export, "w") as archive:
+            archive.writestr(coop.MANIFEST, json.dumps({"type": coop.EXPORT_TYPE}))
+            archive.writestr("saves/C:/Users/x/evil.bat", "x")
+        with self.assertRaises(coop.CoopError):
+            coop.import_session(self.anomaly, self.gamma, "G.A.M.M.A", "G.A.M.M.A", export)
 
 
 class ModListMatchTests(unittest.TestCase):

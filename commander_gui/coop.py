@@ -46,6 +46,7 @@ from .game_backup import (
     MANIFEST,
     MCM_FILE,
     BackupError,
+    _inside,
     _safe_member,
     _write_zip,
     create_backup_of_files,
@@ -331,6 +332,8 @@ def install(zip_path: str | Path, anomaly, gamma, mo2_profile, progress=None, ki
                     target = staging / "mod" / name
                 else:
                     continue
+                if not _inside(staging, target):
+                    raise CoopError(f"Unsafe path in archive: {name}")
                 target.parent.mkdir(parents=True, exist_ok=True)
                 with archive.open(member) as src, open(target, "wb") as dst:
                     shutil.copyfileobj(src, dst, 1 << 20)
@@ -1015,13 +1018,24 @@ def import_session(anomaly, gamma, mo2_profile, profile_name: str, path, report=
     with zipfile.ZipFile(path) as archive:
         plan = []
         for name in archive.namelist():
-            parts = PurePosixPath(name).parts
-            if name.endswith("/") or len(parts) < 2:
+            if name.endswith("/"):
+                continue
+            member = _safe_member(name)
+            if member is None:
+                raise CoopError(f"Unsafe path in archive: {name}")
+            parts = member.parts
+            if len(parts) < 2:
                 continue
             if parts[0] in roots:
-                plan.append((name, roots[parts[0]].joinpath(*parts[1:])))
+                root = roots[parts[0]]
             elif parts[0] == "coop" and _is_mode_file(PurePosixPath(*parts[1:]).as_posix()):
-                plan.append((name, snapshot.joinpath(*parts[1:])))
+                root = snapshot
+            else:
+                continue
+            dest = root.joinpath(*parts[1:])
+            if not _inside(root, dest):
+                raise CoopError(f"Unsafe path in archive: {name}")
+            plan.append((name, dest))
         replaced = [(name, dest) for name, dest in plan if not name.startswith("coop/") and dest.is_file()]
         # Co-op on: the snapshot goes live below, over these files.
         live = _mode_files(anomaly, gamma) if is_active(anomaly) else {}
