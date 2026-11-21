@@ -70,6 +70,7 @@ class OverlayTests(unittest.TestCase):
             self.assertNotIn("enable_environment", manifest["layer"])
             self.assertTrue(Path(manifest["layer"]["library_path"]).is_file())
 
+    @unittest.skipIf(os.name == "nt", 'Vulkan layers are Linux only (Windows uses the Lossless Scaling app)')
     def test_frame_gen_goes_first_with_vkbasalt_and_mangohud_under_it(self):
         """Frame generation as an explicit layer, nearest the game (implicit, Mesa's
         device_select crashes it); vkBasalt and MangoHud under it, so they
@@ -266,6 +267,7 @@ class OverlayTests(unittest.TestCase):
         self.assertEqual(hint._timer.interval(), 10_000)
         self.assertTrue(hint._timer.isActive())
 
+    @unittest.skipIf(os.name == "nt", 'the graphics overlay is Linux only')
     def test_graphics_overlay_widens_for_a_big_font(self):
         from PySide6.QtWidgets import QApplication
 
@@ -299,6 +301,7 @@ class OverlayTests(unittest.TestCase):
         graphics_window.use_borderless(self.tmp / "anomaly")
         self.assertEqual(ltx.read_text(), "rs_screenmode borderless\nvid_mode 2560x1440\n")
 
+    @unittest.skipIf(os.name == "nt", 'the Lossless.dll card is Linux only')
     def test_dll_label_shows_folder_and_version(self):
         dll = self.tmp / "Lossless.dll"
         dll.write_bytes(b"MZ" + "FileVersion".encode("utf-16-le") + b"\0\0" + "3.2.2.0".encode("utf-16-le") + b"\0\0")
@@ -423,6 +426,7 @@ class OverlayTests(unittest.TestCase):
                     self.assertLess(abs(luma / grey - 1), 0.25)
                     self.assertLess((max(r, g, b) - min(r, g, b)) / grey, 0.16)
 
+    @unittest.skipIf(os.name == "nt", 'Unix socket')
     def test_umbriel_rule_and_socket_move(self):
         import socket
         import threading

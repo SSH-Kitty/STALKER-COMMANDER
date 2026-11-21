@@ -324,6 +324,7 @@ class RestartSteamTests(unittest.TestCase):
     def test_native_launch_command(self):
         self.assertEqual(steam_launch_command(Path("/home/user/.steam/steam")), ["steam"])
 
+    @unittest.skipIf(os.name == "nt", 'Flatpak is Linux only')
     def test_flatpak_launch_command(self):
         flatpak_root = Path(
             "/home/user/.var/app/com.valvesoftware.Steam/.local/share/Steam"

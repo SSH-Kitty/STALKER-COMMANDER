@@ -384,7 +384,11 @@ def start(anomaly: str | Path, gamma: str | Path, *, on_top: bool = True) -> sub
     # The splash inherits "ignore" for the pop-up signals until it sets its
     # own handlers: their default action would end it while Python loads.
     # (signal.signal works only on the main thread.)
-    signals = (POPUP_OPEN, POPUP_CLOSED) if threading.current_thread() is threading.main_thread() else ()
+    signals = (
+        tuple(s for s in (POPUP_OPEN, POPUP_CLOSED) if s is not None)
+        if threading.current_thread() is threading.main_thread()
+        else ()
+    )
     previous = [signal.signal(s, signal.SIG_IGN) for s in signals]
     try:
         return subprocess.Popen(
@@ -414,9 +418,11 @@ if __name__ == "__main__":
         if splash is not None:
             splash.stay_on_top(not popup_open)
 
-    # Python runs these between the frame timer's ticks.
-    signal.signal(POPUP_OPEN, _on_popup)
-    signal.signal(POPUP_CLOSED, _on_popup)
+    # Python runs these between the frame timer's ticks. POSIX only: on
+    # Windows (no SIGUSR1/2) registering them crashed the splash at once.
+    for _popup_signal in (POPUP_OPEN, POPUP_CLOSED):
+        if _popup_signal is not None:
+            signal.signal(_popup_signal, _on_popup)
     # COMMANDER's window class, desktop file and icon: the taskbar groups
     # it with COMMANDER (StartupWMClass in its .desktop file).
     app = QApplication(["stalker-gamma-commander"])

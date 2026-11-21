@@ -404,6 +404,7 @@ class PrefixRepairTests(unittest.TestCase):
         (self.prefix / "winetricks.log").write_text("vcrun2022\n")
         (self.prefix / "system.reg").write_text("WINE REGISTRY Version 2\n")
 
+    @unittest.skipIf(os.name == "nt", 'Wine prefixes are Linux only')
     def test_finds_exactly_the_host_wines_files(self):
         from commander_gui.repair import foreign_prefix_dlls
 

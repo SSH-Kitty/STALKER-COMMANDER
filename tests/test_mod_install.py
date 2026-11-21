@@ -1,3 +1,4 @@
+import os
 import tempfile
 import unittest
 import zipfile
@@ -387,6 +388,7 @@ class ModInstallTests(unittest.TestCase):
             installed = install_archive(archive, mods)
             self.assertEqual((mods / installed / "gamedata/config.ltx").read_text(), "data")
 
+    @unittest.skipIf(os.name == "nt", 'runs a shell script as a stand-in CLI')
     def test_cancel_stops_the_inner_tar_unpack(self):
         import os
         import threading
@@ -632,6 +634,7 @@ class ModInstallTests(unittest.TestCase):
 
 
 class LocalBinPathTests(unittest.TestCase):
+    @unittest.skipIf(os.name == "nt", '~/.local/bin is a Linux PATH entry')
     def test_local_bin_is_added_once_as_a_whole_entry(self):
         import os
 

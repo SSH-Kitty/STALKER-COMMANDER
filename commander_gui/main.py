@@ -482,7 +482,8 @@ def main(argv: list[str] | None = None) -> int:
         allow_ctrl_c_for_children()  # the CLI's cancel is a Ctrl+C
         _announce_running()
         _stable_working_directory()
-    _ensure_local_bin_on_path()
+    if os.name != "nt":  # ~/.local/bin is where Linux installs user programs
+        _ensure_local_bin_on_path()
     argv = list(sys.argv if argv is None else argv)
     # Deck Mode is SteamOS-only; never offered on Windows.
     deck = os.name != "nt" and deck_requested(argv)

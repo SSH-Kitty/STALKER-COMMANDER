@@ -19,6 +19,7 @@ class ShortcutSlugTest(unittest.TestCase):
 
 
 class WriteDesktopShortcutTest(unittest.TestCase):
+    @unittest.skipIf(os.name == "nt", '.desktop files are Linux only')
     def test_writes_desktop_file_with_env_and_exec_bit(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = write_desktop_shortcut(

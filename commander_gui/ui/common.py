@@ -10,6 +10,7 @@ import subprocess
 import sys
 import threading
 import time
+import zlib
 from collections import OrderedDict
 from collections.abc import Callable, Sequence
 from datetime import datetime
@@ -629,9 +630,13 @@ def count_active_mods(
     try:
         list_stat = modlist.stat()
         dir_mtime = mods_dir.stat().st_mtime_ns
+        # Plus a checksum: enabling or disabling a mod (+ to -) keeps the
+        # size, and Windows file times often move in ~16 ms steps, so two
+        # quick toggles looked like no change. The file is a few KB.
+        checksum = zlib.crc32(modlist.read_bytes())
     except OSError:
         return None
-    key = (list_stat.st_mtime_ns, list_stat.st_size, dir_mtime)
+    key = (list_stat.st_mtime_ns, list_stat.st_size, dir_mtime, checksum)
     cached = _mod_count_cache.get(str(modlist))
     if cached is not None and cached[0] == key:
         return cached[1]
@@ -645,7 +650,7 @@ def count_active_mods(
 
 
 #: modlist.txt path -> (its stamp, counts); one entry per profile.
-_mod_count_cache: dict[str, tuple[tuple[int, int, int], tuple[int, int]]] = {}
+_mod_count_cache: dict[str, tuple[tuple[int, int, int, int], tuple[int, int]]] = {}
 
 
 class NoWheelComboBox(QComboBox):

@@ -179,22 +179,37 @@ def _scrub(text: str) -> str:
     Wine's Z:\\home\\<login>, any case)."""
     from .diagnostics import redact
 
-    home = str(Path.home())
+    home_path = Path.home()
+    home = str(home_path)
     redacted = redact(text)
     if len(home) > 1:
-        redacted = redacted.replace(home, "~")
+        # A whole path part only: /home/al must not turn /home/alice into
+        # ~ice. On Windows MO2 and the game also write the folder as
+        # c:/users/name or C:\\Users\\Name (escaped in JSON/INI): any case,
+        # either slash, doubled backslashes.
+        end = r"(?![^\\/\s\"':;,)\]])"
+        if os.name == "nt":
+            parts = [re.escape(part.strip("\\/")) for part in home_path.parts if part.strip("\\/")]
+            redacted = re.sub(r"(?i)" + r"[\\/]+".join(parts) + end, "~", redacted)
+        else:
+            redacted = re.sub(re.escape(home) + end, "~", redacted)
+    names = set()
     try:
-        login = getpass.getuser()
-    except Exception:  # noqa: BLE001 - no login name: nothing to hide
-        return redacted
-    if not login:
-        return redacted
-    return re.sub(
-        r"(?i)(?<=[/\\])" + re.escape(login) + r"(?=[/\\]|$|[\s\"':;,)\]])",
-        "user",
-        redacted,
-        flags=re.MULTILINE,
-    )
+        names.add(getpass.getuser())
+    except Exception:  # noqa: BLE001, S110 - no login name: nothing to hide
+        pass
+    if os.name == "nt" and len(home_path.name) > 1:
+        # The profile folder is not always named after the login (Microsoft
+        # accounts, renamed accounts): hide that name too.
+        names.add(home_path.name)
+    for login in sorted(filter(None, names), key=len, reverse=True):
+        redacted = re.sub(
+            r"(?i)(?<=[/\\])" + re.escape(login) + r"(?=[/\\]|$|[\s\"':;,)\]])",
+            "user",
+            redacted,
+            flags=re.MULTILINE,
+        )
+    return redacted
 
 
 def _unique_path(directory: Path, name: str) -> Path:

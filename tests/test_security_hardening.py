@@ -123,6 +123,7 @@ class DiscordIpcTest(unittest.TestCase):
         with self.assertRaises(ConnectionError):
             _IpcClient(ours)._recv()
 
+    @unittest.skipIf(os.name == "nt", 'Unix sockets')
     def test_sockets_of_other_users_are_skipped(self):
         from commander_gui import discord_rpc
 

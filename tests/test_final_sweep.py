@@ -92,7 +92,7 @@ class InstallRootTest(unittest.TestCase):
 
         root = InstallPage._install_root(("gamma/anomaly", "/games/GAMMA/gamma", "c"))
         self.assertTrue(root)
-        self.assertEqual(InstallPage._install_root(("", "/games/G/gamma", "c")), "/games/G")
+        self.assertEqual(InstallPage._install_root(("", "/games/G/gamma", "c")), str(Path("/games/G")))
 
 
 if __name__ == "__main__":

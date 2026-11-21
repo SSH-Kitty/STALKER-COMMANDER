@@ -355,6 +355,33 @@ class DiscordPipeTimeoutTest(unittest.TestCase):
 
 
 @unittest.skipUnless(os.name == "nt", "Windows only")
+class LogScrubTests(unittest.TestCase):
+    """Log dumps go to the developer: the Windows home, in every spelling
+    MO2 and the game write it, and the profile folder's name stay out."""
+
+    def test_windows_home_and_names_are_hidden_in_every_form(self):
+        from commander_gui.log_dump import _scrub
+
+        with patch("commander_gui.log_dump.getpass.getuser", return_value="paul"), patch(
+            "commander_gui.log_dump.Path.home", return_value=Path(r"C:\Users\PaulB")
+        ):
+            text = _scrub(
+                r"a=C:\Users\PaulB\Games b=c:/users/paulb/games c=C:\\Users\\PaulB\\x "
+                r"d=D:\Backup\paul\saves e=C:\Users\PaulBee\x f=paulb"
+            )
+        lowered = text.lower()
+        self.assertNotIn(r"users\paulb\\", lowered)
+        self.assertNotIn("users/paulb/", lowered)
+        self.assertNotIn(r"\paul\\", lowered)
+        self.assertIn(r"a=~\Games", text)
+        self.assertIn("b=~/games", text)
+        self.assertIn(r"c=~\\x", text)
+        self.assertIn(r"d=D:\Backup\user\saves", text)
+        self.assertIn(r"e=C:\Users\PaulBee\x", text)  # another user's folder
+        self.assertIn("f=paulb", text)  # not a path part
+
+
+@unittest.skipUnless(os.name == "nt", "Windows only")
 class FolderPickerTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

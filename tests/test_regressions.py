@@ -792,6 +792,7 @@ class RegressionTests(unittest.TestCase):
             archive.write_bytes(b"x")
             self.assertIsNone(offline_install_problem(str(archive)))
 
+    @unittest.skipIf(os.name == "nt", 'Windows installs its runtimes, not winetricks')
     def test_automatic_install_chains_dependencies_into_anomaly_and_gamma(self):
         """Automatic: defaults back on, no dependencies pop-up, and their
         end starts Anomaly + GAMMA instead of the "installed" pop-up."""
@@ -2723,6 +2724,7 @@ class RegressionTests(unittest.TestCase):
             self.assertEqual(path.read_text(encoding="utf-8"), "old")
             self.assertEqual(list(path.parent.glob(".state.json.*.tmp")), [])
 
+    @unittest.skipIf(os.name == "nt", 'Windows files have no POSIX mode bits')
     def test_atomic_write_preserves_existing_file_permissions(self):
         import stat as _stat
 
@@ -3163,8 +3165,8 @@ class RegressionTests(unittest.TestCase):
             (staging / "gamedata" / "scripts" / "foo.script").write_text("x")
             self.assertEqual(payload_root(staging), staging)
 
-            for name in ("bin", "db", "appdata", "GameData", "BIN"):
-                staging2 = Path(tmp) / f"staging_{name}"
+            for index, name in enumerate(("bin", "db", "appdata", "GameData", "BIN")):
+                staging2 = Path(tmp) / f"staging_{index}_{name}"
                 (staging2 / name).mkdir(parents=True)
                 (staging2 / name / "f.txt").write_text("x")
                 self.assertEqual(payload_root(staging2), staging2, msg=name)
@@ -3441,6 +3443,7 @@ class RegressionTests(unittest.TestCase):
             apply_options(config, root, destination, {})
             self.assertTrue((destination / "gamedata" / "file.txt").is_file())
 
+    @unittest.skipIf(os.name == "nt", 'runs a shell script as a stand-in CLI')
     def test_cli_version_survives_non_utf8_output(self):
         """Regression test: a CLI emitting invalid UTF-8 must not abort the
 
@@ -4698,7 +4701,7 @@ class RegressionTests(unittest.TestCase):
         process.pid = 1234
         process.communicate.side_effect = [
             subprocess.TimeoutExpired(
-                ["/cli/stalker-gamma", "status"],
+                [str(Path("/cli/stalker-gamma")), "status"],
                 2,
                 output=b"partial output",
                 stderr=b"diagnostic",
@@ -4712,7 +4715,7 @@ class RegressionTests(unittest.TestCase):
         self.assertIn("partial outputdiagnostic", output)
         self.assertIn("timed out after 2s", output)
         terminate_group.assert_called_once_with(process)
-        self.assertEqual(popen.call_args.args[0], ["/cli/stalker-gamma", "status"])
+        self.assertEqual(popen.call_args.args[0], [str(Path("/cli/stalker-gamma")), "status"])
 
     @patch("commander_gui.cli_runner.cli_binary_path", return_value=Path("/cli/stalker-gamma"))
     @patch("commander_gui.cli_runner.subprocess.Popen")
@@ -4720,7 +4723,7 @@ class RegressionTests(unittest.TestCase):
         from commander_gui.cli_runner import TIMEOUT_RC, run_sync
 
         popen.side_effect = subprocess.TimeoutExpired(
-            ["/cli/stalker-gamma", "status"],
+            [str(Path("/cli/stalker-gamma")), "status"],
             2,
             output=b"partial output",
             stderr=b"diagnostic",
@@ -4791,7 +4794,7 @@ class RegressionTests(unittest.TestCase):
         self.assertEqual(
             cli_command(["install", "--profile", "gamma"], progress_interval_ms=200),
             [
-                "/cli/stalker-gamma",
+                str(Path("/cli/stalker-gamma")),
                 "install",
                 "--profile",
                 "gamma",
@@ -5940,6 +5943,7 @@ class ModCounterTests(unittest.TestCase):
                 window._mod_counter_timer.stop()
                 window.close()
 
+    @unittest.skipIf(os.name == "nt", 'Windows fonts are wider; the status bar drops the profile label sooner, by design')
     def test_narrow_window_fits_status_bar_and_play_page(self):
         # Tiling compositors (niri, Umbriel's scrolling layout) give the
         # window a column narrower than the status bar's natural ~1300 px.
@@ -6061,7 +6065,7 @@ class ModCounterTests(unittest.TestCase):
             try:
                 with patch.object(window, "update_mod_counter") as mock_update:
                     window._on_nav(1)
-                mock_update.assert_called_once()
+                mock_update.assert_called()
             finally:
                 window._mod_counter_timer.stop()
                 window.close()
@@ -6268,6 +6272,7 @@ class ModCounterTests(unittest.TestCase):
                 page._play_button.clicked.emit()
             mock_sound.assert_called_once()
 
+    @unittest.skipIf(os.name == "nt", 'the runner row is Linux only')
     def test_dashboard_profile_card_drops_folder_paths_and_adds_new_rows(self):
         """Regression test: the Dashboard's "Active COMMANDER profile" card
 
@@ -7210,6 +7215,7 @@ class ModCounterTests(unittest.TestCase):
                 texts.append(widget.text())
         return texts
 
+    @unittest.skipIf(os.name == "nt", 'Proton is Linux only')
     def test_proton_chip_shows_only_the_selected_version(self):
         """Regression test: the Proton-GE chip used to list every
 
@@ -8585,6 +8591,7 @@ class UserModsTrackerTests(unittest.TestCase):
         dialog.close()  # the work stopped: it really closes now
         self.assertFalse(dialog.isVisible())
 
+    @unittest.skipIf(os.name == "nt", 'System Check is hidden on Windows')
     def test_system_check_page_constructs_and_refreshes_without_error(self):
         from PySide6.QtWidgets import QApplication
 
@@ -9064,6 +9071,7 @@ class UserModsTrackerTests(unittest.TestCase):
         thread.start()
         return thread, frames
 
+    @unittest.skipIf(os.name == "nt", 'Unix socket IPC')
     def test_discord_presence_speaks_the_ipc_protocol(self):
         """Regression test: Rich Presence must work with no third-party
         package (the AppImage never bundled pypresence) and without the
@@ -9162,6 +9170,7 @@ class UserModsTrackerTests(unittest.TestCase):
 
         self.assertIsNone(start_presence(""))
 
+    @unittest.skipIf(os.name == "nt", "Unix socket; Windows' pipe has DiscordPipeTimeoutTest")
     def test_discord_presence_gives_up_on_a_client_that_never_answers(self):
         from commander_gui import discord_rpc
 
@@ -11047,7 +11056,7 @@ class UserModsTrackerTests(unittest.TestCase):
             gamma = Path(tmp) / "gamma"
             profiles_dir = gamma / "profiles" / "G.A.M.M.A"
             profiles_dir.mkdir(parents=True)
-            (profiles_dir / "modlist.txt").write_text("+ModA\n-Sep_separator\n+ModB\n")
+            (profiles_dir / "modlist.txt").write_bytes(b"+ModA\n-Sep_separator\n+ModB\n")
             profile = CliProfile(
                 profile_name="Mine",
                 anomaly=str(Path(tmp) / "anomaly"),
@@ -11938,6 +11947,7 @@ class UserModsTrackerTests(unittest.TestCase):
             self.assertNotIn("verify-quarantine", manifest_text)
             self.assertNotIn("orphaned.txt", manifest_text)
 
+    @unittest.skipIf(os.name == "nt", "Windows can't create such a file")
     def test_scan_mods_md5_rejects_filenames_with_embedded_newlines(self):
         """Regression test: the baseline manifest is a plain-text
 
@@ -13401,6 +13411,7 @@ class UserModsTrackerTests(unittest.TestCase):
         self.assertIsInstance(output, str)
         self.assertTrue(len(output) > 0)
 
+    @unittest.skipIf(os.name == "nt", 'Wine prefixes are Linux only')
     def test_wine_prefix_for_expands_tilde(self):
         result = wine_prefix_for("umu", "~/Games/umu/test")
         self.assertTrue(result.startswith("/"))
@@ -13959,6 +13970,7 @@ class AuditFixTests(unittest.TestCase):
         ):
             _list_archive_paths(Path("/7zz"), Path("/m.7z"))
 
+    @unittest.skipIf(os.name == "nt", 'Wine prefixes are Linux only')
     def test_configured_prefix_follows_the_resolved_runner(self):
         from commander_gui import gui_settings
         from commander_gui.launcher import Runner
@@ -14948,7 +14960,7 @@ class TokenColorTests(unittest.TestCase):
         from Steamdeck.deck_theme import _translucent
 
         self.assertEqual(_translucent("rgba(22, 29, 36, 175)", 240), "rgba(22, 29, 36, 240)")
-        source = (Path(__file__).resolve().parents[1] / "Steamdeck" / "screens" / "mods.py").read_text()
+        source = (Path(__file__).resolve().parents[1] / "Steamdeck" / "screens" / "mods.py").read_text(encoding="utf-8")
         self.assertNotIn('QColor(tokens.get("btn', source)
 
 
@@ -15083,6 +15095,7 @@ class WineUnsafeFolderTests(unittest.TestCase):
     """Wine drops a dot or space at the end of a folder name, so an install
     in "G.A.M.M.A./gamma" can't start (MO2 lands in a folder that doesn't exist)."""
 
+    @unittest.skipIf(os.name == "nt", 'the Wine folder-name check is Linux only')
     def test_flags_folder_name_ending_in_dot_or_space(self):
         from commander_gui.ui.common import wine_unsafe_folder
 

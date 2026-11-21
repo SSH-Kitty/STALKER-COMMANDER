@@ -110,7 +110,19 @@ _DEFAULTS = {
 _cache: dict | None = None
 _SAVE_LOCK = threading.RLock()
 _cache_path_str: str = ""
-_cache_file_mtime: float = 0.0
+_cache_file_mtime: object = 0.0
+
+
+def _stamp(path: Path) -> object:
+    """What says the file changed: its mtime in ns *and* its size. The mtime
+    alone (a float) missed a second write within the same clock tick, which
+    Windows' coarse file times make common - the cache then kept serving
+    the old settings."""
+    try:
+        info = path.stat()
+    except OSError:
+        return 0.0
+    return (info.st_mtime_ns, info.st_size)
 
 
 def animations_enabled() -> bool:
@@ -129,10 +141,7 @@ def click_sounds_enabled() -> bool:
 
 def _cached_flag(key: str) -> bool:
     path = gui_settings_path()
-    try:
-        mtime = path.stat().st_mtime
-    except OSError:
-        mtime = 0.0
+    mtime = _stamp(path)
     if _cache is not None and str(path) == _cache_path_str and mtime == _cache_file_mtime:
         return bool(_cache.get(key, True))
     return bool(load_gui_settings().get(key, True))
@@ -141,10 +150,7 @@ def _cached_flag(key: str) -> bool:
 def load_gui_settings() -> dict:
     global _cache, _cache_path_str, _cache_file_mtime
     path = gui_settings_path()
-    try:
-        current_mtime = path.stat().st_mtime
-    except OSError:
-        current_mtime = 0.0
+    current_mtime = _stamp(path)
     if (
         _cache is not None
         and str(path) == _cache_path_str
@@ -386,10 +392,7 @@ def load_gui_settings() -> dict:
     data["mo2_display_dpi"] = dpi if dpi in {96, 120, 144, 168, 192} else 120
     _cache = copy.deepcopy(data)
     _cache_path_str = str(path)
-    try:
-        _cache_file_mtime = path.stat().st_mtime
-    except OSError:
-        _cache_file_mtime = 0.0
+    _cache_file_mtime = _stamp(path)
     return data
 
 

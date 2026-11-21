@@ -4016,4 +4016,11 @@ TRANSLATIONS: dict[str, str] = {
     'The game needs the Visual C++ and DirectX runtimes and they are not installed yet.': 'Jocul are nevoie de runtime-urile Visual C++ și DirectX, iar ele nu sunt încă instalate.',
     'Install them': 'Instalează-le',
     '{name} did not extract correctly.': '{name} nu a putut fi extras corect.',
+    'The installer did not finish in time.': 'Programul de instalare nu s-a terminat la timp.',
+    'COMMANDER starts Lossless Scaling with the game. Changes apply from the next launch.': 'COMMANDER pornește Lossless Scaling odată cu jocul. Modificările se aplică de la următoarea pornire.',
+    'Choose app': 'Alege aplicația',
+    'Frame generation needs the Lossless Scaling app (paid, on Steam). Install it and COMMANDER finds it there. Have it already somewhere else? Use Choose app.': 'Generarea de cadre are nevoie de aplicația Lossless Scaling (cu plată, pe Steam). Instaleaz-o și COMMANDER o găsește acolo. O ai deja în altă parte? Folosește „Alege aplicația”.',
+    'Lossless Scaling not found': 'Lossless Scaling nu a fost găsit',
+    'Pick LosslessScaling.exe yourself.': 'Alege singur LosslessScaling.exe.',
+    'Select Lossless Scaling': 'Selectează Lossless Scaling',
 }

@@ -4038,4 +4038,11 @@ TRANSLATIONS: dict[str, str] = {
     'The game needs the Visual C++ and DirectX runtimes and they are not installed yet.': '',
     'Install them': '',
     '{name} did not extract correctly.': '',
+    'The installer did not finish in time.': '',
+    'COMMANDER starts Lossless Scaling with the game. Changes apply from the next launch.': '',
+    'Choose app': '',
+    'Frame generation needs the Lossless Scaling app (paid, on Steam). Install it and COMMANDER finds it there. Have it already somewhere else? Use Choose app.': '',
+    'Lossless Scaling not found': '',
+    'Pick LosslessScaling.exe yourself.': '',
+    'Select Lossless Scaling': '',
 }
