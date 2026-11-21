@@ -128,6 +128,27 @@ def settings_dir() -> Path:
     return Path(base) / "stalker-gamma"
 
 
+def data_home() -> Path:
+    """Where COMMANDER keeps its own data (backups, plugins):
+    ``<this>/stalker-gamma-commander``.
+
+    ~/.local/share (or $XDG_DATA_HOME) on Linux. On Windows %LOCALAPPDATA%:
+    the Linux folder there was a stray ``C:\\Users\\<name>\\.local``, and its
+    longer paths ran into Windows' 260-character limit. A Windows install
+    that already has data in the old place keeps using it, so earlier test
+    builds' backups don't seem to vanish.
+    """
+    xdg = os.environ.get("XDG_DATA_HOME")
+    linux_style = Path(xdg) if xdg else Path.home() / ".local" / "share"
+    if os.name != "nt" or xdg:
+        return linux_style
+    local = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
+    legacy = linux_style / "stalker-gamma-commander"
+    if legacy.is_dir() and not (local / "stalker-gamma-commander").exists():
+        return linux_style
+    return local
+
+
 def settings_path() -> Path:
     return settings_dir() / "settings.json"
 

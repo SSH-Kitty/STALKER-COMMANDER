@@ -594,7 +594,10 @@ class UpdatePage(QWidget):
         except OSError:
             # An older snapshot left in place would make "Undo Last Update"
             # restore the wrong list, so it goes, and the user is told.
-            snapshot.unlink(missing_ok=True)
+            try:
+                snapshot.unlink(missing_ok=True)
+            except OSError:
+                pass  # locked on Windows (an editor, antivirus): told below all the same
             self.window.statusBar().showMessage(
                 tr("Couldn't save a copy of the mod list before updating, so Undo last update won't be available."),
                 10000,

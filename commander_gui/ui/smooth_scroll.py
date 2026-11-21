@@ -20,6 +20,8 @@ Left alone on purpose:
 
 from __future__ import annotations
 
+import os
+
 from PySide6.QtCore import QEasingCurve, QEvent, QObject, Qt, QVariantAnimation
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -63,6 +65,12 @@ class SmoothWheelScroller(QObject):
             return False
         delta = event.angleDelta().y()
         if not delta or event.angleDelta().x():
+            return False
+        # Windows reports no pixelDelta even for a precision touchpad, which
+        # sends a stream of small steps instead of 120-unit notches: each
+        # one restarted the glide, so laptop scrolling felt rubbery. Only
+        # whole wheel notches glide; the rest scroll as Qt does.
+        if os.name == "nt" and abs(delta) % 120:
             return False
         return self._glide(area, delta)
 

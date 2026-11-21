@@ -140,6 +140,11 @@ class EdgeResizeFilter(QObject):
         edges = Qt.Edge(0)
         if not w.custom_title_bar or w.isMaximized() or w.isFullScreen():
             return edges
+        # The minimise/maximise/close buttons sit in the top-right corner,
+        # inside the resize margins: a click there (where Windows users aim
+        # for Close) started a resize instead of pressing the button.
+        if isinstance(w.childAt(int(pos.x()), int(pos.y())), WindowButton):
+            return edges
         x, y = pos.x(), pos.y()
         if x <= _RESIZE_MARGIN:
             edges |= Qt.Edge.LeftEdge

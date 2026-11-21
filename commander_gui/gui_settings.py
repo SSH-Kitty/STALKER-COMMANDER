@@ -69,6 +69,10 @@ _DEFAULTS = {
     "hidden_nav_tabs": [],  # top-bar tabs the user hid (keys into main_window.NAV_ITEMS)
     "window_width": 1080,
     "window_height": 950,
+    # Top-left corner of the window, restored on Windows (None: let the
+    # system place it, as before).
+    "window_x": None,
+    "window_y": None,
     "window_maximized": False,  # reopen maximized when it was closed maximized
     "last_update_check_ts": 0.0,  # time.time() of the last scheduled background update check
     "update_notifications": True,  # desktop notification when a GAMMA or COMMANDER update comes out
@@ -252,6 +256,10 @@ def load_gui_settings() -> dict:
         except (TypeError, ValueError, OverflowError):
             size = _DEFAULTS[key]
         data[key] = min(3840, max(640, size))
+    for key in ("window_x", "window_y"):
+        value = data.get(key)
+        if isinstance(value, bool) or not isinstance(value, int) or abs(value) > 100_000:
+            data[key] = None
     font_family = migrate_font_family(data.get("font_family"))
     if not isinstance(font_family, str) or font_family not in FONT_FAMILIES:
         data["font_family"] = "Exo 2"

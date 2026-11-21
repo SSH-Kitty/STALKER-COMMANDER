@@ -3198,7 +3198,7 @@ class InstallPage(QWidget):
                 return False
             self.root_card_edit.setText(root)
         base = Path(root).expanduser()
-        if bad := wine_unsafe_folder(str(base)):
+        if os.name != "nt" and (bad := wine_unsafe_folder(str(base))):  # a Wine-only problem
             warn_wine_unsafe_folder(self, bad)
             return False
         if not windows_drive_ok(self, str(base)):
@@ -3392,7 +3392,7 @@ class InstallPage(QWidget):
             self.refresh()
             return False
         # Not the cache: only the CLI reads it, never Wine.
-        if bad := wine_unsafe_folder(anomaly, gamma):
+        if os.name != "nt" and (bad := wine_unsafe_folder(anomaly, gamma)):  # a Wine-only problem
             warn_wine_unsafe_folder(self, bad)
             self.refresh()
             return False

@@ -25,6 +25,7 @@ class OverlayTests(unittest.TestCase):
         launch_options._install_frame_gen.cache_clear()
         self.addCleanup(launch_options._install_frame_gen.cache_clear)
 
+    @unittest.skipIf(os.name == "nt", "launch wrappers and Vulkan layers are Linux only")
     def test_bundled_layers_replace_missing_ones(self):
         gui_settings.save_gui_settings(mangohud_preset="fps", vkbasalt_preset="bleak", vkbasalt_sharpness="off", vkbasalt_aa="smaa")
         with patch("shutil.which", return_value=None):
@@ -101,6 +102,7 @@ class OverlayTests(unittest.TestCase):
         with patch("commander_gui.config.settings_dir", return_value=self.tmp):
             self.assertIn("multiplier = 5\n", launch_options._frame_gen_config(dll, "LSFGVK_ENV=1 LSFGVK_MULTIPLIER=8").read_text())
 
+    @unittest.skipIf(os.name == "nt", "launch wrappers and Vulkan layers are Linux only")
     def test_coop_shortcut_keeps_vkbasalt_and_mangohud_under_frame_gen(self):
         """Co-op runs through Steam's shortcut, its launch options merged
         from COMMANDER's base: the base, set up again, used to replace the
@@ -368,6 +370,7 @@ class OverlayTests(unittest.TestCase):
         self.assertIn('[Software\\\\Wine\\\\X11 Driver]', reg.read_text())
         self.assertIn('"GrabPointer"="N"', reg.read_text())
 
+    @unittest.skipIf(os.name == "nt", "launch wrappers and Vulkan layers are Linux only")
     def test_installed_ones_are_used_and_own_config_kept(self):
         gui_settings.save_gui_settings(mangohud_preset="own")
         layer = self.tmp / "data/vulkan/implicit_layer.d/vkBasalt.json"
@@ -388,6 +391,7 @@ class OverlayTests(unittest.TestCase):
         text = launch_options.toggle(text, launch_options.NATIVE_WAYLAND, True)
         self.assertEqual(text, "PROTON_ENABLE_WAYLAND=1 %command%")
 
+    @unittest.skipIf(os.name == "nt", "launch wrappers and Vulkan layers are Linux only")
     def test_debug_mode_goes_after_command(self):
         text = launch_options.toggle("PROTON_LOG=1", "-dbg", True)
         self.assertEqual(text, "PROTON_LOG=1 %command% -dbg")

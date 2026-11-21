@@ -1612,6 +1612,7 @@ class RegressionTests(unittest.TestCase):
         with patch("commander_gui.ui.common.shutil.which", return_value=None):
             common.notify_desktop("Title", "Message")  # must not raise
 
+    @unittest.skipIf(os.name == "nt", "notify-send is Linux; Windows uses the tray (WindowsNotificationTests)")
     def test_notify_desktop_spawns_notify_send_when_available(self):
         with (
             patch("commander_gui.ui.common.shutil.which", return_value="/usr/bin/notify-send"),
@@ -1625,6 +1626,7 @@ class RegressionTests(unittest.TestCase):
         self.assertIn("--hint=string:desktop-entry:stalker-gamma-commander", args)
         self.assertFalse(any(a.startswith("--action") for a in args))
 
+    @unittest.skipIf(os.name == "nt", "notify-send is Linux; Windows uses the tray (WindowsNotificationTests)")
     def test_notify_desktop_button_raises_window_and_runs_its_action(self):
         clicked = Mock()
         with (
@@ -6678,6 +6680,7 @@ class ModCounterTests(unittest.TestCase):
             )
         self.assertEqual(len(set(geometries)), 1)
 
+    @unittest.skipIf(os.name == "nt", 'Proton runners are Linux only')
     def test_dashboard_runner_combo_lists_auto_and_installed_protons(self):
         from PySide6.QtWidgets import QApplication
 
@@ -6713,6 +6716,7 @@ class ModCounterTests(unittest.TestCase):
             )
             self.assertEqual(combo.currentData(), "auto")
 
+    @unittest.skipIf(os.name == "nt", 'Proton runners are Linux only')
     def test_dashboard_runner_switch_saves_the_gui_setting(self):
         from PySide6.QtWidgets import QApplication
 
@@ -14586,6 +14590,7 @@ class UnstableBuildTests(unittest.TestCase):
         ):
             self_update.switch_commander_build("unstable")
 
+    @unittest.skipIf(os.name == "nt", "switching builds is the AppImage's; hidden on Windows")
     def test_settings_offers_the_other_build(self):
         from PySide6.QtWidgets import QApplication
 
@@ -14786,6 +14791,7 @@ class LaunchOptionChipTests(unittest.TestCase):
         self.assertEqual(launch_options.set_var(on, launch_options.FG_FLOW_SCALE, None).count("FLOW"), 0)
         self.assertEqual(launch_options.frame_gen(on, False), "mangohud %command% -x")
 
+    @unittest.skipIf(os.name == "nt", "launch wrappers and Vulkan layers are Linux only")
     def test_frame_gen_runs_only_with_a_native_lossless_dll(self):
         """Frame generation needs Lossless.dll: not lsfg-vk.dll (the lsfg-vk
         beta's) nor Lossless Scaling's own .NET LosslessScaling.dll. Without
@@ -14870,6 +14876,7 @@ class LaunchOptionChipTests(unittest.TestCase):
         self.assertEqual(text, "WINEDEBUG=-all")
         self.assertEqual(launch_options.toggle(text, "PROTON_LOG=1", True), "PROTON_LOG=1")
 
+    @unittest.skipIf(os.name == "nt", "launch wrappers and Vulkan layers are Linux only")
     def test_coop_shortcut_options_ignore_game_mode(self):
         """The co-op shortcut is the same in Game and Desktop Mode (else each
         switch restarts Steam), and co-op never drops the Steam overlay."""
@@ -14883,6 +14890,7 @@ class LaunchOptionChipTests(unittest.TestCase):
                 shortcuts.add(launch_options.for_steam(text, "%command% -x"))
         self.assertEqual(shortcuts, {"mangohud %command% -x"})
 
+    @unittest.skipIf(os.name == "nt", "launch wrappers and Vulkan layers are Linux only")
     def test_for_steam_merges_into_shortcut_options(self):
         from commander_gui import launch_options
 
@@ -14904,6 +14912,7 @@ class LaunchOptionChipTests(unittest.TestCase):
         with patch.object(launch_options, "in_game_mode", return_value=False):
             self.assertEqual(launch_options.for_steam("", base), "STEAM_COMPAT_DATA_PATH='/my pfx' SteamAppId=480 %command% run -e Anomaly")
 
+    @unittest.skipIf(os.name == "nt", "launch wrappers and Vulkan layers are Linux only")
     def test_apply_splits_env_wrappers_and_arguments(self):
         from commander_gui import launch_options
 

@@ -56,8 +56,9 @@ class PluginError(Exception):
 
 
 def data_root() -> Path:
-    base = os.environ.get("XDG_DATA_HOME") or os.path.join(Path.home(), ".local", "share")
-    return Path(base) / "stalker-gamma-commander" / "plugins"
+    from .config import data_home
+
+    return data_home() / "stalker-gamma-commander" / "plugins"
 
 
 def install_dir() -> Path:

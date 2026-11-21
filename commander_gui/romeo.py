@@ -73,9 +73,9 @@ def unpacked_size(archiver: Path, archive: Path) -> int | None:
     """Total unpacked bytes from 7-Zip's listing summary, None if unknown."""
     try:
         out = subprocess.run(
-            [str(archiver), "l", "-p", "--", str(archive)],
+            [str(archiver), "l", "-p", "-sccUTF-8", "--", str(archive)],
             stdin=subprocess.DEVNULL, capture_output=True, text=True,
-            errors="replace", timeout=30, check=False,
+            encoding="utf-8", errors="replace", timeout=30, check=False,
         ).stdout
     except (OSError, subprocess.TimeoutExpired):
         return None
@@ -280,7 +280,7 @@ def _restore_atmos(appdata: Path, cache: Path) -> bool:
     git, repo = git_binary(), _gamma_repo(cache)
     if git is None or repo is None:
         return False
-    base = [git, "-c", f"safe.directory={repo}", "--git-dir", str(repo)]
+    base = [git, "-c", f"safe.directory={Path(repo).as_posix()}", "--git-dir", str(repo)]
     env = {**child_environment(), "GIT_TERMINAL_PROMPT": "0"}
     try:
         names = subprocess.run(

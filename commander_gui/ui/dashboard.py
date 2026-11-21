@@ -803,7 +803,8 @@ class DashboardPage(QWidget):
         # GE-Proton version) and the same gui_settings "runner" key as the
         # Play page's own runner selector.
         self.runner_combo = _field_combo()
-        self._populate_runner_combo(self.runner_combo)
+        if os.name != "nt":  # a Proton scan for a row Windows never shows
+            self._populate_runner_combo(self.runner_combo)
         self.runner_combo.currentIndexChanged.connect(
             lambda _index, combo=self.runner_combo: self._on_runner_switch(combo)
         )
@@ -1612,15 +1613,15 @@ class DashboardPage(QWidget):
         # nothing outside this method touches it, so rebuilding is enough.
         # Icon plus a short label: the bare glyph alone, tucked in the card's
         # corner, was easy to miss and did not say what it opened.
-        deck_button = QPushButton(" " + tr("Deck Mode"))
-        deck_button.setObjectName("deckModeButton")
-        deck_button.setIcon(_deck_mode_icon())
-        deck_button.setIconSize(QSize(28, 28))
-        deck_button.setFixedHeight(34)
-        deck_button.setToolTip(tr("Switch to Steam Deck Mode"))
-        deck_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        deck_button.clicked.connect(lambda: switch_mode(self.window, deck=True))
         if os.name != "nt":  # Deck Mode is SteamOS-only
+            deck_button = QPushButton(" " + tr("Deck Mode"))
+            deck_button.setObjectName("deckModeButton")
+            deck_button.setIcon(_deck_mode_icon())
+            deck_button.setIconSize(QSize(28, 28))
+            deck_button.setFixedHeight(34)
+            deck_button.setToolTip(tr("Switch to Steam Deck Mode"))
+            deck_button.setCursor(Qt.CursorShape.PointingHandCursor)
+            deck_button.clicked.connect(lambda: switch_mode(self.window, deck=True))
             header.addWidget(deck_button)
         layout.addLayout(header)
         profile = self.settings.active_profile

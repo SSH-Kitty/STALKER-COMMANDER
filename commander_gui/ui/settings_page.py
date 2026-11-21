@@ -893,7 +893,7 @@ class SettingsPage(QWidget):
             self.anomaly_edit.setText(anomaly)
             self.gamma_edit.setText(gamma)
             self.cache_edit.setText(cache)
-            if bad := wine_unsafe_folder(anomaly, gamma):
+            if os.name != "nt" and (bad := wine_unsafe_folder(anomaly, gamma)):  # a Wine-only problem
                 warn_wine_unsafe_folder(self, bad)
                 self._load_folders()
                 return
@@ -1399,6 +1399,13 @@ class SettingsPage(QWidget):
         kind = tr("Unstable") if unstable else tr("Stable")
         self._build_label.setText(kind)
         tint(self._build_label, WARN if unstable else OK_GREEN)
+        if os.name == "nt":
+            # Switching builds is the AppImage's (and its note talks about
+            # git and the AUR); Windows builds come from the Releases page.
+            box = getattr(self, "_build_box", None)
+            if box is not None:
+                box.setVisible(False)
+            return
         appimage = commander_appimage_path() is not None
         if unstable:
             self._switch_build_button.setText(tr("Go back to the stable build"))

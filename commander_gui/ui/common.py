@@ -1999,6 +1999,18 @@ def open_in_file_manager(path: str | Path) -> bool:
     ``--new-window`` to avoid being absorbed into a running instance).
     """
     path = str(path)
+    if os.name == "nt":
+        # Explorer directly. The Linux openers below could be picked up from
+        # an MSYS2/Git Bash PATH, and Explorer shows Documents (and reports
+        # success) for a folder that doesn't exist.
+        target = Path(path)
+        if not target.exists():
+            return False
+        try:
+            os.startfile(str(target))
+            return True
+        except OSError:
+            return False
     desktop = (os.environ.get("XDG_CURRENT_DESKTOP") or "").lower()
     command: list[str] | None = None
 
@@ -2090,6 +2102,42 @@ def _raise_main_window() -> None:
             return
 
 
+def _notify_windows(title: str, message: str) -> None:
+    """A Windows notification (toast), through the tray icon.
+
+    notify-send doesn't exist on Windows, so update notices, the crash
+    notice and the "still running in the tray" hint never appeared. A
+    message needs a tray icon to come from: COMMANDER's own when it shows
+    one, else a temporary one, gone again once the message has had its
+    time. Clicking it brings COMMANDER to the front; the buttons the Linux
+    card can carry are on the window that opens.
+    """
+    from PySide6.QtWidgets import QSystemTrayIcon
+
+    app = QApplication.instance()
+    if app is None or not QSystemTrayIcon.isSystemTrayAvailable():
+        return
+    tray = None
+    for widget in QApplication.topLevelWidgets():
+        own = getattr(widget, "_tray", None)
+        if isinstance(own, QSystemTrayIcon) and own.isVisible():
+            tray = own
+            break
+    temporary = tray is None
+    if temporary:
+        tray = QSystemTrayIcon(QApplication.windowIcon(), app)
+        tray.setToolTip("STALKER COMMANDER")
+        tray.show()
+    try:
+        tray.messageClicked.disconnect(_raise_main_window)
+    except (RuntimeError, TypeError):
+        pass  # not connected yet
+    tray.messageClicked.connect(_raise_main_window)
+    tray.showMessage(title, message, QApplication.windowIcon(), 10000)
+    if temporary:
+        QTimer.singleShot(15000, tray, tray.deleteLater)
+
+
 def notify_desktop(
     title: str,
     message: str,
@@ -2109,6 +2157,9 @@ def notify_desktop(
     ``actions`` is a (label, callback) button that does the same first.
     The desktop draws the card itself - its colours follow the system theme.
     """
+    if os.name == "nt":
+        _notify_windows(title, message)
+        return
     exe = shutil.which("notify-send")
     if exe is None:
         return

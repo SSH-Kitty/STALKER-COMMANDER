@@ -428,5 +428,68 @@ class FolderPickerTests(unittest.TestCase):
                 ctypes.windll.kernel32.SetFileAttributesW(str(secret), 0x80)
 
 
+
+@unittest.skipUnless(os.name == "nt", "Windows only")
+class DataHomeTests(unittest.TestCase):
+    def test_local_appdata_unless_an_older_build_used_the_linux_folder(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home, local = Path(tmp) / "home", Path(tmp) / "Local"
+            env = {k: v for k, v in os.environ.items() if k != "XDG_DATA_HOME"}
+            env["LOCALAPPDATA"] = str(local)
+            with patch.dict(os.environ, env, clear=True), patch("pathlib.Path.home", return_value=home):
+                self.assertEqual(config.data_home(), local)
+                (home / ".local" / "share" / "stalker-gamma-commander" / "backups").mkdir(parents=True)
+                self.assertEqual(config.data_home(), home / ".local" / "share")
+                (local / "stalker-gamma-commander").mkdir(parents=True)
+                self.assertEqual(config.data_home(), local)
+
+
+@unittest.skipUnless(os.name == "nt", "Windows only")
+class SteamLibraryTests(unittest.TestCase):
+    """Lossless Scaling installed through Steam is found on Windows too."""
+
+    def test_libraries_from_the_registry_and_libraryfolders_vdf(self):
+        from commander_gui import launcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            steam = Path(tmp) / "Steam"
+            (steam / "steamapps").mkdir(parents=True)
+            other = Path(tmp) / "Games Library"
+            other.mkdir()
+            escaped = str(other).replace("\\", "\\\\")
+            (steam / "steamapps" / "libraryfolders.vdf").write_text(
+                '"libraryfolders"\n{\n\t"1"\n\t{\n\t\t"path"\t\t"' + escaped + '"\n\t}\n}\n', encoding="utf-8"
+            )
+            with patch.object(launcher, "_windows_steam_roots", return_value=[steam]), patch(
+                "commander_gui.gui_settings.load_gui_settings", return_value={}
+            ):
+                self.assertEqual(launcher._steam_library_paths(), [steam.resolve(), other.resolve()])
+
+
+@unittest.skipUnless(os.name == "nt", "Windows only")
+class WindowsNotificationTests(unittest.TestCase):
+    def test_notifications_go_through_a_tray_icon(self):
+        from PySide6.QtWidgets import QApplication, QSystemTrayIcon
+
+        from commander_gui.ui import common
+
+        QApplication.instance() or QApplication([])
+        shown = []
+        with patch.object(QSystemTrayIcon, "isSystemTrayAvailable", return_value=True), patch.object(
+            QSystemTrayIcon, "showMessage", lambda self, *args: shown.append(args[:2])
+        ), patch("shutil.which", side_effect=AssertionError("notify-send looked up")):
+            common.notify_desktop("GAMMA update", "A new version is out.")
+        self.assertEqual(shown, [("GAMMA update", "A new version is out.")])
+
+    def test_open_folder_uses_explorer_and_refuses_a_missing_one(self):
+        from commander_gui.ui import common
+
+        with tempfile.TemporaryDirectory() as tmp, patch("os.startfile") as start:
+            self.assertTrue(common.open_in_file_manager(tmp))
+            start.assert_called_once_with(str(Path(tmp)))
+            self.assertFalse(common.open_in_file_manager(Path(tmp) / "gone"))
+            start.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -385,6 +385,7 @@ class MainWindow(QMainWindow):
         self.setStatusBar(_NoticeStatusBar(self))
         gui_state = gui_settings.load_gui_settings()
         self.resize(gui_state["window_width"], gui_state["window_height"])
+        self._restore_position(gui_state)
         self.settings = load_settings()
         self.custom_title_bar = False
         self._drag_filter = WindowDragFilter(self)
@@ -695,7 +696,11 @@ class MainWindow(QMainWindow):
             previous_timer.deleteLater()
         self._mod_counter_timer = QTimer(self)
         self._mod_counter_timer.setInterval(5000)
-        self._mod_counter_timer.timeout.connect(self.update_mod_counter)
+        # Not while hidden in the tray: nobody sees the counter then, and
+        # show_from_tray() brings it up to date.
+        self._mod_counter_timer.timeout.connect(
+            lambda: None if getattr(self, "_in_tray", False) or self.isMinimized() else self.update_mod_counter()
+        )
         self._mod_counter_timer.start()
 
         # Pages are built lazily (see _ensure_page()), not here: constructing
@@ -1367,6 +1372,10 @@ class MainWindow(QMainWindow):
 
         def on_result(path: object) -> None:
             close_progress()
+            # A child of the window: one more was left behind with every
+            # attempt. Freed once the worker is done (after a cancel it
+            # still reports progress until its download read times out).
+            bridge.deleteLater()
             if on_installed is not None:
                 on_installed()
             restart = QMessageBox.question(
@@ -1387,6 +1396,7 @@ class MainWindow(QMainWindow):
 
         def on_error(message: str) -> None:
             close_progress()
+            bridge.deleteLater()  # see on_result
             # Cancel ends the download with an error; the user asked for it.
             if not task.cancel_event.is_set():
                 self._show_commander_self_update_error(message)
@@ -2136,7 +2146,11 @@ class MainWindow(QMainWindow):
     def _on_tray_activated(self, reason) -> None:
         if reason != QSystemTrayIcon.ActivationReason.Trigger:
             return
-        if self.isVisible() and not self.isMinimized() and self.isActiveWindow():
+        # On Windows the click itself takes focus from the window (the
+        # taskbar gets it), so "active" was always False there and a click
+        # could only ever show it: shown and not minimised is enough.
+        active = os.name == "nt" or self.isActiveWindow()
+        if self.isVisible() and not self.isMinimized() and active:
             self._hide_to_tray()
         else:
             self.show_from_tray()
@@ -2152,6 +2166,7 @@ class MainWindow(QMainWindow):
         # not count as closing the last one and quit COMMANDER.
         QApplication.setQuitOnLastWindowClosed(False)
         self.hide()
+        self._in_tray = True
         if hint and not gui_settings.load_gui_settings().get("tray_hint_shown"):
             gui_settings.save_gui_settings(tray_hint_shown=True)
             notify_desktop(tr("COMMANDER is still running"), tr("Click its tray icon to open it again."))
@@ -2171,11 +2186,13 @@ class MainWindow(QMainWindow):
     def show_from_tray(self) -> None:
         """Bring the window back - from the tray, or from a second launch."""
         self._hidden_for_game = False
+        self._in_tray = False
         QApplication.setQuitOnLastWindowClosed(True)
         self.setWindowState(self.windowState() & ~Qt.WindowState.WindowMinimized)
         self.show()
         self.raise_()
         self.activateWindow()
+        self.update_mod_counter()  # paused while hidden
 
     def _on_game_running_changed(self, running: bool) -> None:
         """Out of the way while playing, back once the game closes."""
@@ -2243,11 +2260,28 @@ class MainWindow(QMainWindow):
         event.accept()
 
     def _save_geometry(self) -> None:
+        geometry = self.normalGeometry()
+        position = {"window_x": geometry.x(), "window_y": geometry.y()} if os.name == "nt" else {}
         gui_settings.save_gui_settings(
-            window_width=self.normalGeometry().width(),
-            window_height=self.normalGeometry().height(),
+            window_width=geometry.width(),
+            window_height=geometry.height(),
             window_maximized=self.isMaximized(),
+            **position,
         )
+
+    def _restore_position(self, gui_state: dict) -> None:
+        """Windows: reopen where the window was, on the screen it was on -
+        unless that screen is gone, then Windows places it as usual.
+        (Linux leaves placement to the window manager; Wayland ignores it.)"""
+        x, y = gui_state.get("window_x"), gui_state.get("window_y")
+        if os.name != "nt" or x is None or y is None:
+            return
+        from PySide6.QtCore import QPoint
+        from PySide6.QtGui import QGuiApplication
+
+        # Part of the title area must be on a screen to drag it back.
+        if QGuiApplication.screenAt(QPoint(x + 60, y + 15)) is not None:
+            self.move(x, y)
 
     def update_mod_counter(self) -> None:
         """Refresh the topbar's always-visible active/total mod count.

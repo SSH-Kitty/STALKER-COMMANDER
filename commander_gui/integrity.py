@@ -1170,7 +1170,7 @@ def restore_gamma_overlay(
     env["GIT_TERMINAL_PROMPT"] = "0"
     try:
         listing = subprocess.run(
-            [git, "-c", f"safe.directory={repo}", "--git-dir", str(repo),
+            [git, "-c", f"safe.directory={Path(repo).as_posix()}", "--git-dir", str(repo),
              "ls-tree", "-r", "--name-only", "HEAD", "--", _GAMMA_PATCH_ROOT],
             capture_output=True, text=True, timeout=60, env=env, check=True,
         ).stdout.splitlines()
@@ -1193,7 +1193,7 @@ def restore_gamma_overlay(
             continue
         try:
             data = subprocess.run(
-                [git, "-c", f"safe.directory={repo}", "--git-dir", str(repo),
+                [git, "-c", f"safe.directory={Path(repo).as_posix()}", "--git-dir", str(repo),
                  "show", f"HEAD:{source}"],
                 capture_output=True, timeout=120, env=env, check=True,
             ).stdout
@@ -1266,7 +1266,7 @@ def repo_branches(profile) -> dict[str, str]:
 
 
 def _git_command(git: str, repo: Path, *args: str) -> list[str]:
-    return [git, "-c", f"safe.directory={repo}", "--git-dir", str(repo), *args]
+    return [git, "-c", f"safe.directory={Path(repo).as_posix()}", "--git-dir", str(repo), *args]
 
 
 def _git_env() -> dict[str, str]:

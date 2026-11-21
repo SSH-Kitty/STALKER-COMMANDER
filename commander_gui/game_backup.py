@@ -89,8 +89,9 @@ class BackupInfo:
 
 
 def backups_root() -> Path:
-    base = os.environ.get("XDG_DATA_HOME") or os.path.join(Path.home(), ".local", "share")
-    return Path(base) / "stalker-gamma-commander" / "backups"
+    from .config import data_home
+
+    return data_home() / "stalker-gamma-commander" / "backups"
 
 
 def _slug(name: str) -> str:

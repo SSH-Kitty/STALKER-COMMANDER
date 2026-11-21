@@ -151,6 +151,15 @@ def send_ctrl_c(pid: int, *, timeout: float = 5.0) -> bool:
     """
     if os.name != "nt":
         return False
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return False
+    if _shares_our_console(pid):
+        # Ctrl+C goes to every process on that console - this one too. Only
+        # possible for a child started without CREATE_NO_WINDOW (COMMANDER
+        # itself always adds it, see main._hide_child_consoles).
+        return False
     import subprocess
     import sys
     from pathlib import Path
@@ -165,7 +174,7 @@ def send_ctrl_c(pid: int, *, timeout: float = 5.0) -> bool:
     with _console_lock:
         try:
             done = subprocess.run(
-                [sys.executable, "-m", "commander_gui.winjob", str(int(pid))],
+                [sys.executable, "-m", "commander_gui.winjob", str(pid)],
                 env=env,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
@@ -177,6 +186,18 @@ def send_ctrl_c(pid: int, *, timeout: float = 5.0) -> bool:
         except (OSError, ValueError, subprocess.SubprocessError):
             return False
     return done.returncode == 0
+
+
+def _shares_our_console(pid: int) -> bool:
+    """True when *pid* is attached to this process's console."""
+    import ctypes
+
+    members = (ctypes.c_uint * 256)()
+    try:
+        count = ctypes.windll.kernel32.GetConsoleProcessList(members, 256)
+    except (AttributeError, OSError):
+        return False
+    return pid in members[: min(count, 256)]
 
 
 def _send_ctrl_c_here(pid: int) -> bool:

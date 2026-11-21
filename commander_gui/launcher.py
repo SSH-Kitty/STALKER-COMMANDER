@@ -960,6 +960,30 @@ def _steam_client_root() -> Path | None:
     return None
 
 
+def _windows_steam_roots() -> list[Path]:
+    """Where Steam is installed on Windows: the registry, then the default."""
+    found: list[Path] = []
+    try:
+        import winreg
+    except ImportError:
+        return found
+    for hive, key, value in (
+        (winreg.HKEY_CURRENT_USER, r"Software\Valve\Steam", "SteamPath"),
+        (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Valve\Steam", "InstallPath"),
+        (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Valve\Steam", "InstallPath"),
+    ):
+        try:
+            with winreg.OpenKey(hive, key) as handle:
+                path = winreg.QueryValueEx(handle, value)[0]
+        except OSError:
+            continue
+        if isinstance(path, str) and path:
+            found.append(Path(path))
+    program_files = os.environ.get("ProgramFiles(x86)") or r"C:\Program Files (x86)"
+    found.append(Path(program_files) / "Steam")
+    return found
+
+
 def _steam_library_paths() -> list[Path]:
     """Steam library folders: the main install plus any custom libraries."""
     roots: list[Path] = []
@@ -972,7 +996,8 @@ def _steam_library_paths() -> list[Path]:
                 roots.append(resolved)
         except (OSError, RuntimeError):
             pass
-    for candidate in STEAM_ROOT_CANDIDATES:
+    candidates = _windows_steam_roots() if os.name == "nt" else list(STEAM_ROOT_CANDIDATES)
+    for candidate in candidates:
         try:
             resolved = candidate.resolve()
         except (OSError, RuntimeError):
@@ -989,7 +1014,8 @@ def _steam_library_paths() -> list[Path]:
             continue
         for match in re.finditer(r'"path"\s+"([^"]+)"', text):
             try:
-                library = Path(match.group(1)).resolve()
+                # VDF escapes backslashes: "D:\\SteamLibrary" on Windows.
+                library = Path(match.group(1).replace("\\\\", "\\")).resolve()
             except (OSError, RuntimeError):
                 continue
             if library.is_dir() and library not in roots:
@@ -1442,7 +1468,14 @@ def _rotate_log(path: Path) -> None:
         if path.is_file():
             path.replace(path.with_name(path.name + ".1"))
     except OSError:
-        pass
+        # Windows won't rename a file another process still has open (an
+        # MO2 left running from the last launch): empty it instead, so this
+        # launch's log still starts empty.
+        try:
+            with open(path, "r+b") as stream:
+                stream.truncate(0)
+        except OSError:
+            pass
 
 
 #: Variables shown in commander.log for every launch: the runner's, the

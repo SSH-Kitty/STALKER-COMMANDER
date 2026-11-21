@@ -127,10 +127,13 @@ def _list_archive_paths(archiver: Path, archive: Path) -> list[str]:
         result = subprocess.run(
             # -p with no password: an encrypted archive fails instead of
             # waiting for a password on a terminal nobody is looking at.
-            [str(archiver), "l", "-slt", "-p", "--", str(archive)],
+            # -sccUTF-8: names in UTF-8, not the console's code page (on
+            # Windows a Cyrillic name otherwise came back garbled).
+            [str(archiver), "l", "-slt", "-p", "-sccUTF-8", "--", str(archive)],
             stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
+            encoding="utf-8",
             errors="replace",
             timeout=30,
             check=False,
