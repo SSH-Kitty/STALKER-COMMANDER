@@ -38,7 +38,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .. import gui_settings
+from .. import gui_settings, winruntimes
 from ..cli_runner import cli_command, cli_resume_args
 from ..config import logs_dir
 from ..dependencies import check_all_dependencies
@@ -957,7 +957,8 @@ class _DependencyRow(QWidget):
         layout.setSpacing(10)
         self.icon = _StateIcon()
         layout.addWidget(self.icon)
-        layout.addWidget(QLabel(name), 1)
+        self.label = QLabel(name)
+        layout.addWidget(self.label, 1)
 
     def set_state(self, state: str) -> None:
         self.icon.set_state(state)
@@ -1775,8 +1776,23 @@ class InstallPage(QWidget):
         self.winetricks_button.setToolTip(
             tr("Installs Windows runtimes (VC++, DirectX) into the Wine prefix.")
         )
-        self.winetricks_button.clicked.connect(self._start_winetricks)
-        self.winetricks_button.setVisible(os.name != "nt")
+        if os.name == "nt":
+            # Windows has no Wine prefix: the one dependency is Microsoft's
+            # Visual C++ runtime, and the button installs just that.
+            self.winetricks_button.clicked.connect(lambda _checked=False: self._start_win_runtimes())
+            self.winetricks_button.setToolTip(
+                tr("Downloads and installs the Windows runtimes the game needs (Visual C++ and DirectX).")
+            )
+            runtime_keys = {rt.key for rt in winruntimes.RUNTIMES}
+            for key, row in self.deps_rows.items():
+                if key not in runtime_keys:
+                    row.hide()
+                    if key in ("umu", "wine"):  # a group of its own
+                        row.parentWidget().hide()
+            for rt in winruntimes.RUNTIMES:
+                self.deps_rows[rt.key].label.setText(tr(rt.label))
+        else:
+            self.winetricks_button.clicked.connect(self._start_winetricks)
         step_action(self.winetricks_button)
         self.wt_progress = ProgressArea(show_table=False, show_log=True, log_max_height=180)
         # No Idle/percent bar for Dependencies - the status label and log
@@ -1880,7 +1896,9 @@ class InstallPage(QWidget):
             tr("Install or update GAMMA. Anomaly is installed first if it is missing.")
         )
         # Wrapped: clicked() passes a bool that would land in skip_confirm.
-        self.install_button.clicked.connect(lambda: self._start_full_install())
+        self.install_button.clicked.connect(
+            lambda: None if self._win_runtimes_block() else self._start_full_install()
+        )
         step_action(self.install_button)
 
         # -- Step 5: verify integrity --
@@ -2752,7 +2770,12 @@ class InstallPage(QWidget):
         # and fills in the archive.
         self.checkboxes["offline"].setChecked(offline)
         self._auto_active = True
-        if self._wt_installed is True or os.name == "nt":  # no Wine runtimes on Windows
+        if os.name == "nt":  # no Wine runtimes: the Visual C++ and DirectX ones
+            if winruntimes.missing():
+                self._start_win_runtimes(then_install=True)
+            else:
+                self._start_auto_gamma()
+        elif self._wt_installed is True:
             self._start_auto_gamma()
         else:
             self._start_winetricks(then_install=True)
@@ -2972,6 +2995,19 @@ class InstallPage(QWidget):
 
     def _refresh_deps_tiles(self) -> None:
         """Step 2's tiles and verb chips, from the last dependency check."""
+        if os.name == "nt":
+            lacking = {rt.key for rt in winruntimes.missing()}
+            for rt in winruntimes.RUNTIMES:
+                self.deps_rows[rt.key].set_state("problem" if rt.key in lacking else "ok")
+            done = len(winruntimes.RUNTIMES) - len(lacking)
+            self.deps_tiles["runtimes"].set_state(
+                "warn" if lacking else "ok", f"{done}/{len(winruntimes.RUNTIMES)}", tr("Windows runtimes")
+            )
+            profile = self.window.settings.active_profile
+            _space_tile(self.deps_tiles["space"], profile.gamma if profile else "")
+            for key in ("prefix", "runner"):
+                self.deps_tiles[key].set_state("idle", "-", tr("Not used on Windows"))
+            return
         verbs = self._wt_verbs
         if self._wt_installed is True and verbs is None:
             verbs = dict.fromkeys((*WINETRICKS_VERBS, "umu"), True)  # paused while the game runs
@@ -3081,6 +3117,10 @@ class InstallPage(QWidget):
         self.winetricks_button.setEnabled(
             self._wt_installed is not None and not game_running()
         )
+        if os.name == "nt":
+            self.winetricks_button.setText(tr("Install Dependencies"))
+            self.winetricks_button.setVisible(bool(winruntimes.missing()))
+            self.winetricks_button.setEnabled(self._vc_task is None and not busy)
         self.anomaly_edit.setEnabled(True)
         self.gamma_edit.setEnabled(True)
         self.cache_edit.setEnabled(True)
@@ -3886,7 +3926,28 @@ class InstallPage(QWidget):
         self.full_progress.status_message(tr("Cancelling installation"))
         runner.cancel()
 
+    def _win_runtimes_block(self) -> bool:
+        """Windows: the game does not start without the Visual C++ and DirectX
+        runtimes, so offer them before a manual install. True = stop here."""
+        if os.name != "nt" or not winruntimes.missing():
+            return False
+        answer = QMessageBox.question(
+            self,
+            tr("Install the Windows runtimes first?"),
+            tr("The game needs the Visual C++ and DirectX runtimes and they are not installed yet."),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            labels={
+                QMessageBox.StandardButton.Yes: tr("Install them"),
+                QMessageBox.StandardButton.No: tr("Not now"),
+            },
+        )
+        if answer == QMessageBox.StandardButton.Yes:
+            self._start_win_runtimes()
+        return answer == QMessageBox.StandardButton.Yes
+
     def _on_anomaly_button_clicked(self) -> None:
+        if self._win_runtimes_block():
+            return
         profile = self.window.settings.active_profile
         if profile is not None and not self._anomaly_failed and anomaly_installed(profile.anomaly):
             self._start_anomaly_reinstall()
@@ -5893,9 +5954,13 @@ class InstallPage(QWidget):
     def _refresh_winetricks_status(self):
         if not self._winetricks_status_enabled:
             return
-        if os.name == "nt":  # native Windows: nothing to install
-            self._wt_installed = True
-            self.wt_status.set_state(True)
+        if os.name == "nt":  # native Windows: only the Visual C++ runtime
+            self._wt_installed = True  # nothing else waits on a Wine prefix
+            if winruntimes.missing():
+                self.wt_status.set_state(False, tr("Windows runtimes are missing"))
+            else:
+                self.wt_status.set_state(True)
+            self._refresh_deps_tiles()
             self._update_button_states()
             return
         if self._wt_checking:
@@ -5955,6 +6020,43 @@ class InstallPage(QWidget):
         self.wt_status.set_state(None, tr("status unavailable"), pending_text=tr("Unknown"))
         self.wt_status.set_status_tooltip(tr("Could not query dependencies: {error}", error=message))
         self._update_button_states()
+
+    _vc_task: BackgroundTask | None = None
+    _vc_then_install = False
+
+    def _start_win_runtimes(self, then_install: bool = False) -> None:
+        """Windows: download and install the Visual C++ and DirectX runtimes.
+        ``then_install``: Automatic - Anomaly and GAMMA start once they are in."""
+        self._winetricks_status_enabled = True
+        if self._vc_task is not None:
+            return
+        self._vc_then_install = then_install
+        self.wt_progress.status_label.setText(tr("Installing the Windows runtimes"))
+        self._refresh_wt_extra()
+        task = BackgroundTask(winruntimes.install, parent=self)
+        task.result.connect(self._on_win_runtimes_done)
+        task.error.connect(self._on_win_runtimes_error)
+        self._vc_task = task
+        self._update_button_states()
+        task.start()
+
+    def _on_win_runtimes_done(self, message: str) -> None:
+        self._vc_task = None
+        self.wt_progress.status_label.setText(message)
+        self._refresh_wt_extra()
+        self._refresh_winetricks_status()
+        if self._vc_then_install:
+            self._vc_then_install = False
+            self._start_auto_gamma()
+
+    def _on_win_runtimes_error(self, message: str) -> None:
+        self._vc_task = None
+        self._auto_active = False  # an Automatic run stops here
+        self._vc_then_install = False
+        self.wt_progress.status_label.setText("")
+        self._refresh_wt_extra()
+        self._refresh_winetricks_status()
+        QMessageBox.warning(self, tr("Couldn't install the Windows runtimes"), message)
 
     def _start_winetricks(self, then_install: bool = False):
         """``then_install``: Automatic - no confirm pop-up, and Anomaly and

@@ -1122,6 +1122,11 @@ class DashboardPage(QWidget):
             else:
                 self._draw_sizes(None)
 
+        # Walking ~100k files competes with a running install for the disk and
+        # the GIL, and the numbers are changing under it anyway.
+        if getattr(self.window, "install_busy", False):
+            return
+
         def compute() -> dict[str, int]:
             sizes = {k: dir_size(p) for k, p in paths.items()}
             gamma = Path(profile.gamma) if profile.gamma else None

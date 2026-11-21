@@ -1006,6 +1006,12 @@ class CommandRunner(QObject):
         self._thread: QThread | None = None
         self._worker = None
         self._cancel_requested = False
+        # Output lines are handed to the UI in ~100 ms batches; see _on_line.
+        self._pending_lines: list[str] = []
+        self._flush_timer = QTimer(self)
+        self._flush_timer.setSingleShot(True)
+        self._flush_timer.setInterval(100)
+        self._flush_timer.timeout.connect(self._flush_lines)
 
     @property
     def was_cancelled(self) -> bool:
@@ -1082,12 +1088,31 @@ class CommandRunner(QObject):
         thread = self._thread
         if thread is not None:
             thread.quit()
+        self._flush_lines()  # every line must arrive before finished
         if not _SHUTTING_DOWN:
             self.finished.emit(rc, output)
 
     def _on_line(self, line: str) -> None:
-        if not _SHUTTING_DOWN:
-            self.line.emit(line)
+        # A download prints progress lines many times a second; handling each
+        # one on the GUI thread (table, bar, log) starved clicks and tab
+        # switches. Batch them, and of several progress lines for the same
+        # item and step in one batch only the newest matters.
+        if _SHUTTING_DOWN:
+            return
+        self._pending_lines.append(line)
+        if not self._flush_timer.isActive():
+            self._flush_timer.start()
+
+    def _flush_lines(self) -> None:
+        lines, self._pending_lines = self._pending_lines, []
+        if not lines or _SHUTTING_DOWN:
+            return
+        events = [parse_progress_line(strip_ansi(ln)) for ln in lines]
+        newest = {(e.name, e.operation): i for i, e in enumerate(events) if e}
+        for i, ln in enumerate(lines):
+            e = events[i]
+            if e is None or newest[(e.name, e.operation)] == i:
+                self.line.emit(ln)
 
     def _on_thread_finished(self, thread: QThread | None = None) -> None:
         # The worker thread has fully stopped; it is now safe to release the
