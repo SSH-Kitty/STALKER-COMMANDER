@@ -18,7 +18,7 @@ from pathlib import Path
 from .atomic import write_text
 from .config import gui_settings_path
 from .i18n import LANGUAGE_INFO
-from .themes import LIVE_TIMES, THEME_INFO
+from .themes import FONT_FAMILIES, LIVE_TIMES, THEME_INFO, migrate_font_family
 
 try:
     import fcntl
@@ -246,15 +246,8 @@ def load_gui_settings() -> dict:
         except (TypeError, ValueError, OverflowError):
             size = _DEFAULTS[key]
         data[key] = min(3840, max(640, size))
-    _allowed_fonts = {
-        "Exo 2",
-        "Noto Sans",
-        "DejaVu Sans",
-        "Liberation Sans",
-        "Inter",
-    }
-    font_family = data.get("font_family")
-    if not isinstance(font_family, str) or font_family not in _allowed_fonts:
+    font_family = migrate_font_family(data.get("font_family"))
+    if not isinstance(font_family, str) or font_family not in FONT_FAMILIES:
         data["font_family"] = "Exo 2"
     if not isinstance(data.get("welcome_seen_version"), str):
         data["welcome_seen_version"] = ""

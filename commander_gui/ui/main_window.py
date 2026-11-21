@@ -61,6 +61,7 @@ from ..self_update import (
 )
 from ..settings import load_settings
 from ..themes import (
+    FONT_FAMILIES,
     THEME_INFO,
     active_theme,
     active_theme_tokens,
@@ -959,13 +960,7 @@ class MainWindow(QMainWindow):
         self._status_font_combo = NoWheelComboBox()
         self._status_font_combo.setStyleSheet(_STATUS_COMBO_STYLE)
         self._status_font_combo.setFixedHeight(21)
-        for family in (
-            "Exo 2",
-            "Noto Sans",
-            "DejaVu Sans",
-            "Liberation Sans",
-            "Inter",
-        ):
+        for family in FONT_FAMILIES:
             self._status_font_combo.addItem(family, family)
         self._status_font_combo.currentIndexChanged.connect(
             self._on_status_font_family

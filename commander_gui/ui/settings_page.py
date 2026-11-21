@@ -54,6 +54,7 @@ from ..steam_shortcuts import (
     add_to_steam,
 )
 from ..themes import (
+    FONT_FAMILIES,
     LIVE_THEMES,
     LIVE_TIME_CHOICES,
     THEME_INFO,
@@ -966,13 +967,7 @@ class SettingsPage(QWidget):
             tr("Applies immediately, unless a background task is running."),
         )
         self._font_family_combo = _combo()
-        for family in (
-            "Exo 2",
-            "Noto Sans",
-            "DejaVu Sans",
-            "Liberation Sans",
-            "Inter",
-        ):
+        for family in FONT_FAMILIES:
             self._font_family_combo.addItem(family, family)
         self._font_family_combo.currentIndexChanged.connect(self._on_font_family)
         self._font_size_combo = _combo()

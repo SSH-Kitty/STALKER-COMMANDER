@@ -273,7 +273,7 @@ class OverlayTests(unittest.TestCase):
         from commander_gui.ui import graphics_window
 
         app = QApplication.instance() or QApplication([])
-        app.setStyleSheet(build_stylesheet("gamma", font_size=18, font_family="DejaVu Sans"))
+        app.setStyleSheet(build_stylesheet("gamma", font_size=18, font_family="Verdana"))
         try:
             window = graphics_window.GraphicsWindow()
             window.toggle()

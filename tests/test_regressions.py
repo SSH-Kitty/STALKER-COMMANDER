@@ -19,6 +19,7 @@ from unittest.mock import Mock, patch
 from commander_gui import assistant_launcher, autostart, gui_settings, network
 from commander_gui.assistant_launcher import assistant_command, launch_assistant
 from commander_gui.atomic import write_text
+from commander_gui.themes import FONT_FAMILIES
 from commander_gui.dependencies import (
     check_umu,
     check_winetricks,
@@ -7335,7 +7336,7 @@ class ModCounterTests(unittest.TestCase):
         ):
             window = MainWindow()
             self.assertEqual(window._status_theme_combo.currentData(), active_theme())
-            # The style is app-wide: left on "midnight"/18px/"Inter" (a font that
+            # The style is app-wide: left on "midnight"/18px/the last font (a font that
             # may not be installed), every widget any later test builds pays
             # for it - the rest of the suite ran minutes slower.
             app = QApplication.instance()
@@ -7346,12 +7347,12 @@ class ModCounterTests(unittest.TestCase):
             # Exactly what settings_page.py's pickers call.
             window.apply_theme("midnight")
             window.apply_font_size(18)
-            window.apply_font_family("Inter")
+            window.apply_font_family(FONT_FAMILIES[-1])
 
             self.assertEqual(active_theme(), "midnight")
             self.assertEqual(window._status_theme_combo.currentData(), "midnight")
             self.assertEqual(window._status_fontsize_combo.currentData(), 18)
-            self.assertEqual(window._status_font_combo.currentData(), "Inter")
+            self.assertEqual(window._status_font_combo.currentData(), FONT_FAMILIES[-1])
 
 
 class UserModsTrackerTests(unittest.TestCase):
@@ -8952,18 +8953,18 @@ class UserModsTrackerTests(unittest.TestCase):
             self.assertEqual(window.status_bar_refreshes, 1)
 
             page._font_family_combo.setCurrentIndex(
-                page._font_family_combo.findData("Inter")
+                page._font_family_combo.findData(FONT_FAMILIES[-1])
             )
-            self.assertEqual(gui_settings.load_gui_settings()["font_family"], "Inter")
+            self.assertEqual(gui_settings.load_gui_settings()["font_family"], FONT_FAMILIES[-1])
             self.assertEqual(window.status_bar_refreshes, 2)
 
             # The other direction already worked and must keep working: a
             # change made from the status bar shows up on this page's own
             # combos the next time Settings is opened (refresh()).
-            gui_settings.save_gui_settings(font_size=21, font_family="Liberation Sans")
+            gui_settings.save_gui_settings(font_size=21, font_family=FONT_FAMILIES[3])
             page.refresh()
             self.assertEqual(page._font_size_combo.currentData(), 21)
-            self.assertEqual(page._font_family_combo.currentData(), "Liberation Sans")
+            self.assertEqual(page._font_family_combo.currentData(), FONT_FAMILIES[3])
 
     def _fake_discord(self, runtime_dir: str, *, answer: bool = True):
         """A one-connection stand-in for the Discord client's IPC socket.
