@@ -1955,7 +1955,14 @@ class MainWindow(QMainWindow):
         # two are kept, so switching back to a theme (Winter's photo is slow
         # to decode and scale) is a blit too.
         dpr = self.devicePixelRatioF()
-        key = (self.width(), self.height(), dpr, tuple(active_theme_tokens().items()))
+        screen = self.screen().size()
+        if screen != self.__dict__.get("_backdrop_screen", screen):
+            # Moved to a monitor of another size: the scene is placed by the
+            # screen's size, so all of it - not only this region - is redrawn.
+            self.update()
+        self._backdrop_screen = screen
+        # The screen size is in the key: paint_backdrop places the scene by it.
+        key = (self.width(), self.height(), dpr, screen.width(), screen.height(), tuple(active_theme_tokens().items()))
         cache = self.__dict__.setdefault("_backdrop_cache", {})
         pixmap = cache.pop(key, None)
         if pixmap is None:
@@ -1964,7 +1971,7 @@ class MainWindow(QMainWindow):
             pixmap.fill(QColor(0, 0, 0))
             cache_painter = QPainter(pixmap)
             try:
-                paint_backdrop(cache_painter, self.rect(), self.screen().size())
+                paint_backdrop(cache_painter, self.rect(), screen)
             finally:
                 cache_painter.end()
         cache[key] = pixmap
@@ -1973,7 +1980,9 @@ class MainWindow(QMainWindow):
         painter = QPainter(self)
         try:
             painter.drawPixmap(0, 0, pixmap)
-            self.redforest.paint(painter)
+            # A full repaint (resize, theme, screen) draws all of it.
+            full = event.region().boundingRect().contains(self.rect())
+            self.redforest.paint(painter, None if full else event.region())
             self.snowfall.paint(painter)
         finally:
             painter.end()

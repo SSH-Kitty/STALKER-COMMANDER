@@ -202,6 +202,14 @@ def _kill_stray_debuggers(runner_env: dict[str, str] | None) -> None:
     kill_stray_debuggers(runner_env)
 
 
+def display_command(command: list[str]) -> str:
+    r"""A command as the player would type it: Windows quoting on Windows
+    ("C:\Program Files\..." in double quotes), shell quoting elsewhere."""
+    if os.name == "nt":
+        return subprocess.list2cmdline([os.path.normpath(part) if os.path.isabs(part) else part for part in command])
+    return shlex.join(command)
+
+
 def cpu_has_avx(cpuinfo: str = "/proc/cpuinfo") -> bool:
     """The CPU runs the AVX builds of the game; True when it can't be told."""
     if os.name == "nt" and cpuinfo == "/proc/cpuinfo":
@@ -970,7 +978,7 @@ class PlayPage(QWidget):
             self.direct_button.setEnabled(False)
             self._build_chips(ok=False, runner=None)
             return
-        self.preview_label.setPlainText(shlex.join(command))
+        self.preview_label.setPlainText(display_command(command))
         self.preview_label.setStyleSheet("")
         # Anomaly-direct availability is independent of the MO2/target
         # pipeline: with only Anomaly installed, Launch Anomaly must work.
@@ -2357,7 +2365,7 @@ class PlayPage(QWidget):
                     label, code, "\n  ".join(detail.splitlines()),
                 )
                 msg = tr("{name} closed with an error (code {code})", name=label, code=code)
-                details = tr("Command: {command}", command=shlex.join(command))
+                details = tr("Command: {command}", command=display_command(command))
                 if detail:
                     details += "\n\n" + tr("Last log lines:") + f"\n{detail}"
                 self._set_result(msg, error=True)

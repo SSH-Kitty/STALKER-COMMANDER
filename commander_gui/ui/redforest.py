@@ -123,8 +123,18 @@ class RedForest:
             self._host.update()
 
     # ----- painting -----
-    def paint(self, painter: QPainter) -> None:
-        """The trees, the fire and the leaves, over the scene image."""
+    def paint(self, painter: QPainter, region=None) -> None:
+        """The trees, the fire and the leaves, over the scene image.
+
+        ``region`` is what is being repainted. When it touches neither tree
+        nor the fire (a leaf, a progress bar, a caret blink elsewhere), only
+        the leaves are drawn: the backdrop under it is already whole, and
+        shearing both full-height tree layers and rendering the fire on
+        every such repaint cost most of the window's paint time.
+        """
+        if region is not None and (self._trees or self._fire) and not self._touches(region):
+            self.paint_leaves(painter)
+            return
         tokens = active_theme_tokens()
         prefix = tokens.get("back_trees")
         image = scene_pixmap(tokens.get("back_image", "")) if prefix else None
@@ -166,6 +176,13 @@ class RedForest:
         # Lit at dusk and night only; at dawn just the baked-in smoke is left.
         self._fire = self._paint_fire(painter, target, k) if tokens.get("back_fire") else None
         self.paint_leaves(painter)
+
+    def _touches(self, region) -> bool:
+        """Whether ``region`` overlaps where the trees or the fire were drawn
+        (their areas include how far they sway)."""
+        if self._fire is not None and region.intersects(self._fire):
+            return True
+        return any(region.intersects(rect) for rects in self._trees for rect in rects)
 
     def _layer(self, name: str, k: float) -> QPixmap:
         """A tree layer scaled once per size, in device pixels."""

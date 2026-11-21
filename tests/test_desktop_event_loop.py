@@ -38,6 +38,9 @@ class DesktopWelcomeOverlayTests(unittest.TestCase):
 
         welcome_overlay._shown_this_run = False
         self.addCleanup(setattr, welcome_overlay, "_shown_this_run", False)
+        # A main window built by an earlier test in this worker marks the
+        # Welcome screen as shown for the process (see mark_welcome_seen).
+        os.environ.pop(welcome_overlay.WELCOME_SHOWN_ENV, None)
 
         host = QWidget()
         host.resize(1200, 800)

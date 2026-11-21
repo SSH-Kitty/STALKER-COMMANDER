@@ -69,6 +69,34 @@ class QtMessageHandlerTests(unittest.TestCase):
             main._quiet_qt_message_handler(QtMsgType.QtInfoMsg, None, "hello")
 
 
+class RedForestRepaintTests(unittest.TestCase):
+    def test_trees_and_fire_are_only_redrawn_where_they_are(self):
+        from unittest.mock import Mock
+
+        from PySide6.QtCore import QRect
+        from PySide6.QtGui import QRegion
+
+        from commander_gui.ui.redforest import RedForest
+
+        host = QWidget()
+        forest = RedForest(host)
+        forest._trees = [[QRect(0, 0, 100, 400)]]
+        forest._fire = QRect(500, 300, 40, 60)
+        forest.paint_leaves = Mock()
+        painter = Mock()
+        # Far from both: just the leaves, nothing else touched.
+        forest.paint(painter, QRegion(QRect(300, 50, 20, 20)))
+        forest.paint_leaves.assert_called_once_with(painter)
+        painter.setRenderHint.assert_not_called()
+        self.assertTrue(forest._touches(QRegion(QRect(90, 10, 20, 20))))  # a tree
+        self.assertTrue(forest._touches(QRegion(QRect(510, 310, 5, 5))))  # the fire
+        # Nothing drawn yet: always the whole paint.
+        fresh = RedForest(host)
+        self.assertFalse(fresh._trees)
+        host.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+
+
 class AssistantPathTests(unittest.TestCase):
     """The Assistant must look where COMMANDER writes, on every platform
     (it used ~/.config on Windows too: no dumps, wrong theme)."""
