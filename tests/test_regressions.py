@@ -3465,6 +3465,7 @@ class RegressionTests(unittest.TestCase):
         self.assertNotIn("secret", redacted)
         self.assertIn("[REDACTED]", redacted)
 
+    @unittest.skipIf(os.name == "nt", "matches /proc command lines; Windows matches image names (see WindowsProcessTests)")
     def test_mo2_running_uses_self_excluding_case_insensitive_pattern(self):
         """Regression test: a bracket expression on only the first letter
 
@@ -3529,6 +3530,7 @@ class RegressionTests(unittest.TestCase):
         self.assertEqual(child_env["Visible"], "override")
         self.assertIs(popen.call_args.kwargs["stdin"], subprocess.DEVNULL)
 
+    @unittest.skipIf(os.name == "nt", "umu-run/gamescope app IDs are Linux-only")
     @patch("commander_gui.launcher.subprocess.Popen")
     def test_game_launched_from_a_steam_shortcut_keeps_that_shortcuts_id(self, popen):
         """Regression test: the controller did nothing in game (Game Mode).
@@ -3817,6 +3819,51 @@ class RegressionTests(unittest.TestCase):
 
         self.assertFalse(page._monitoring_mo2)
         page._set_result.assert_called_with("GAMMA closed normally.", error=False)
+
+    @patch("commander_gui.ui.play_page.exe_pids")
+    @patch("commander_gui.ui.play_page.mo2_pids", return_value={222})
+    def test_launch_handed_to_an_open_mo2_follows_the_game(self, _mo2_pids, game_pids):
+        """MO2 is single-instance: with one already open, this launch's MO2
+        passes the game to it and exits. The session must follow the game,
+        not end the moment the launched instance is gone."""
+        page = self._make_play_page_stub()
+        page._mo2_seen = True
+        page._mo2_launch_pids = {111}
+        page._pre_launch_mo2_pids = {222}
+        page._game_exe_name = "AnomalyDX11AVX.exe"
+        page.game_running_changed = Mock()
+        game_pids.return_value = set()
+
+        page._on_launch_check("GAMMA", ["ModOrganizer.exe"], None)
+        self.assertTrue(page._handed_off)
+        self.assertTrue(page._launching)
+        self.assertEqual(page._mo2_launch_pids, {222})
+
+        game_pids.return_value = {333}
+        page._on_launch_check("GAMMA", ["ModOrganizer.exe"], None)
+        self.assertTrue(page._game_seen)
+        self.assertTrue(page._launching)
+
+        game_pids.return_value = set()
+        page._on_launch_check("GAMMA", ["ModOrganizer.exe"], None)
+        page._record_playtime.assert_called_once()
+        self.assertFalse(page._launching)
+        page._set_result.assert_called_with("GAMMA closed normally.", error=False)
+
+    @patch("commander_gui.ui.play_page.exe_pids", return_value=set())
+    @patch("commander_gui.ui.play_page.mo2_pids", return_value={222})
+    def test_handed_off_launch_gives_up_when_the_game_never_appears(self, _mo2_pids, _game_pids):
+        page = self._make_play_page_stub()
+        page._mo2_seen = True
+        page._mo2_launch_pids = {111}
+        page._pre_launch_mo2_pids = {222}
+        page._game_exe_name = "AnomalyDX11AVX.exe"
+        page._on_launch_check("GAMMA", ["ModOrganizer.exe"], None)
+        self.assertTrue(page._handed_off)
+        page._handoff_deadline = 0.0
+        page._on_launch_check("GAMMA", ["ModOrganizer.exe"], None)
+        self.assertFalse(page._launching)
+        page._record_playtime.assert_not_called()
 
     @patch("commander_gui.ui.play_page.mo2_running", return_value=False)
     def test_launch_wrapper_success_keeps_monitoring_for_mo2(self, _mo2_running):

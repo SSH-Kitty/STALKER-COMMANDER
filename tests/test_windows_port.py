@@ -111,3 +111,50 @@ class Mo2IniRewriteTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipUnless(os.name == "nt", "Windows only")
+class WindowsProcessTests(unittest.TestCase):
+    """Process checks read a Toolhelp32 snapshot: /proc and pgrep don't exist."""
+
+    def test_snapshot_sees_a_child_by_image_name(self):
+        import subprocess
+        import sys
+
+        from commander_gui import winproc
+
+        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+        try:
+            names = winproc.processes()
+            self.assertIn(child.pid, names)
+            self.assertTrue(names[child.pid].lower().endswith(".exe"))
+            self.assertTrue(winproc.running(Path(sys.executable).name.upper()))
+        finally:
+            child.kill()
+            child.wait()
+        self.assertFalse(winproc.running("no-such-process-0123456789.exe"))
+
+    def test_mo2_and_game_checks_use_image_names(self):
+        from commander_gui.ui import common
+
+        snapshot = {101: "ModOrganizer.exe", 202: "AnomalyDX11AVX.exe", 303: "steam.exe", os.getpid(): "python.exe"}
+        with patch("commander_gui.winproc.processes", return_value=snapshot):
+            common._CMDLINES = (0.0, {})
+            self.assertTrue(common.process_running(r"ModOrganizer\.exe"))
+            common._CMDLINES = (0.0, {})
+            self.assertEqual(common.exe_pids("AnomalyDX"), {202})
+            common._CMDLINES = (0.0, {})
+            self.assertEqual(common.mo2_pids(), {101})
+            self.assertTrue(common.steam_running())
+        with patch("commander_gui.winproc.processes", return_value={}):
+            common._CMDLINES = (0.0, {})
+            self.assertFalse(common.process_running(r"ModOrganizer\.exe"))
+            self.assertFalse(common.steam_running())
+
+    def test_lossless_running_needs_no_tasklist(self):
+        from commander_gui import lossless_win
+
+        with patch("commander_gui.winproc.processes", return_value={5: "LosslessScaling.exe"}), patch(
+            "subprocess.run", side_effect=AssertionError("tasklist spawned")
+        ):
+            self.assertTrue(lossless_win.running())

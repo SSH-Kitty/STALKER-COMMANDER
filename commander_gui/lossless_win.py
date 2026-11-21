@@ -54,15 +54,13 @@ def lossless_exe() -> Path | None:
 
 
 def running() -> bool:
-    try:
-        out = subprocess.run(
-            ["tasklist", "/FI", f"IMAGENAME eq {EXE_NAME}", "/NH"],
-            capture_output=True, text=True, timeout=10,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        ).stdout
-    except (OSError, subprocess.SubprocessError):
-        return False
-    return EXE_NAME.lower() in out.lower()
+    """True while Lossless Scaling runs. A process snapshot, not tasklist:
+    tasklist took a process start per call on the GUI thread and printed in
+    the OEM code page, which strict UTF-8 decoding choked on (German,
+    Russian, Polish Windows)."""
+    from .winproc import running as image_running
+
+    return image_running(EXE_NAME)
 
 
 def profile_values(text: str) -> dict[str, str]:

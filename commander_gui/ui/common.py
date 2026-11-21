@@ -247,6 +247,9 @@ def process_running(pattern: str) -> bool:
     path in a different case than the real filename (e.g. fully lowercased).
     """
     regex = re.compile(pattern.encode(), re.IGNORECASE)
+    if os.name == "nt":
+        # No /proc: match the image names of a Toolhelp32 snapshot instead.
+        return any(regex.search(name) for name in _proc_cmdlines().values())
     own = str(os.getpid())
     try:
         pids = [name for name in os.listdir("/proc") if name.isdigit() and name != own]
@@ -326,6 +329,10 @@ def steam_running() -> bool:
     to restart Steam to see a shortcut just added, not a guard that blocks
     the write.
     """
+    if os.name == "nt":
+        from ..winproc import running
+
+        return running("steam.exe")
     exe = shutil.which("pgrep")
     if not exe:
         return False
@@ -393,6 +400,18 @@ def _proc_cmdlines() -> dict[int, bytes]:
         return _CMDLINES[1]
     own = os.getpid()
     found: dict[int, bytes] = {}
+    if os.name == "nt":
+        # Windows: image names only (see winproc), which is what every
+        # caller matches on - "ModOrganizer.exe", "AnomalyDX11AVX.exe".
+        from ..winproc import processes
+
+        found = {
+            pid: name.lower().encode("utf-8", "replace")
+            for pid, name in processes().items()
+            if pid != own
+        }
+        _CMDLINES = (now, found)
+        return found
     try:
         entries = os.listdir("/proc")
     except OSError:
@@ -432,7 +451,7 @@ def exe_pids(exe_name: str) -> set[int]:
     command line.
     """
     proc_root = Path("/proc")
-    if proc_root.is_dir():
+    if os.name == "nt" or proc_root.is_dir():
         # Read directly: this runs on the GUI thread up to four times a
         # second while a launch is watched, and spawning pgrep each time
         # cost a fork+exec per tick (and up to a 2s stall on a busy system).

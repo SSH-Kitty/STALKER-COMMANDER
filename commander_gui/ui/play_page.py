@@ -424,6 +424,11 @@ class PlayPage(QWidget):
         #: had open (see mo2_pids() docstring).
         self._pre_launch_mo2_pids: set[int] = set()
         self._mo2_launch_pids: set[int] = set()
+        #: This launch's MO2 handed the game to an MO2 the user already had
+        #: open (MO2 is single-instance) and exited: the session follows the
+        #: game instead, until _handoff_deadline if the game never appears.
+        self._handed_off = False
+        self._handoff_deadline = 0.0
         #: The actual game executable's basename (not MO2's own exe) and
         #: its pre-launch pids, so playtime can be recorded when the game
         #: itself exits instead of waiting for MO2 (which stays open
@@ -1633,7 +1638,10 @@ class PlayPage(QWidget):
                 if direct
                 else ("Mod Organizer 2" if open_mo2 else "GAMMA")
             )
-            monitoring_mo2 = not direct and os.name != "nt"
+            # Windows too, now that winproc gives exe_pids() a process list:
+            # without it the session "ended" when ModOrganizer.exe exited,
+            # which is at once when another MO2 was already open.
+            monitoring_mo2 = not direct
             snapshot = self._session_snapshot(monitoring_mo2, open_mo2)
             if not open_mo2:
                 self._show_splash(coop_launch)
@@ -1762,6 +1770,8 @@ class PlayPage(QWidget):
         self._steam_launch = False
         self._pre_launch_mo2_pids = pre_launch_mo2_pids
         self._mo2_launch_pids = set()
+        self._handed_off = False
+        self._handoff_deadline = 0.0
         self._game_exe_name = game_exe_name
         self._pre_launch_game_pids = pre_launch_game_pids
         self._game_seen = False
@@ -2149,6 +2159,19 @@ class PlayPage(QWidget):
                             error=True,
                         )
                         return
+                    adopted = self._host_pids() & self._pre_launch_mo2_pids
+                    if adopted and self._game_exe_name and not self._no_mo2_session:
+                        # It came and went between two ticks, handing the
+                        # launch to the MO2 already open (see below).
+                        self._mo2_seen = True
+                        self._handed_off = True
+                        self._handoff_deadline = time.monotonic() + 60
+                        self._mo2_launch_pids = set(adopted)
+                        self._launch_timer.setInterval(2000)
+                        applog.get_logger().info(
+                            "play: launch handed to the MO2 already open pids=%s", adopted
+                        )
+                        return
                     # On some runner setups (confirmed via commander.log on
                     # a real system: umu-run/GE-Proton here) the wrapper
                     # process does not detach after starting MO2 - it
@@ -2202,6 +2225,45 @@ class PlayPage(QWidget):
                 if self._no_mo2_session:
                     # The launcher exits once it has started the game.
                     self._mo2_launch_pids |= host_pids - self._pre_launch_mo2_pids
+                if getattr(self, "_handed_off", False):
+                    # Following the game in the user's own MO2: done once
+                    # the game has come and gone (playtime is recorded
+                    # above), or never came, or that MO2 closed.
+                    if (
+                        self._game_exe_name is None
+                        or not (host_pids & self._mo2_launch_pids)
+                        or (not self._game_seen and time.monotonic() > self._handoff_deadline)
+                    ):
+                        applog.get_logger().info(
+                            "play: handed-off session over (game_seen=%s)", self._game_seen
+                        )
+                        if self._game_exe_name is not None and self._game_seen:
+                            self._record_playtime()
+                        self._check_for_crash()
+                        self._finish_launch(tr("{name} closed normally.", name=label))
+                        return
+                    self._set_result(
+                        tr("Game is running") if self._game_seen else tr("Mod Organizer 2 is running")
+                    )
+                    return
+                adopted = host_pids & self._pre_launch_mo2_pids
+                if (
+                    not (host_pids & self._mo2_launch_pids)
+                    and adopted
+                    and self._game_exe_name
+                    and not self._game_seen
+                    and not self._no_mo2_session
+                ):
+                    # This launch's MO2 exited without the game appearing,
+                    # while the MO2 that was already open stays: it was
+                    # handed the launch. Follow the game from there.
+                    self._handed_off = True
+                    self._handoff_deadline = time.monotonic() + 60
+                    self._mo2_launch_pids = set(adopted)
+                    applog.get_logger().info(
+                        "play: launch handed to the MO2 already open pids=%s", adopted
+                    )
+                    return
                 if not (host_pids & self._mo2_launch_pids):
                     applog.get_logger().info(
                         "play: mo2 exited, finishing launch (game_seen=%s)",

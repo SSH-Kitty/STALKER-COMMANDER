@@ -478,8 +478,16 @@ def switch_to_coop(anomaly, gamma, mo2_profile) -> None:
             # over the real originals.
             state["originals"] = sorted(originals)
             _save_state(anomaly, state)
-    except BaseException:
-        _restore(anomaly, root, done, originals)
+    except BaseException as exc:
+        try:
+            _restore(anomaly, root, done, originals)
+        except OSError as rollback:
+            # Usually the same lock that stopped the switch (the game still
+            # has an exe open on Windows): say so, and keep the first error.
+            raise CoopError(
+                f"Switching to co-op failed ({exc}), and putting the original files back failed too "
+                f"({rollback}). Close the game and Mod Organizer 2, then switch again."
+            ) from exc
         raise
     state["originals"] = sorted(originals)
     state["active"] = True
