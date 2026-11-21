@@ -68,10 +68,23 @@ $f = $env:RUNTIME_EXE
 $s = Get-AuthenticodeSignature -LiteralPath $f
 if ($s.Status -ne 'Valid' -or $s.SignerCertificate.Subject -notlike '*Microsoft Corporation*') { exit 99 }
 try {
-  $p = Start-Process -FilePath $f -ArgumentList ($env:RUNTIME_ARGS -split ' ') -Verb RunAs -Wait -PassThru
+  # RUNTIME_ARGS is an already-quoted command line, passed through as one string
+  # (an empty -ArgumentList is a PowerShell error, so it is left out then).
+  $a = @{ FilePath = $f; Verb = 'RunAs'; Wait = $true; PassThru = $true }
+  if ($env:RUNTIME_ARGS) { $a.ArgumentList = $env:RUNTIME_ARGS }
+  $p = Start-Process @a
 } catch { exit 98 }
 exit $p.ExitCode
 """
+
+
+def command_line(args: tuple[str, ...]) -> str:
+    """``args`` as one Windows command line, quoting any that contain spaces.
+
+    A temp folder under a profile like ``C:\\Users\\John Smith`` puts a space in
+    the ``/T:`` extract path; splitting on spaces would cut it in two.
+    """
+    return subprocess.list2cmdline(list(args))
 
 
 def missing_dlls(runtime: Runtime) -> list[str]:
@@ -102,7 +115,7 @@ def check_exit_code(code: int, runtime: Runtime) -> bool:
 def _run_elevated(exe: str, args: tuple[str, ...]) -> int:
     result = subprocess.run(
         ["powershell", "-NoProfile", "-NonInteractive", "-Command", _SCRIPT],
-        env={**os.environ, "RUNTIME_EXE": exe, "RUNTIME_ARGS": " ".join(args)},
+        env={**os.environ, "RUNTIME_EXE": exe, "RUNTIME_ARGS": command_line(args)},
         creationflags=subprocess.CREATE_NO_WINDOW,
         check=False,
     )

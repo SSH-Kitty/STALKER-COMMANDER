@@ -1,4 +1,4 @@
-"""Download the Windows stalker-gamma CLI and 7-Zip into cli/win-x64/.
+"""Download the Windows stalker-gamma CLI, 7-Zip and MinGit into cli/win-x64/.
 
 The CLI is pinned to the same version the Linux build bundles, so both
 builds parse identical CLI output. On a CLI bump, update CLI_VERSION and
@@ -36,6 +36,16 @@ SEVENZIP_SHA256 = "3fe4ab99fa15629c652944309a2b2bc6e41fc933fc6b63f5df1ebcf3aea68
 SEVENZIP_URL = (
     f"https://github.com/ip7z/7zip/releases/download/{SEVENZIP_VERSION}/"
     f"7z{SEVENZIP_VERSION.replace('.', '')}-x64.msi"
+)
+# MinGit: Git for Windows' minimal, portable build meant for bundling. The
+# integrity repair, ROMEO and overlay restore shell out to git, and a fresh
+# Windows has none. The sha256 is the digest GitHub lists for the release asset.
+GIT_VERSION = "2.56.1"
+GIT_TAG = f"v{GIT_VERSION}.windows.1"
+GIT_SHA256 = "4a92850b6e917da4fd010669b614b55dccf5b0ec333a534cc4be4700dfefdafd"
+GIT_URL = (
+    f"https://github.com/git-for-windows/git/releases/download/{GIT_TAG}/"
+    f"MinGit-{GIT_VERSION}-64-bit.zip"
 )
 ROOT = Path(__file__).resolve().parent.parent
 DEST = ROOT / "cli" / "win-x64"
@@ -107,9 +117,26 @@ def _fetch_7zip() -> None:
             shutil.copyfile(path, target / name)
 
 
+def _fetch_git() -> None:
+    print(f"Downloading MinGit {GIT_VERSION} (x64)")
+    data = _download(GIT_URL, GIT_SHA256)
+    target = DEST / "git"
+    if target.exists():
+        shutil.rmtree(target)
+    target.mkdir(parents=True)
+    with zipfile.ZipFile(io.BytesIO(data)) as archive:
+        for name in archive.namelist():
+            if not (target / name).resolve().is_relative_to(target):
+                raise SystemExit(f"Refusing unsafe path in archive: {name}")
+        archive.extractall(target)
+    if not (target / "cmd" / "git.exe").is_file():
+        raise SystemExit("cmd/git.exe not found in the MinGit archive")
+
+
 def main() -> int:
     _fetch_cli()
     _fetch_7zip()
+    _fetch_git()
     print(f"Installed {DEST}")
     return 0
 

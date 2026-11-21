@@ -664,12 +664,17 @@ def _rewrite_mo2_ini_paths(
     text = ini.read_text(encoding="utf-8", errors="replace")
     pairs: list[tuple[str, str]] = []
     for old, new in replacements:
-        old_path = str(Path(old).expanduser())
-        new_path = str(Path(new).expanduser())
+        # as_posix(), not str(): on Windows str() already has backslashes, so
+        # the "/" -> sep variants below all came out identical - MO2's usual
+        # "C:/..." spelling never matched, and a new path that contained the
+        # old one was substituted into itself once per duplicate.
+        old_path = Path(old).expanduser().as_posix()
+        new_path = Path(new).expanduser().as_posix()
         pairs.extend(
             (old_path.replace("/", sep), new_path.replace("/", sep))
             for sep in ("/", "\\", "\\\\")
         )
+    pairs = list(dict.fromkeys(pairs))
     # Longest old string first: if one source path is a literal substring
     # prefix of another (e.g. ".../anomaly" and ".../anomaly-gamma", both
     # plausible sibling folder names), replacing the shorter one first would

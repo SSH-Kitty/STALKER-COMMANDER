@@ -31,6 +31,7 @@ from pathlib import Path
 from threading import Event
 
 from . import atomic
+from .config import git_binary
 from .coop import _swap_dir
 from .mod_install import ModInstallError
 from .modlist import read_lines, save_lines
@@ -276,7 +277,7 @@ def _restore_atmos(appdata: Path, cache: Path) -> bool:
     from .config import child_environment
     from .integrity import _gamma_repo
 
-    git, repo = shutil.which("git"), _gamma_repo(cache)
+    git, repo = git_binary(), _gamma_repo(cache)
     if git is None or repo is None:
         return False
     base = [git, "-c", f"safe.directory={repo}", "--git-dir", str(repo)]

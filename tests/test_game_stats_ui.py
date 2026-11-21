@@ -204,7 +204,7 @@ class StorageCardTest(DashboardStatsCardTest):
                 (gamma / "mods" / mod).mkdir(parents=True)
                 (gamma / "mods" / mod / "file").write_bytes(b"x" * size)
             (gamma / "profiles" / "ROMEO").mkdir(parents=True)
-            (gamma / "profiles" / "ROMEO" / "modlist.txt").write_text("+xx-CLIKR\u0394D MCM Values\n")
+            (gamma / "profiles" / "ROMEO" / "modlist.txt").write_text("+xx-CLIKR\u0394D MCM Values\n", encoding="utf-8")
             page = self._page([CliProfile(active=True, profile_name="Mine", gamma=str(gamma))])
             sizes = page._size_task._fn()
             self.assertEqual(list(sizes), ["Anomaly", "GAMMA", "ROMEO", "Cache"])

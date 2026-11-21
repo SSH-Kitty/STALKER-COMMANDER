@@ -96,6 +96,23 @@ def cli_binary_path() -> Path:
     return candidates[0]
 
 
+def git_binary() -> str | None:
+    """The ``git`` to run, or None when there is none.
+
+    On Windows a bundled MinGit (scripts/fetch_windows_cli.py puts it in
+    ``cli/win-x64/git``) comes first: a fresh Windows has no git, and the
+    integrity repair, ROMEO and overlay restore all need one. Otherwise, or
+    on Linux, the one on PATH.
+    """
+    if os.name == "nt":
+        bundled = project_root() / "cli" / "win-x64" / "git" / "cmd" / "git.exe"
+        if bundled.is_file():
+            return str(bundled)
+    from shutil import which
+
+    return which("git")
+
+
 def settings_dir() -> Path:
     """Directory where the CLI stores its settings.
 

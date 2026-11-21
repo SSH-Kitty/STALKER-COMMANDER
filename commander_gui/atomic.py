@@ -7,6 +7,7 @@ import re
 import stat
 import tempfile
 import threading
+import time
 from pathlib import Path
 
 try:
@@ -75,6 +76,30 @@ def write_bytes(path: Path, data: bytes, *, lock: bool = True) -> None:
     _write(path, data, lock=lock)
 
 
+def _replace(source: Path, target: Path, *, attempts: int = 12) -> None:
+    """``os.replace``, retried briefly on Windows.
+
+    Windows refuses to replace a file another handle has open (a concurrent
+    read of settings.json, antivirus, the search indexer): ``PermissionError``
+    ``[WinError 5]`` for a moment that passes by itself. Writes are serialized
+    by ``_WRITE_LOCK`` but plain reads are not, so concurrent saves lost
+    changes to this. POSIX replaces an open file without complaint.
+    """
+    if os.name != "nt":
+        os.replace(source, target)
+        return
+    delay = 0.01
+    for attempt in range(attempts):
+        try:
+            os.replace(source, target)
+            return
+        except PermissionError:
+            if attempt == attempts - 1:
+                raise
+            time.sleep(delay)
+            delay = min(delay * 2, 0.25)
+
+
 def _write(path: Path, data: bytes, *, lock: bool) -> None:
     # A symlinked settings.json or modlist.txt (dotfile repos, profiles
     # shared between installs) is written *through*: os.replace() on the
@@ -117,7 +142,7 @@ def _write(path: Path, data: bytes, *, lock: bool) -> None:
                 stream.write(data)
                 stream.flush()
                 os.fsync(stream.fileno())
-            os.replace(temporary_path, path)
+            _replace(temporary_path, path)
             try:  # make the rename itself survive a power cut
                 dir_fd = os.open(path.parent, os.O_RDONLY)
                 try:

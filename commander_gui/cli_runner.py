@@ -39,6 +39,19 @@ TIMEOUT_RC = 124
 _MAX_OUTPUT_LINES = 5000
 
 
+def signed_exit_code(rc: int) -> int:
+    """``rc`` as a signed 32-bit int, the width of a Qt ``Signal(int)``.
+
+    A Windows process that crashes exits with an NTSTATUS such as 0xC0000142
+    (3221225794): unsigned, so it overflowed ``finished = Signal(int, str)``
+    ("Overflow: Value 3221225794 exceeds limits of type int") and the slot
+    never saw the real code. As a signed value it is -1073741502, which is
+    how Windows itself and most tools show it. POSIX codes (0-255, or
+    -signal) are unchanged.
+    """
+    return rc - (1 << 32) if rc > 0x7FFFFFFF else rc
+
+
 def _nt_suspend(pid: int, suspend: bool) -> None:
     """Freeze/thaw every thread of *pid* (Windows has no SIGSTOP/SIGCONT).
 
@@ -149,7 +162,7 @@ class CliWorker(QObject):
                 collected.append(line)
                 self.line_ready.emit(line)
             self._process.wait()
-            rc = self._process.returncode
+            rc = signed_exit_code(self._process.returncode)
         except Exception as exc:  # noqa: BLE001 - must not escape the slot
             message = f"Error while running {command[0]!r}: {exc}"
             collected.append(message)

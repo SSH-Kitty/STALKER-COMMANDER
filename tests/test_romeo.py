@@ -28,7 +28,7 @@ PROFILE = "CLIKRΔD - ROMEO"
 
 def _write(path: Path, text: str = "x") -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text)
+    path.write_text(text, encoding="utf-8")
 
 
 class FindRomeoTest(unittest.TestCase):
@@ -71,13 +71,13 @@ class InstallTest(unittest.TestCase):
 
             self.assertEqual(sorted(p.name for p in (gamma / "mods/xx-A/gamedata").iterdir()), ["new.ltx"])
             self.assertTrue((gamma / "mods/10- GAMMA mod/a.ltx").is_file())
-            self.assertEqual((gamma / f"profiles/{PROFILE}/modlist.txt").read_text(), "+xx-A\n")
-            self.assertEqual((gamma / "profiles/G.A.M.M.A/modlist.txt").read_text(), "+10- GAMMA mod\n")
-            self.assertEqual((gamma / "overwrite/gamedata/configs/wd.ltx").read_text(), "player")
-            self.assertEqual((gamma / "overwrite/gamedata/configs/laser.ltx").read_text(), "romeo")
-            self.assertEqual((gamma / "splash.png").read_text(), "romeo")
-            self.assertEqual((anomaly / "appdata/clikrad_lean_presets.ltx").read_text(), "romeo")
-            self.assertEqual((anomaly / "appdata/user.ltx").read_text(), "player")
+            self.assertEqual((gamma / f"profiles/{PROFILE}/modlist.txt").read_text(encoding="utf-8"), "+xx-A\n")
+            self.assertEqual((gamma / "profiles/G.A.M.M.A/modlist.txt").read_text(encoding="utf-8"), "+10- GAMMA mod\n")
+            self.assertEqual((gamma / "overwrite/gamedata/configs/wd.ltx").read_text(encoding="utf-8"), "player")
+            self.assertEqual((gamma / "overwrite/gamedata/configs/laser.ltx").read_text(encoding="utf-8"), "romeo")
+            self.assertEqual((gamma / "splash.png").read_text(encoding="utf-8"), "romeo")
+            self.assertEqual((anomaly / "appdata/clikrad_lean_presets.ltx").read_text(encoding="utf-8"), "romeo")
+            self.assertEqual((anomaly / "appdata/user.ltx").read_text(encoding="utf-8"), "player")
             self.assertFalse((anomaly / "appdata/shaders_cache").exists())
             self.assertFalse((anomaly / "appdata/atmos_neutral.ltx").exists())
             self.assertFalse((anomaly / "appdata/Atmos_ato_summer.ltx").exists())
@@ -106,27 +106,27 @@ class InstallTest(unittest.TestCase):
             install(release("v2", ["xx-A"]), ROOT, PROFILE, gamma, anomaly, keep_mcm=True)
 
             self.assertFalse((gamma / "mods/xx-Dropped").exists())
-            self.assertEqual((gamma / "mods/xx-A/a.ltx").read_text(), "v2")
+            self.assertEqual((gamma / "mods/xx-A/a.ltx").read_text(encoding="utf-8"), "v2")
             self.assertTrue((gamma / "mods/10- GAMMA mod/a.ltx").is_file())
-            self.assertEqual(mcm.read_text(), "v2")
-            self.assertEqual((gamma / f"mods/{KEPT_MCM}/gamedata/configs/axr_options.ltx").read_text(), "player")
+            self.assertEqual(mcm.read_text(encoding="utf-8"), "v2")
+            self.assertEqual((gamma / f"mods/{KEPT_MCM}/gamedata/configs/axr_options.ltx").read_text(encoding="utf-8"), "player")
             profile = gamma / f"profiles/{PROFILE}"
             self.assertEqual(
-                (profile / "modlist.txt").read_text().splitlines(),
+                (profile / "modlist.txt").read_text(encoding="utf-8").splitlines(),
                 ["+xx-A", f"+{KEPT_MCM}", f"-{MCM_MOD}", "+10- GAMMA mod"],
             )
-            self.assertEqual((profile / "modlist.txt.before-update").read_text(), "player order\n")
+            self.assertEqual((profile / "modlist.txt.before-update").read_text(encoding="utf-8"), "player order\n")
             self.assertIs(mcm_changed(gamma, PROFILE), False)
 
             # The next update leaves the kept copy alone and puts it back in place.
             install(release("v3", ["xx-A"]), ROOT, PROFILE, gamma, anomaly)
-            self.assertEqual((gamma / f"mods/{KEPT_MCM}/gamedata/configs/axr_options.ltx").read_text(), "player")
-            self.assertIn(f"+{KEPT_MCM}", (profile / "modlist.txt").read_text().splitlines())
+            self.assertEqual((gamma / f"mods/{KEPT_MCM}/gamedata/configs/axr_options.ltx").read_text(encoding="utf-8"), "player")
+            self.assertIn(f"+{KEPT_MCM}", (profile / "modlist.txt").read_text(encoding="utf-8").splitlines())
 
             # Kept again: the newer copy wins (listed first) over the older one.
             mcm.write_text("player 2")
             install(release("v4", ["xx-A"]), ROOT, PROFILE, gamma, anomaly, keep_mcm=True)
-            lines = (profile / "modlist.txt").read_text().splitlines()
+            lines = (profile / "modlist.txt").read_text(encoding="utf-8").splitlines()
             self.assertLess(lines.index(f"+{KEPT_MCM} 2"), lines.index(f"+{KEPT_MCM}"))
 
 
@@ -147,7 +147,7 @@ class InstallTest(unittest.TestCase):
             cancel.set()
             with self.assertRaises(ModInstallError):
                 install(tmp / "v2", ROOT, PROFILE, gamma, anomaly, cancel_event=cancel)
-            self.assertEqual((gamma / "mods/xx-A/a.ltx").read_text(), "v1")
+            self.assertEqual((gamma / "mods/xx-A/a.ltx").read_text(encoding="utf-8"), "v1")
             self.assertTrue((gamma / "mods/xx-B").is_dir())
     def test_short_on_space_update_removes_old_mods_first(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -171,9 +171,9 @@ class InstallTest(unittest.TestCase):
             _write(src / f"GAMMA/mods/{MCM_MOD}/gamedata/configs/axr_options.ltx", "v2")
             _write(src / f"GAMMA/profiles/{PROFILE}/modlist.txt", f"+xx-A\n+{MCM_MOD}\n")
             install(tmp / "v2", ROOT, PROFILE, gamma, anomaly)
-            self.assertEqual((gamma / f"mods/{KEPT_MCM}/gamedata/configs/axr_options.ltx").read_text(), "player")
+            self.assertEqual((gamma / f"mods/{KEPT_MCM}/gamedata/configs/axr_options.ltx").read_text(encoding="utf-8"), "player")
             self.assertEqual(
-                (gamma / f"profiles/{PROFILE}/modlist.txt").read_text().splitlines(),
+                (gamma / f"profiles/{PROFILE}/modlist.txt").read_text(encoding="utf-8").splitlines(),
                 ["+xx-A", f"+{KEPT_MCM}", f"-{MCM_MOD}"],
             )
 
@@ -217,14 +217,14 @@ class UninstallTest(unittest.TestCase):
             self.assertFalse(installed(gamma))
             self.assertEqual(sorted(p.name for p in (gamma / "mods").iterdir()), ["10- GAMMA mod"])
             self.assertEqual(sorted(p.name for p in (gamma / "profiles").iterdir()), ["G.A.M.M.A"])
-            self.assertEqual((gamma / "splash.png").read_text(), "gamma")
+            self.assertEqual((gamma / "splash.png").read_text(encoding="utf-8"), "gamma")
             self.assertFalse((gamma / "splash.png.before-romeo").exists())
             self.assertFalse((anomaly / "appdata/clikrad_lean_presets.ltx").exists())
-            self.assertEqual((anomaly / "appdata/user.ltx").read_text(), "player")
-            self.assertIn("G.A.M.M.A", (gamma / "ModOrganizer.ini").read_text())
+            self.assertEqual((anomaly / "appdata/user.ltx").read_text(encoding="utf-8"), "player")
+            self.assertIn("G.A.M.M.A", (gamma / "ModOrganizer.ini").read_text(encoding="utf-8"))
             if git:
                 self.assertTrue(atmos)
-                self.assertEqual((anomaly / "appdata/Atmos_Neutral.ltx").read_text(), "gamma atmos")
+                self.assertEqual((anomaly / "appdata/Atmos_Neutral.ltx").read_text(encoding="utf-8"), "gamma atmos")
                 self.assertFalse((anomaly / "appdata/other.ltx").exists())
 
             other = tmp / "other-gamma"
