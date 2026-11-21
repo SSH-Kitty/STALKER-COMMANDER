@@ -644,7 +644,13 @@ def build_runner_tool_command(
 
 
 def mo2_path_to_host(value: str) -> str:
-    """Translate an MO2 ini path (``Z:/...``) to a host path."""
+    """Translate an MO2 ini path (``Z:/...``) to a host path.
+
+    ``Z:`` is Wine's view of the Linux root. On Windows it is a real drive
+    letter (a NAS or second disk), so the path is already the host's.
+    """
+    if os.name == "nt":
+        return value
     if value[:2].upper() == "Z:":
         rest = value[2:].replace("\\", "/")
         if not rest.startswith("/"):

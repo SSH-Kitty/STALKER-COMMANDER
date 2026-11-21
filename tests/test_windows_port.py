@@ -108,9 +108,37 @@ class Mo2IniRewriteTest(unittest.TestCase):
             self.assertIn("D:\\\\New\\\\gamma\\\\downloads", text)
             self.assertNotIn("old", text)
 
+    @unittest.skipUnless(os.name == "nt", "Windows paths ignore case")
+    def test_a_differently_cased_old_path_is_still_rewritten(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            gamma = Path(tmp) / "new-gamma"
+            gamma.mkdir()
+            (gamma / "ModOrganizer.ini").write_text(
+                "gamePath=c:/games/OLD/Anomaly\nbase_directory=C:\\GAMES\\old\\gamma\n", encoding="utf-8"
+            )
+            _rewrite_mo2_ini_paths(
+                gamma,
+                [(r"C:\Games\old\anomaly", r"D:\New\anomaly"), (r"C:\Games\old\gamma", r"D:\New\gamma")],
+            )
+            text = (gamma / "ModOrganizer.ini").read_text(encoding="utf-8")
+            self.assertEqual(text, "gamePath=D:/New/anomaly\nbase_directory=D:\\New\\gamma\n")
 
-if __name__ == "__main__":
-    unittest.main()
+
+@unittest.skipUnless(os.name == "nt", "Windows only")
+class WindowsModNameTests(unittest.TestCase):
+    def test_names_windows_cannot_create_are_cleaned(self):
+        from commander_gui.mod_install import sanitize_name
+
+        self.assertEqual(sanitize_name('Mod "HD"? <v2> | *'), "Mod HD v2")
+        self.assertEqual(sanitize_name("CON"), "CON mod")
+        self.assertEqual(sanitize_name("nul.txt"), "nul.txt mod")
+        self.assertEqual(sanitize_name("Console"), "Console")
+        name = sanitize_name("a" * 119 + " b")
+        self.assertLessEqual(len(name), 120)
+        self.assertFalse(name.endswith((" ", ".")))
+        with tempfile.TemporaryDirectory() as tmp:
+            for raw in ('Mod "HD"?', "CON", "x" * 300, "trailing. "):
+                (Path(tmp) / sanitize_name(raw)).mkdir()
 
 
 @unittest.skipUnless(os.name == "nt", "Windows only")
@@ -158,3 +186,7 @@ class WindowsProcessTests(unittest.TestCase):
             "subprocess.run", side_effect=AssertionError("tasklist spawned")
         ):
             self.assertTrue(lossless_win.running())
+
+
+if __name__ == "__main__":
+    unittest.main()

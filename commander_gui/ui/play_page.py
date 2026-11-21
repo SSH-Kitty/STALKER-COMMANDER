@@ -204,6 +204,14 @@ def _kill_stray_debuggers(runner_env: dict[str, str] | None) -> None:
 
 def cpu_has_avx(cpuinfo: str = "/proc/cpuinfo") -> bool:
     """The CPU runs the AVX builds of the game; True when it can't be told."""
+    if os.name == "nt" and cpuinfo == "/proc/cpuinfo":
+        try:
+            import ctypes
+
+            # PF_AVX_INSTRUCTIONS_AVAILABLE; no /proc/cpuinfo to read here.
+            return bool(ctypes.windll.kernel32.IsProcessorFeaturePresent(39))
+        except (AttributeError, OSError):
+            return True
     try:
         return " avx " in f" {Path(cpuinfo).read_text(errors='replace').split('flags', 2)[1].splitlines()[0]} "
     except (OSError, IndexError):
@@ -1124,6 +1132,11 @@ class PlayPage(QWidget):
         Wine leaves it unlocked, and the game runs borderless, so the overlay
         can take focus from it. Undone with the overlay key set to Off (the
         lock; the screen mode stays as picked)."""
+        if os.name == "nt":
+            # The overlay is a Wine/X11 panel; on Windows it never starts, so
+            # switching the game to borderless every launch only took the
+            # player's fullscreen away (with the setting hidden).
+            return
         on = gui_settings.load_gui_settings().get("graphics_overlay_key") != "off"
         # Nice to have: a read-only prefix or user.ltx never stops the launch.
         try:

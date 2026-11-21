@@ -61,11 +61,26 @@ def sanitize_name(name: str) -> str:
     """Return a safe single directory name for an installed mod."""
     if not isinstance(name, str) or any(ord(char) < 32 or ord(char) == 127 for char in name):
         raise ModInstallError("Mod names cannot contain control characters")
-    cleaned = re.sub(r"[\\/:]+", " ", name).strip().strip(".")
+    # Windows also refuses <>"|?* in a folder name, and silently drops a
+    # trailing dot or space - the folder would then not match modlist.txt.
+    unsafe = r'[\\/:<>"|?*]+' if os.name == "nt" else r"[\\/:]+"
+    cleaned = re.sub(unsafe, " ", name).strip().strip(".")
     cleaned = re.sub(r"\s+", " ", cleaned)
     if not cleaned or cleaned in {".", ".."}:
         raise ModInstallError("The archive does not have a usable mod name")
+    if os.name == "nt":
+        # Shorter on Windows: MO2 and the game still hit the 260-character
+        # path limit, and mods nest gamedata\... deep below this folder.
+        cleaned = cleaned[:120].rstrip(" .")
+        if cleaned.split(".", 1)[0].strip().lower() in _WINDOWS_DEVICE_NAMES:
+            cleaned = f"{cleaned} mod"  # CON, NUL, COM1... are devices, not folders
+        return cleaned
     return cleaned[:180]
+
+
+_WINDOWS_DEVICE_NAMES = frozenset(
+    {"con", "prn", "aux", "nul"} | {f"com{i}" for i in range(1, 10)} | {f"lpt{i}" for i in range(1, 10)}
+)
 
 
 def drop_romeo_prefix(name: str) -> str:

@@ -2079,7 +2079,10 @@ class MainWindow(QMainWindow):
         if play is not None and play.is_launching:
             menu.addAction(tr("Quit game"), play._confirm_quit_game)
             # The in-game panel: it toggles, and closes with the game (stop_key).
-            menu.addAction(tr("Graphics"), graphics_window.toggle)
+            # Linux only: its pipe IPC can't work on Windows, where it was
+            # left running as an orphan.
+            if os.name != "nt":
+                menu.addAction(tr("Graphics"), graphics_window.toggle)
         else:
             launch = menu.addAction(tr("Launch Game"), self._launch_from_tray)
             launch.setEnabled(not self.install_busy)

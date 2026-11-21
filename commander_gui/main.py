@@ -421,12 +421,37 @@ def _hide_child_consoles() -> None:
     subprocess.Popen = _NoWindowPopen  # type: ignore[misc]
 
 
+def _stable_working_directory() -> None:
+    """Windows: start from COMMANDER's own data folder, whoever started it.
+
+    The CLI's default profile folders are relative ("gamma/anomaly"). Started
+    at login (HKCU Run) the working directory is System32, from the Start menu
+    the install folder, from a terminal anywhere - so those defaults pointed
+    somewhere different each time, and COMMANDER wrote its state files there.
+    Installs that already exist relative to where it was started are pinned
+    to absolute paths first (load_settings does that), so none is lost.
+    """
+    from .settings import load_settings
+
+    try:
+        load_settings()
+    except Exception:  # noqa: BLE001 - the settings page reports problems later
+        pass
+    base = settings_dir()
+    try:
+        base.mkdir(parents=True, exist_ok=True)
+        os.chdir(base)
+    except OSError:
+        pass
+
+
 def main(argv: list[str] | None = None) -> int:
     global _INSTANCE_LOCK, _PREVIOUS_QT_HANDLER
     install_excepthook()
     install_crash_handler()
     if os.name == "nt":
         _hide_child_consoles()
+        _stable_working_directory()
     _ensure_local_bin_on_path()
     argv = list(sys.argv if argv is None else argv)
     # Deck Mode is SteamOS-only; never offered on Windows.

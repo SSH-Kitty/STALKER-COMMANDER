@@ -153,7 +153,13 @@ def _replace_roots(text: str, roots: dict[str, Path]) -> str:
 def needs_fix(anomaly: str | Path, gamma: str | Path) -> bool:
     """Whether ModOrganizer.ini still has Windows paths COMMANDER can point
     at *anomaly* or *gamma*. Paths on other drives don't count: they are
-    left alone, so asking again on every switch would never end."""
+    left alone, so asking again on every switch would never end.
+
+    Never on Windows: there every install has drive paths, and "fixing"
+    them wrote ``Z:C:\...`` paths MO2 could not open.
+    """
+    if os.name == "nt":
+        return False
     try:
         text = (Path(gamma) / "ModOrganizer.ini").read_text(encoding="utf-8", errors="replace")
     except OSError:
@@ -166,7 +172,10 @@ def fix_windows_paths(anomaly: str | Path, gamma: str | Path) -> list[str]:
 
     Keeps the original as ``ModOrganizer.ini.windows.bak``. Returns the
     Windows paths that are outside both folders and so were left alone.
+    Does nothing on Windows (see needs_fix).
     """
+    if os.name == "nt":
+        return []
     anomaly, gamma = Path(anomaly), Path(gamma)
     ini = gamma / "ModOrganizer.ini"
     text = ini.read_text(encoding="utf-8", errors="replace")
@@ -248,7 +257,10 @@ def split_cache(gamma: str | Path, cache: str | Path) -> str:
     """Move a cache kept in ``gamma/downloads`` (the Windows layout) to a
     ``cache`` folder next to GAMMA, leaving ``downloads`` as a symlink to
     it - the Linux layout the CLI makes. Returns the cache to use: the
-    old one when there is nothing to move or the move fails."""
+    old one when there is nothing to move or the move fails. Windows keeps
+    the Windows layout (and symlinks need extra rights there)."""
+    if os.name == "nt":
+        return str(cache)
     gamma, cache = Path(gamma), Path(cache)
     downloads = gamma / "downloads"
     target = gamma.parent / "cache"

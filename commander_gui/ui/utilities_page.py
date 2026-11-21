@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import os
+import re
 import shutil
 import time
 import uuid
@@ -584,7 +585,16 @@ def _move_folders(
                 # Same folder, so normally one atomic rename: no second copy
                 # of a 100+ GB install on the (often nearly full) source disk.
                 os.rename(src, backup)
-            except OSError:
+            except OSError as exc:
+                if os.name == "nt":
+                    # Windows refuses the rename while any program has a file
+                    # in the folder open. Copying instead would need a second
+                    # full copy on the source disk, and deleting it would hit
+                    # the same open files - stop, nothing has changed yet.
+                    raise OSError(
+                        f"{label} is in use, so it can't be moved: {src}. Close Mod Organizer 2, "
+                        "the game and any File Explorer window in that folder, then try again."
+                    ) from exc
                 # src is a mount point or similar: fall back to a real copy.
                 shutil.copytree(src, backup, symlinks=True)
                 shutil.rmtree(src)
@@ -681,9 +691,22 @@ def _rewrite_mo2_ini_paths(
     # mangle the longer path's occurrences before its own replacement runs,
     # silently corrupting it into a hybrid old/new path.
     pairs.sort(key=lambda pair: len(pair[0]), reverse=True)
-    updated = text
+    # Windows paths are case-insensitive: MO2 may have written "c:/games/gamma"
+    # for a profile saved as "C:\Games\GAMMA". One pass over one pattern, so a
+    # new path that contains an old one is never substituted into again.
+    nocase = os.name == "nt"
+
+    def key(value: str) -> str:
+        return value.lower() if nocase else value
+
+    lookup: dict[str, str] = {}
     for old_variant, new_variant in pairs:
-        updated = updated.replace(old_variant, new_variant)
+        lookup.setdefault(key(old_variant), new_variant)
+    pattern = re.compile(
+        "|".join(re.escape(old_variant) for old_variant, _new in pairs),
+        re.IGNORECASE if nocase else 0,
+    )
+    updated = pattern.sub(lambda match: lookup[key(match.group(0))], text)
     if updated == text:
         raise ValueError(f"No configured paths were found in {ini}")
     # A new path may itself contain an old one (".../GAMMA" moved to
@@ -691,8 +714,8 @@ def _rewrite_mo2_ini_paths(
     # freshly written new paths.
     remainder = updated
     for _old_variant, new_variant in sorted(pairs, key=lambda pair: len(pair[1]), reverse=True):
-        remainder = remainder.replace(new_variant, "")
-    if any(old_variant in remainder for old_variant, _new_variant in pairs):
+        remainder = re.sub(re.escape(new_variant), "", remainder, flags=re.IGNORECASE if nocase else 0)
+    if pattern.search(remainder):
         raise ValueError(f"Old paths remain in {ini}")
     backup = ini.with_name(ini.name + ".gammagui.bak")
     if not backup.exists():

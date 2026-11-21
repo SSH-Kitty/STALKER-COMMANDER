@@ -15138,6 +15138,7 @@ class TesterNov2VerifyAndImportTests(unittest.TestCase):
             again = scan_mods_md5(str(gamma), trust_baseline=True)
             self.assertEqual(again.changed, ["mods/11- Other/a.script"])
 
+    @unittest.skipIf(os.name == "nt", "the Linux cache layout; Windows keeps GAMMA/downloads")
     def test_split_cache_moves_downloads_next_to_gamma(self):
         from commander_gui.game_installs import split_cache
 
