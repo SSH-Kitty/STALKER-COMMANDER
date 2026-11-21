@@ -69,5 +69,19 @@ class QtMessageHandlerTests(unittest.TestCase):
             main._quiet_qt_message_handler(QtMsgType.QtInfoMsg, None, "hello")
 
 
+class AssistantPathTests(unittest.TestCase):
+    """The Assistant must look where COMMANDER writes, on every platform
+    (it used ~/.config on Windows too: no dumps, wrong theme)."""
+
+    def test_dumps_and_settings_are_commanders_own(self):
+        from assistant.dump import default_dumps_dir
+        from assistant.ui.theme import config_path
+        from commander_gui.config import gui_settings_path
+        from commander_gui.log_dump import log_dumps_dir
+
+        self.assertEqual(default_dumps_dir(), log_dumps_dir())
+        self.assertEqual(config_path(), gui_settings_path())
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 from pathlib import Path
 
@@ -42,8 +41,10 @@ _ACTIVE = "gamma"
 
 
 def config_path() -> Path:
-    root = os.environ.get("XDG_CONFIG_HOME")
-    return (Path(root) if root else Path.home() / ".config") / "stalker-gamma" / "gui-settings.json"
+    """COMMANDER's gui-settings.json (theme, font), on every platform."""
+    from commander_gui.config import gui_settings_path
+
+    return gui_settings_path()
 
 
 def load_saved_theme() -> str:

@@ -7,7 +7,6 @@ entries grouped under source prefixes (``commander/``, ``anomaly/``,
 
 from __future__ import annotations
 
-import os
 import re
 import zipfile
 import zlib
@@ -75,12 +74,15 @@ class DumpError(ValueError):
 
 
 def default_dumps_dir() -> Path:
-    """Where COMMANDER stores log dumps on this machine."""
-    base = os.environ.get("XDG_CONFIG_HOME")
-    if not base:
-        base = os.path.join(Path.home(), ".config")
-    base = Path(base) / "stalker-gamma"
-    return base / "logs" / "dumps"
+    """Where COMMANDER stores log dumps on this machine.
+
+    COMMANDER's own settings folder: ~/.config/stalker-gamma (or
+    $XDG_CONFIG_HOME) on Linux, %APPDATA%/stalker-gamma on Windows - where
+    looking in ~/.config found no dumps and made a stray folder.
+    """
+    from commander_gui.config import settings_dir
+
+    return settings_dir() / "logs" / "dumps"
 
 
 def _mtime_of(path: Path) -> float:

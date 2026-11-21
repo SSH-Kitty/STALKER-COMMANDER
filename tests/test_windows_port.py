@@ -354,5 +354,52 @@ class DiscordPipeTimeoutTest(unittest.TestCase):
             kernel32.CloseHandle(wintypes.HANDLE(server))
 
 
+@unittest.skipUnless(os.name == "nt", "Windows only")
+class FolderPickerTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+
+        cls.app = QApplication.instance() or QApplication([])
+
+    def test_typed_windows_paths_are_paths_not_filters(self):
+        from commander_gui.ui.file_dialog import looks_like_path
+
+        for path in (r"D:\Games", "d:/x", r"\\nas\share", "/x", "~"):
+            self.assertTrue(looks_like_path(path), path)
+        for text in ("gamma", "D:", r"mods\x"):
+            self.assertFalse(looks_like_path(text), text)
+
+    def test_drive_letters_are_listed(self):
+        from commander_gui.ui.file_dialog import drives
+
+        listed = drives()
+        roots = [str(root) for _name, root, _used in listed]
+        self.assertIn("C:\\", roots)
+        self.assertEqual(roots, sorted(roots, key=str.lower))
+        self.assertTrue(all(name.endswith(":") or name.endswith(":)") for name, _root, _used in listed))
+
+    def test_hidden_and_system_entries_are_hidden(self):
+        import ctypes
+
+        from commander_gui.ui.file_dialog import _Picker
+
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "Games").mkdir()
+            secret = Path(tmp) / "$RECYCLE.BIN"
+            secret.mkdir()
+            ctypes.windll.kernel32.SetFileAttributesW(str(secret), 0x2 | 0x4)
+            picker = _Picker(None, "Pick", tmp, "dir")
+            try:
+                shown = [picker.listing.item(i).text() for i in range(picker.listing.count())]
+                self.assertEqual(shown, ["Games"])
+                picker._set_hidden(True)
+                shown = [picker.listing.item(i).text() for i in range(picker.listing.count())]
+                self.assertEqual(sorted(shown), ["$RECYCLE.BIN", "Games"])
+            finally:
+                picker.deleteLater()
+                ctypes.windll.kernel32.SetFileAttributesW(str(secret), 0x80)
+
+
 if __name__ == "__main__":
     unittest.main()
