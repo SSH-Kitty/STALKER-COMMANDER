@@ -665,8 +665,13 @@ class MainWindow(QMainWindow):
         self.mod_counter_label.setObjectName("modCounter")
         right_layout.addWidget(self.mod_counter_label)
 
-        self._cog = QPushButton(tr("⚙"))
+        self._cog = QPushButton()
         self._cog.setObjectName("cogButton")
+        self._cog.setIconSize(QSize(20, 20))
+        # A focused button draws its icon in Active (highlight) mode, which
+        # left the cog lit after clicking it until focus moved elsewhere.
+        self._cog.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._refresh_cog_icon()
         self._cog.setToolTip(tr("Settings"))
         self._cog.setCursor(Qt.CursorShape.PointingHandCursor)
         self._cog.setFixedHeight(28)
@@ -1669,8 +1674,20 @@ class MainWindow(QMainWindow):
             return
         self.tabs.setCurrentIndex(_TAB_INDEX[key])
 
+    def _refresh_cog_icon(self) -> None:
+        from PySide6.QtGui import QColor
+
+        from .gear_icon import gear_icon
+
+        tokens = active_theme_tokens()
+        highlight = QColor(tokens.get("accent_strong", "#9fe96f"))
+        idle = QColor(tokens.get("text_disabled", "#7f8f78"))
+        active = bool(self._cog.property("active"))
+        self._cog.setIcon(gear_icon(highlight if active else idle, highlight, 20))
+
     def _set_cog_active(self, active: bool) -> None:
         self._cog.setProperty("active", active)
+        self._refresh_cog_icon()
         self._cog.style().unpolish(self._cog)
         self._cog.style().polish(self._cog)
 
@@ -1884,6 +1901,7 @@ class MainWindow(QMainWindow):
                 for event_filter in filters:
                     app.installEventFilter(event_filter)
         self.tabs.update()
+        self._refresh_cog_icon()
         QTimer.singleShot(0, self._update_overflow)
         self.backdrop.update()
         self.update()
