@@ -1,4 +1,4 @@
-; Inno Setup script for STALKER COMMANDER (Windows).
+﻿; Inno Setup script for STALKER COMMANDER (Windows).
 ;
 ; Build from the repo root, after PyInstaller has produced dist\COMMANDER:
 ;
@@ -7,11 +7,15 @@
 ;
 ; Output: dist\STALKER-COMMANDER-Setup-<version>.exe
 ;
-; Override on the command line when needed:
-;   ISCC /DSourceDir=C:\path\to\COMMANDER /DAppVersion=1.4.1 COMMANDER.iss
+; Override on the command line when needed (CI passes the real version):
+;   ISCC /DSourceDir=C:\path\to\COMMANDER /DAppVersion=1.4.1 /DNumericVersion=1.4.1 COMMANDER.iss
 
 #ifndef AppVersion
   #define AppVersion "1.4.0"
+#endif
+#ifndef NumericVersion
+  ; VersionInfoVersion must be digits only (AppVersion may be "1.4.0-unstable2").
+  #define NumericVersion "1.4.0"
 #endif
 #ifndef SourceDir
   #define SourceDir "..\..\..\dist\COMMANDER"
@@ -32,7 +36,7 @@ AppPublisher={#AppPublisher}
 AppPublisherURL={#AppUrl}
 AppSupportURL={#AppUrl}/issues
 AppUpdatesURL={#AppUrl}/releases
-VersionInfoVersion={#AppVersion}
+VersionInfoVersion={#NumericVersion}
 
 ; Per user by default (no administrator prompt); the user can switch to all users.
 PrivilegesRequired=lowest

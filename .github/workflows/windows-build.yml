@@ -1,4 +1,5 @@
-# Builds the portable Windows version (COMMANDER-windows-x64.zip) on every
+# Builds the portable Windows version (COMMANDER-windows-x64.zip) and the
+# installer (STALKER-COMMANDER-Setup-<version>.exe) on every
 # push to the COMMANDER-Windows branch, or by hand from the Actions tab.
 name: Windows build
 
@@ -33,3 +34,16 @@ jobs:
         with:
           name: COMMANDER-windows-x64
           path: COMMANDER-windows-x64.zip
+      - name: Build the installer
+        shell: pwsh
+        run: |
+          python packaging/windows/installer/make_images.py
+          choco install innosetup --no-progress -y
+          $version = python -c "from commander_gui import __version__; print(__version__)"
+          $numeric = [regex]::Match($version, '^\d+(\.\d+){0,3}').Value
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DAppVersion=$version" "/DNumericVersion=$numeric" packaging/windows/installer/COMMANDER.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: COMMANDER-windows-installer
+          path: dist/STALKER-COMMANDER-Setup-*.exe
