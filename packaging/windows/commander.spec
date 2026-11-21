@@ -5,9 +5,20 @@
 # Output: dist/COMMANDER/COMMANDER.exe
 from pathlib import Path
 
-from PyInstaller.utils.hooks import collect_submodules
-
 ROOT = Path(SPECPATH).parent.parent  # noqa: F821 - defined by PyInstaller
+
+
+def submodules(package):
+    """Every module under ``package``, from the files on disk.
+
+    Not PyInstaller's collect_submodules(): it imports the package in a
+    separate process where the repo is not on sys.path, so it silently
+    returned nothing and the dynamically loaded locales were left out.
+    """
+    for path in (ROOT / package).rglob("*.py"):
+        parts = path.relative_to(ROOT).with_suffix("").parts
+        yield ".".join(parts[:-1] if parts[-1] == "__init__" else parts)
+
 
 # project_root() is <bundle>/_internal, so data keeps its repo-relative path.
 datas = [
@@ -30,7 +41,7 @@ a = Analysis(  # noqa: F821
     # QtWebEngine), never in COMMANDER's.
     hiddenimports=[
         name
-        for name in collect_submodules("commander_gui") + collect_submodules("assistant")
+        for name in [*submodules("commander_gui"), *submodules("assistant")]
         if name != "commander_gui.moddb_browser"
     ],
     # Deck Mode is SteamOS-only; the Qt modules COMMANDER does not use add
