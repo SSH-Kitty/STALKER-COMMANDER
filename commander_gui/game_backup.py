@@ -35,6 +35,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
+from .atomic import replace_file
 from .i18n import tr
 
 #: Why a backup was made. ``manual`` backups are never pruned; the others
@@ -515,9 +516,12 @@ def restore_backup(
             try:
                 with os.fdopen(fd, "wb") as out, archive.open(name) as src:
                     shutil.copyfileobj(src, out)
-                os.replace(tmp, dest)
+                replace_file(Path(tmp), dest)  # a read-only user.ltx too
             except BaseException:
-                Path(tmp).unlink(missing_ok=True)
+                try:
+                    Path(tmp).unlink(missing_ok=True)
+                except OSError:
+                    pass
                 raise
             written += 1
     report(tr("Restored {count} files.", count=written))

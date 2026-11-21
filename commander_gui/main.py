@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 import subprocess
@@ -55,7 +56,7 @@ from .desktop_integration import ensure_menu_entry, join_app_scope, set_process_
 from .fonts import load_bundled_font
 from .i18n import set_active_language, tr
 from .themes import build_palette, build_stylesheet, set_active_theme
-from .ui.common import begin_shutdown, shutdown_active_runners
+from .ui.common import background_work_left, begin_shutdown, shutdown_active_runners
 from .ui.dialogs import MessageBox as QMessageBox
 from .ui.main_window import MainWindow
 
@@ -129,7 +130,9 @@ def _quiet_qt_message_handler(mode: QtMsgType, context, message: str) -> None:
         get_logger().warning("qt: %s", message)
     if _PREVIOUS_QT_HANDLER is not None:
         _PREVIOUS_QT_HANDLER(mode, context, message)
-    else:
+    elif sys.stderr is not None:
+        # None in the windowed Windows build (no console): writing to it
+        # raised inside Qt's callback for every message.
         sys.stderr.write(message + "\n")
 
 
@@ -177,6 +180,11 @@ def _listen_for_wake(window: MainWindow) -> None:
 
     server.newConnection.connect(_wake)
     server.listen(_wake_socket())
+    global _WAKE_SERVER
+    _WAKE_SERVER = server
+
+
+_WAKE_SERVER: QLocalServer | None = None
 
 
 def release_instance_lock() -> None:
@@ -451,6 +459,11 @@ def main(argv: list[str] | None = None) -> int:
     install_crash_handler()
     if os.name == "nt":
         _hide_child_consoles()
+        from .atomic import install_windows_rmtree
+        from .winjob import allow_ctrl_c_for_children
+
+        install_windows_rmtree()
+        allow_ctrl_c_for_children()  # the CLI's cancel is a Ctrl+C
         _stable_working_directory()
     _ensure_local_bin_on_path()
     argv = list(sys.argv if argv is None else argv)
@@ -545,13 +558,26 @@ def main(argv: list[str] | None = None) -> int:
     if not deck:
         _cleanup_interrupted_move(saved)
 
-    # Background network checks have bounded timeouts but may outlive the
-    # window-close event. Wait long enough for them to finish before Qt tears
-    # down their QThreads.
+    # Background work may outlive the window: give a CLI run time to cancel
+    # cleanly, a plain task (network check, folder scan) a moment. Waiting
+    # 30 s for those kept the process alive with no window, and a relaunch
+    # meanwhile was told COMMANDER was already open.
     def _shutdown() -> None:
         begin_shutdown()
-        shutdown_active_runners(timeout_ms=30000)
+        if _WAKE_SERVER is not None:
+            _WAKE_SERVER.close()  # a relaunch now starts fresh
+        shutdown_active_runners(timeout_ms=10000, task_timeout_ms=2000)
         log_shutdown()
+        if background_work_left():
+            # Qt answers destroying a still-running QThread with qFatal - a
+            # crash report on every quit during a long check. Nothing is
+            # left to save (settings are written as they change), so end
+            # the process here instead of tearing those threads down.
+            get_logger().info("quit: background work still running, exiting without teardown")
+            if _INSTANCE_LOCK is not None:
+                _INSTANCE_LOCK.unlock()
+            logging.shutdown()
+            os._exit(0)
 
     app.aboutToQuit.connect(_shutdown)
     log_startup({

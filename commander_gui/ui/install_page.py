@@ -6030,6 +6030,10 @@ class InstallPage(QWidget):
         self._winetricks_status_enabled = True
         if self._vc_task is not None:
             return
+        if self.window.install_busy:
+            QMessageBox.information(self, tr("Please wait"), tr("Another install is still running. Wait for it to finish, then try again."))
+            self._auto_active = False
+            return
         self._vc_then_install = then_install
         self.wt_progress.status_label.setText(tr("Installing the Windows runtimes"))
         self._refresh_wt_extra()
@@ -6037,11 +6041,15 @@ class InstallPage(QWidget):
         task.result.connect(self._on_win_runtimes_done)
         task.error.connect(self._on_win_runtimes_error)
         self._vc_task = task
+        # Locks the other installs, the language switch and quitting without
+        # a warning, like every other install: the elevated installers run on.
+        self.window.set_install_busy(True, "dependencies")
         self._update_button_states()
         task.start()
 
     def _on_win_runtimes_done(self, message: str) -> None:
         self._vc_task = None
+        self.window.set_install_busy(False)
         self.wt_progress.status_label.setText(message)
         self._refresh_wt_extra()
         self._refresh_winetricks_status()
@@ -6051,6 +6059,7 @@ class InstallPage(QWidget):
 
     def _on_win_runtimes_error(self, message: str) -> None:
         self._vc_task = None
+        self.window.set_install_busy(False)
         self._auto_active = False  # an Automatic run stops here
         self._vc_then_install = False
         self.wt_progress.status_label.setText("")

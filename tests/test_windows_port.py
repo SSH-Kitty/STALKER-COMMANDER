@@ -188,5 +188,171 @@ class WindowsProcessTests(unittest.TestCase):
             self.assertTrue(lossless_win.running())
 
 
+
+@unittest.skipUnless(os.name == "nt", "Windows only")
+class ReadOnlyFileTests(unittest.TestCase):
+    """Archives and players leave files read-only; Windows won't replace or delete those."""
+
+    def _read_only(self, path: Path) -> None:
+        import stat
+
+        os.chmod(path, stat.S_IREAD)
+
+    def _writable(self, path: Path) -> bool:
+        import stat
+
+        return bool(os.stat(path).st_mode & stat.S_IWRITE)
+
+    def test_atomic_write_replaces_a_read_only_file_and_keeps_it_read_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "user.ltx"
+            target.write_text("old")
+            self._read_only(target)
+            try:
+                atomic.write_text(target, "new")
+                self.assertEqual(target.read_text(), "new")
+                self.assertFalse(self._writable(target))
+                self.assertEqual(sorted(p.name for p in Path(tmp).iterdir()), ["user.ltx"])
+            finally:
+                os.chmod(target, 0o666)
+
+    def test_rmtree_deletes_read_only_files_even_with_ignore_errors(self):
+        import shutil
+
+        atomic.install_windows_rmtree()
+        for ignore in (True, False):
+            with tempfile.TemporaryDirectory() as tmp:
+                tree = Path(tmp) / "mod"
+                (tree / "gamedata").mkdir(parents=True)
+                for name in ("a.ltx", "gamedata/b.xml"):
+                    (tree / name).write_text("x")
+                    self._read_only(tree / name)
+                shutil.rmtree(tree, ignore_errors=ignore)
+                self.assertFalse(tree.exists())
+
+    def test_rmtree_still_reports_a_file_that_is_open(self):
+        import shutil
+
+        atomic.install_windows_rmtree()
+        with tempfile.TemporaryDirectory() as tmp:
+            tree = Path(tmp) / "mod"
+            tree.mkdir()
+            held = open(tree / "held.txt", "w")  # noqa: SIM115
+            try:
+                with self.assertRaises(PermissionError):
+                    shutil.rmtree(tree)
+                errors = []
+                shutil.rmtree(tree, onexc=lambda *args: errors.append(args))
+                self.assertTrue(errors)
+            finally:
+                held.close()
+
+
+
+_CTRL_C_CHILD = """
+import sys, time
+try:
+    for _ in range(300):
+        time.sleep(0.1)
+    open(sys.argv[1], "w").write("timeout")
+except KeyboardInterrupt:
+    open(sys.argv[1], "w").write("ctrl-c")
+"""
+
+
+@unittest.skipUnless(os.name == "nt", "Windows only")
+class CliProcessTreeTests(unittest.TestCase):
+    """Cancel is a Ctrl+C the CLI can clean up after; the tree dies with COMMANDER."""
+
+    def _child(self, tmp: str, *extra: str):
+        import subprocess
+        import sys
+
+        script = Path(tmp) / "child.py"
+        script.write_text(_CTRL_C_CHILD)
+        out = Path(tmp) / "out.txt"
+        proc = subprocess.Popen(
+            [sys.executable, str(script), str(out), *extra], creationflags=subprocess.CREATE_NO_WINDOW
+        )
+        return proc, out
+
+    def test_ctrl_c_reaches_a_console_less_child_and_spares_us(self):
+        import time
+
+        from commander_gui import winjob
+
+        winjob.allow_ctrl_c_for_children()  # pytest may inherit "ignore Ctrl+C"
+        with tempfile.TemporaryDirectory() as tmp:
+            proc, out = self._child(tmp)
+            try:
+                time.sleep(1.0)  # its KeyboardInterrupt handling is set up
+                self.assertTrue(winjob.send_ctrl_c(proc.pid))
+                proc.wait(15)
+                self.assertEqual(out.read_text(), "ctrl-c")
+            finally:
+                if proc.poll() is None:
+                    proc.kill()
+                    proc.wait()
+
+    def test_terminating_the_job_ends_the_process(self):
+        from commander_gui import winjob
+
+        with tempfile.TemporaryDirectory() as tmp:
+            proc, _out = self._child(tmp)
+            job = winjob.KillOnCloseJob()
+            try:
+                self.assertTrue(job.assign(proc._handle))
+                self.assertTrue(job.terminate())
+                self.assertIsNotNone(proc.wait(10))
+            finally:
+                job.close()
+                if proc.poll() is None:
+                    proc.kill()
+                    proc.wait()
+
+    def test_closing_the_job_ends_what_is_left(self):
+        from commander_gui import winjob
+
+        with tempfile.TemporaryDirectory() as tmp:
+            proc, _out = self._child(tmp)
+            job = winjob.KillOnCloseJob()
+            try:
+                job.assign(proc._handle)
+                job.close()  # what Windows does when COMMANDER exits or crashes
+                self.assertIsNotNone(proc.wait(10))
+            finally:
+                if proc.poll() is None:
+                    proc.kill()
+                    proc.wait()
+
+
+
+@unittest.skipUnless(os.name == "nt", "Windows only")
+class DiscordPipeTimeoutTest(unittest.TestCase):
+    def test_a_pipe_that_never_answers_times_out(self):
+        import ctypes
+        import threading
+        import time
+        from ctypes import wintypes
+
+        from commander_gui.discord_rpc import _PipeSocket
+
+        kernel32 = ctypes.windll.kernel32
+        kernel32.CreateNamedPipeW.restype = wintypes.HANDLE
+        name = r"\\.\pipe\commander-test-silent-" + str(os.getpid())
+        server = kernel32.CreateNamedPipeW(name, 3, 0, 1, 4096, 4096, 0, None)
+        threading.Thread(target=lambda: kernel32.ConnectNamedPipe(wintypes.HANDLE(server), None), daemon=True).start()
+        time.sleep(0.2)
+        pipe = open(name, "r+b", buffering=0)  # noqa: SIM115
+        try:
+            started = time.monotonic()
+            with self.assertRaises(TimeoutError):
+                _PipeSocket(pipe, timeout=0.3).recv(8)
+            self.assertLess(time.monotonic() - started, 2)
+        finally:
+            pipe.close()
+            kernel32.CloseHandle(wintypes.HANDLE(server))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -44,6 +44,47 @@ def remove_stale(folder: str | Path, pattern: str, max_age_s: float = 86400) -> 
             pass
 
 
+def install_windows_rmtree() -> None:
+    """Windows: make every ``shutil.rmtree`` delete read-only files too.
+
+    Files unpacked from archives (and many mods) carry the read-only
+    attribute, which Windows will not delete. ``rmtree`` then failed - or,
+    with ``ignore_errors=True`` as most callers pass, silently left gigabytes
+    behind (a Fresh Reset that stopped halfway, quarantine and ``.old``
+    folders that never went). Patched once here like ``_hide_child_consoles``
+    in main.py, rather than at the ~60 call sites. A file that is still open
+    elsewhere stays an error for the caller, exactly as before.
+    """
+    import shutil
+
+    if os.name != "nt" or getattr(shutil.rmtree, "_clears_read_only", False):
+        return
+    original = shutil.rmtree
+
+    def rmtree(path, ignore_errors=False, onerror=None, *, onexc=None, dir_fd=None):
+        def retry(func, failed, exc):
+            if isinstance(exc, PermissionError):
+                try:
+                    os.chmod(failed, stat.S_IWRITE)
+                    func(failed)
+                    return
+                except OSError as again:
+                    exc = again
+            if ignore_errors:
+                return
+            if onexc is not None:
+                return onexc(func, failed, exc)
+            if onerror is not None:
+                return onerror(func, failed, (type(exc), exc, exc.__traceback__))
+            raise exc
+
+        return original(path, onexc=retry, dir_fd=dir_fd)
+
+    rmtree._clears_read_only = True  # type: ignore[attr-defined]
+    rmtree.avoids_symlink_attacks = original.avoids_symlink_attacks  # type: ignore[attr-defined]
+    shutil.rmtree = rmtree
+
+
 def split_lines(text: str) -> list[str]:
     """``text.splitlines()`` for files that only break on \\n, \\r\\n or \\r.
 
@@ -100,6 +141,43 @@ def _replace(source: Path, target: Path, *, attempts: int = 12) -> None:
             delay = min(delay * 2, 0.25)
 
 
+def _replace_read_only(source: Path, target: Path, mode: int) -> None:
+    """Windows: replace a read-only file and keep it read-only.
+
+    Players mark user.ltx read-only so the game stops resetting it. POSIX
+    replaces such a file (only the folder's permissions count) and the mode
+    is copied onto the new one; Windows refuses with "Access is denied", so
+    the flag comes off for the swap and goes back on after.
+    """
+    os.chmod(target, mode | stat.S_IWRITE)
+    try:
+        _replace(source, target)
+    except BaseException:
+        try:
+            os.chmod(target, mode)
+        except OSError:
+            pass
+        raise
+    try:
+        os.chmod(target, mode)
+    except OSError:
+        pass
+
+
+def replace_file(source: Path, target: Path) -> None:
+    """``os.replace(source, target)`` that also works on Windows when
+    ``target`` is briefly open elsewhere or marked read-only (kept so)."""
+    if os.name == "nt":
+        try:
+            mode = stat.S_IMODE(os.stat(target).st_mode)
+        except OSError:
+            mode = None
+        if mode is not None and not mode & stat.S_IWRITE:
+            _replace_read_only(Path(source), Path(target), mode)
+            return
+    _replace(Path(source), Path(target))
+
+
 def _write(path: Path, data: bytes, *, lock: bool) -> None:
     # A symlinked settings.json or modlist.txt (dotfile repos, profiles
     # shared between installs) is written *through*: os.replace() on the
@@ -122,14 +200,16 @@ def _write(path: Path, data: bytes, *, lock: bool) -> None:
             )
             temporary_path = Path(temporary)
             try:
+                mode = stat.S_IMODE(path.stat().st_mode)
+            except OSError:
+                mode = None
+            if mode is not None and os.name != "nt":
                 # mkstemp creates 0o600; keep the replaced file's permissions
                 # so shared files (e.g. the autostart .desktop) stay readable.
-                os.chmod(
-                    temporary_path,
-                    stat.S_IMODE(path.stat().st_mode),
-                )
-            except OSError:
-                pass
+                try:
+                    os.chmod(temporary_path, mode)
+                except OSError:
+                    pass
             try:
                 stream = os.fdopen(fd, "wb")
             except BaseException:
@@ -142,7 +222,10 @@ def _write(path: Path, data: bytes, *, lock: bool) -> None:
                 stream.write(data)
                 stream.flush()
                 os.fsync(stream.fileno())
-            _replace(temporary_path, path)
+            if os.name == "nt" and mode is not None and not mode & stat.S_IWRITE:
+                _replace_read_only(temporary_path, path, mode)
+            else:
+                _replace(temporary_path, path)
             try:  # make the rename itself survive a power cut
                 dir_fd = os.open(path.parent, os.O_RDONLY)
                 try:
@@ -157,7 +240,10 @@ def _write(path: Path, data: bytes, *, lock: bool) -> None:
                 lock_fd = None
     except BaseException:
         if "temporary_path" in locals():
-            temporary_path.unlink(missing_ok=True)
+            try:
+                temporary_path.unlink(missing_ok=True)
+            except OSError:
+                pass  # never hide the error that got us here
         if lock_fd is not None:
             fcntl.flock(lock_fd, fcntl.LOCK_UN)
             os.close(lock_fd)

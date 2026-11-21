@@ -149,10 +149,14 @@ def _copy_atomic(src: Path, dst: Path) -> None:
     os.close(fd)
     try:
         shutil.copyfile(src, tmp)
-        shutil.copymode(src, tmp)  # mkstemp makes it 0600; keep the source's mode
-        os.replace(tmp, dst)
+        if os.name != "nt":
+            shutil.copymode(src, tmp)  # mkstemp makes it 0600; keep the source's mode
+        atomic.replace_file(Path(tmp), dst)
     except BaseException:
-        Path(tmp).unlink(missing_ok=True)
+        try:
+            Path(tmp).unlink(missing_ok=True)
+        except OSError:
+            pass
         raise
 
 
@@ -1009,9 +1013,12 @@ def _extract(archive: zipfile.ZipFile, name: str, dest: Path) -> None:
     try:
         with os.fdopen(fd, "wb") as out, archive.open(name) as src:
             shutil.copyfileobj(src, out, 1 << 20)
-        os.replace(tmp, dest)
+        atomic.replace_file(Path(tmp), dest)
     except BaseException:
-        Path(tmp).unlink(missing_ok=True)
+        try:
+            Path(tmp).unlink(missing_ok=True)
+        except OSError:
+            pass
         raise
 
 

@@ -35,7 +35,7 @@ def filtered_message_handler(previous):
             return
         if previous is not None:
             previous(mode, context, message)
-        else:
+        elif sys.stderr is not None:  # None in a windowed (no console) build
             sys.stderr.write(f"{message}\n")
 
     return handler

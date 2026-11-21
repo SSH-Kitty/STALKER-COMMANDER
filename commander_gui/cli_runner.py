@@ -99,6 +99,8 @@ class CliWorker(QObject):
         self._env: dict[str, str] | None = None
         self._cancel_event = threading.Event()
         self._kill_timer_for: subprocess.Popen[str] | None = None
+        #: Windows: the job holding the CLI and its helpers (see winjob).
+        self._job = None
 
     def setup(
         self, command: list[str], cwd: str = "", env: dict[str, str] | None = None
@@ -140,9 +142,8 @@ class CliWorker(QObject):
                 encoding="utf-8",
                 errors="replace",
                 start_new_session=os.name != "nt",
-                creationflags=(
-                    subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
-                ),
+                # Windows: no CREATE_NEW_PROCESS_GROUP - it turns Ctrl+C off
+                # for the CLI, and Ctrl+C is how cancel() asks it to stop.
             )
         except (OSError, ValueError) as exc:
             self._process = None
@@ -151,9 +152,24 @@ class CliWorker(QObject):
             self.line_ready.emit(message)
             self.finished.emit(SPAWN_FAILED_RC, message)
             return
+        if os.name == "nt":
+            from .winjob import KillOnCloseJob
+
+            # Ends with COMMANDER, even a crashed one, and holds every helper
+            # the CLI starts so a hard kill reaches them too.
+            self._job = KillOnCloseJob()
+            self._job.assign(getattr(self._process, "_handle", 0))
         if self._cancel_event.is_set():
             # Cancel arrived before the process spawned; apply it now.
             self.cancel()
+        try:
+            return self._stream(command, collected)
+        finally:
+            job, self._job = self._job, None
+            if job is not None:
+                job.close()  # also ends any helper the CLI left running
+
+    def _stream(self, command: list[str], collected: deque[str]) -> None:
         try:
             if self._process.stdout is None:
                 raise RuntimeError(f"No stdout pipe for {command[0]!r}")
@@ -172,7 +188,7 @@ class CliWorker(QObject):
                 try:
                     if os.name != "nt":
                         os.killpg(proc.pid, signal.SIGKILL)
-                    else:
+                    elif not (self._job is not None and self._job.terminate()):
                         proc.kill()
                 except OSError:
                     try:
@@ -196,7 +212,14 @@ class CliWorker(QObject):
         pid = proc.pid
         try:
             if os.name == "nt":
-                proc.send_signal(_CANCEL_SIGNAL)
+                from .winjob import send_ctrl_c
+
+                # Ctrl+C on the CLI's own console, as SIGINT on Linux: the
+                # CLI cancels cleanly (resume bookkeeping). CTRL_BREAK via
+                # send_signal never arrived - the windowed COMMANDER shares
+                # no console with it - so every cancel was a hard kill.
+                if not send_ctrl_c(pid):
+                    raise OSError("Ctrl+C could not be delivered")
             else:
                 os.killpg(pid, _CANCEL_SIGNAL)
                 # A paused (SIGSTOPped) group only acts on the cancel signal
@@ -204,10 +227,7 @@ class CliWorker(QObject):
                 # the CLI never runs its own cancel cleanup.
                 os.killpg(pid, signal.SIGCONT)
         except OSError:
-            try:
-                proc.kill()
-            except OSError:
-                pass
+            self._kill_tree(proc)
         if self._kill_timer_for is proc:
             # A cancel() already started a 3s kill-timer for this same
             # process - mashing Cancel must not spawn another one.
@@ -227,10 +247,14 @@ class CliWorker(QObject):
         # happened to recycle the same pid.
         if self._process is not proc or proc.poll() is not None:
             return
+        self._kill_tree(proc)
+
+    def _kill_tree(self, proc: subprocess.Popen) -> None:
+        """Hard-kill the CLI and every helper it started."""
         try:
             if os.name != "nt":
                 os.killpg(proc.pid, signal.SIGKILL)
-            else:
+            elif not (self._job is not None and self._job.terminate()):
                 proc.kill()
         except OSError:
             try:
@@ -268,16 +292,7 @@ class CliWorker(QObject):
     def kill(self) -> None:
         proc = self._process
         if proc is not None and proc.poll() is None:
-            try:
-                if os.name != "nt":
-                    os.killpg(proc.pid, signal.SIGKILL)
-                else:
-                    proc.kill()
-            except OSError:
-                try:
-                    proc.kill()
-                except OSError:
-                    pass
+            self._kill_tree(proc)
 
 
 def _as_text(value: str | bytes | None) -> str:

@@ -176,7 +176,12 @@ def watch(page: QWidget) -> None:
     page.installEventFilter(watcher)
     top = QWidget.window(page)  # pages keep their own ``window`` attribute
     if top is not page:
-        _spy(top).watchers.append(watcher)
+        spy = _spy(top)
+        spy.watchers.append(watcher)
+        # Switching the language rebuilds every page: a watcher left on the
+        # list after its page is gone raised "C++ object already deleted" on
+        # every resize, and stopped the watchers after it from running.
+        page.destroyed.connect(lambda *_args, spy=spy, watcher=watcher: spy.forget(watcher))
     for area in page.findChildren(QScrollArea):
         if area.widget() is not None:
             area.widget().installEventFilter(watcher)
@@ -208,9 +213,18 @@ class _WindowSpy(QObject):
             if kind in (QEvent.Type.WinIdChange, QEvent.Type.Show):
                 self._hook()
         elif kind == QEvent.Type.Resize:
-            for watcher in self.watchers:
-                watcher.window_resizing()
+            for watcher in list(self.watchers):
+                try:
+                    watcher.window_resizing()
+                except RuntimeError:  # its page was deleted meanwhile
+                    self.forget(watcher)
         return False
+
+    def forget(self, watcher: _Watcher) -> None:
+        try:
+            self.watchers.remove(watcher)
+        except ValueError:
+            pass
 
 
 _spies: dict[QWidget, _WindowSpy] = {}

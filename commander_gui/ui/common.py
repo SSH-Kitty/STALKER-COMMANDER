@@ -872,7 +872,7 @@ def resume_after_shutdown() -> None:
     _SHUTTING_DOWN = False
 
 
-def shutdown_active_runners(timeout_ms: int = 5000) -> None:
+def shutdown_active_runners(timeout_ms: int = 5000, task_timeout_ms: int | None = None) -> None:
     """Cancel and wait for all active command threads (called on app quit).
 
     ``timeout_ms`` is a budget shared across every active runner/task, not
@@ -884,6 +884,10 @@ def shutdown_active_runners(timeout_ms: int = 5000) -> None:
     (app quit) could take minutes. A single deadline, with each
     remaining-time slice shrinking as it goes, keeps the real wait
     bounded by what the caller actually asked for.
+
+    ``task_timeout_ms`` caps the plain Python tasks' share separately: a CLI
+    run deserves time to cancel cleanly (its resume bookkeeping), a network
+    probe or folder scan does not, and nothing can stop it early anyway.
     """
     begin_shutdown()
     deadline = time.monotonic() + max(0, timeout_ms) / 1000
@@ -893,6 +897,8 @@ def shutdown_active_runners(timeout_ms: int = 5000) -> None:
             runner.shutdown(timeout_ms=remaining_ms)
         except Exception:  # noqa: BLE001, S110
             pass
+    if task_timeout_ms is not None:
+        deadline = min(deadline, time.monotonic() + max(0, task_timeout_ms) / 1000)
     for task in list(_ACTIVE_TASKS):
         remaining_ms = max(0, round((deadline - time.monotonic()) * 1000))
         shutdown = getattr(task, "shutdown", None)
@@ -901,6 +907,25 @@ def shutdown_active_runners(timeout_ms: int = 5000) -> None:
                 shutdown(timeout_ms=remaining_ms)
             except Exception:  # noqa: BLE001, S110
                 pass
+
+
+def background_work_left() -> bool:
+    """True while a command or task thread is still running (after
+    ``shutdown_active_runners`` gave up waiting on it)."""
+    for runner in list(_ACTIVE_RUNNERS):
+        try:
+            if runner.is_running():
+                return True
+        except RuntimeError:
+            continue
+    for task in list(_ACTIVE_TASKS):
+        thread = getattr(task, "_thread", None)
+        try:
+            if thread is not None and thread.isRunning():
+                return True
+        except RuntimeError:
+            continue
+    return False
 
 
 def instance_window_title(title: str) -> str:

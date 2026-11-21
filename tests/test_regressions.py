@@ -4682,12 +4682,9 @@ class RegressionTests(unittest.TestCase):
         self.assertEqual(finished, [(0, "line")])
         kwargs = popen.call_args.kwargs
         self.assertEqual(kwargs["start_new_session"], os.name != "nt")
-        self.assertEqual(
-            kwargs["creationflags"],
-            subprocess.CREATE_NEW_PROCESS_GROUP
-            if os.name == "nt"
-            else 0,
-        )
+        # Windows: no new process group - it disables Ctrl+C, the CLI's
+        # cancel; a kill-on-close job holds the tree instead (see winjob).
+        self.assertFalse(kwargs.get("creationflags", 0) & getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
 
     @patch("commander_gui.cli_runner.cli_binary_path", return_value=Path("/cli/stalker-gamma"))
     @patch("commander_gui.cli_runner._terminate_process_group")
