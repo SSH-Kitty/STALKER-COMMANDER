@@ -54,6 +54,7 @@ _DEFAULTS = {
     "tray_hint_shown": False,  # the one-time "still running in the tray" notification was sent
     "custom_launch_options": "",  # extra tokens prepended to the launch command
     "lossless_dll": "",  # Lossless Scaling DLL picked by hand for frame generation
+    "lossless_exe": "",  # LosslessScaling.exe picked by hand for frame generation on Windows
     "mo2_display_dpi": 120,  # Wine display DPI for Mod Organizer 2 (125%)
     "tool_overrides": {},  # manually selected Linux tools and runner locations
     "move_dest": "",  # in-progress Move Game destination (cleared on completion)

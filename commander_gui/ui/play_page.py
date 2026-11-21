@@ -34,7 +34,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .. import applog, coop, gui_settings, launch_options, overlays
+from .. import applog, coop, gui_settings, launch_options, lossless_win, overlays
 from ..assistant_launcher import AssistantLaunchError, launch_assistant
 from ..config import logs_dir
 from ..discord_rpc import (
@@ -134,7 +134,7 @@ from .common import (
     wine_unsafe_folder,
 )
 from .dialogs import MessageBox as QMessageBox
-from .frame_gen_card import FrameGenCard
+from .frame_gen_card import FrameGenCard, WindowsFrameGenCard
 from .game_splash import is_launcher
 from .install_page import _resume_state_matches
 from .multiplayer_page import confirm_player_name, refuse_launch
@@ -661,7 +661,8 @@ class PlayPage(QWidget):
         cards_row = reflow.row(16)
         self._cards_row = cards_row
         cards_row.addWidget(options_card, 3)
-        self._frame_gen = FrameGenCard(self.custom_options_edit.text, self.custom_options_edit.setText)
+        card_class = WindowsFrameGenCard if os.name == "nt" else FrameGenCard
+        self._frame_gen = card_class(self.custom_options_edit.text, self.custom_options_edit.setText)
         self._frame_gen.dll_changed.connect(self._refresh_preview)
         # The overlay's Frame generation tab works on this text.
         graphics_window.connect_options(
@@ -673,10 +674,11 @@ class PlayPage(QWidget):
         cards_row.addWidget(self._frame_gen, 2)
         root.addLayout(cards_row)
         if os.name == "nt":
-            # Launch options are Linux wrappers/variables (MangoHud,
-            # gamescope, Wine); frame generation is the lsfg-vk layer.
+            # The options are Linux wrappers/variables (MangoHud, gamescope,
+            # Wine), and no Windows ones are verified for Anomaly/GAMMA. The
+            # text field stays (hidden): Frame generation keeps its settings
+            # in it.
             options_card.hide()
-            self._frame_gen.hide()
 
         # _refresh_preview_inner() still writes the resolved launch command
         # into this (setPlainText/setStyleSheet) as part of deciding
@@ -1635,6 +1637,8 @@ class PlayPage(QWidget):
             snapshot = self._session_snapshot(monitoring_mo2, open_mo2)
             if not open_mo2:
                 self._show_splash(coop_launch)
+            if os.name == "nt" and not open_mo2 and profile is not None:
+                self._start_lossless_scaling(profile.anomaly)
             self._proc = launch_detached(
                 command, env, cwd, log_path=log_path, registry=self._registry
             )
@@ -1665,6 +1669,16 @@ class PlayPage(QWidget):
             return
         self._start_launch_timer(label, command, log_path)
         self._set_result(tr("Launching {name}", name=label))
+
+    def _start_lossless_scaling(self, anomaly) -> None:
+        """Windows frame generation: write the game's profile into Lossless
+        Scaling's settings and start it with the game. Never stops a launch."""
+        try:
+            text = self.custom_options_edit.text()
+            if lossless_win.write_profiles(text, Path(anomaly)) == "ok":
+                lossless_win.start()
+        except Exception as exc:  # noqa: BLE001 - frame generation must not block the game
+            applog.get_logger().warning("Lossless Scaling setup failed: %s", exc)
 
     def _start_launch_timer(self, label: str, command: list[str], log_path: Path | None) -> None:
         # Use a repeating timer to detect fast failures without delaying recovery,
