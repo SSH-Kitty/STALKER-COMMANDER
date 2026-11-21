@@ -37,6 +37,27 @@ SPAWN_FAILED_RC = 126
 #: Exit code reported when a synchronous command exceeded its timeout.
 TIMEOUT_RC = 124
 _MAX_OUTPUT_LINES = 5000
+
+
+def _nt_suspend(pid: int, suspend: bool) -> None:
+    """Freeze/thaw every thread of *pid* (Windows has no SIGSTOP/SIGCONT).
+
+    The CLI does its downloading and 7-Zip extraction in-process, so
+    suspending the CLI process itself pauses the whole install.
+    """
+    import ctypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    ntdll = ctypes.WinDLL("ntdll")
+    kernel32.OpenProcess.restype = ctypes.c_void_p
+    handle = kernel32.OpenProcess(0x0800, False, pid)  # PROCESS_SUSPEND_RESUME
+    if not handle:
+        raise OSError(ctypes.get_last_error(), "OpenProcess failed")
+    try:
+        call = ntdll.NtSuspendProcess if suspend else ntdll.NtResumeProcess
+        call(ctypes.c_void_p(handle))
+    finally:
+        kernel32.CloseHandle(ctypes.c_void_p(handle))
 _MAX_OUTPUT_CHARS = 1_000_000
 
 
@@ -207,9 +228,12 @@ class CliWorker(QObject):
     def pause(self) -> None:
         """SIGSTOP the child process group to freeze it in place."""
         proc = self._process
-        if proc is None or proc.poll() is not None or os.name == "nt":
+        if proc is None or proc.poll() is not None:
             return
         try:
+            if os.name == "nt":
+                _nt_suspend(proc.pid, True)
+                return
             os.killpg(proc.pid, signal.SIGSTOP)
         except OSError:
             pass
@@ -217,9 +241,12 @@ class CliWorker(QObject):
     def resume(self) -> None:
         """SIGCONT the child process group to resume from where it was stopped."""
         proc = self._process
-        if proc is None or proc.poll() is not None or os.name == "nt":
+        if proc is None or proc.poll() is not None:
             return
         try:
+            if os.name == "nt":
+                _nt_suspend(proc.pid, False)
+                return
             os.killpg(proc.pid, signal.SIGCONT)
         except OSError:
             pass

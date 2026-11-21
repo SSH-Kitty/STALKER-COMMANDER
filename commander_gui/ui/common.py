@@ -2398,7 +2398,9 @@ class ProgressArea(QWidget):
 
         self.table = ProgressTable(self) if show_table else None
 
-        self.status_label = QLabel(self._status_idle)
+        # Parented now: setVisible() on a parentless label makes it a top-level window
+        # that flashes on screen until a layout adopts it.
+        self.status_label = QLabel(self._status_idle, self)
         self.status_label.setObjectName("info")
         self.status_label.setVisible(show_status)
 

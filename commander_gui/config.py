@@ -78,9 +78,11 @@ def cli_binary_path() -> Path:
     if env:
         return Path(env).expanduser()
 
-    candidates = [
-        project_root() / "cli" / "usr" / "bin" / "stalker-gamma",
-    ]
+    if os.name == "nt":
+        # Fetched at build time by scripts/fetch_windows_cli.py.
+        candidates = [project_root() / "cli" / "win-x64" / "stalker-gamma.exe"]
+    else:
+        candidates = [project_root() / "cli" / "usr" / "bin" / "stalker-gamma"]
     for candidate in candidates:
         if candidate.is_file() and os.access(candidate, os.X_OK):
             return candidate
@@ -95,7 +97,14 @@ def cli_binary_path() -> Path:
 
 
 def settings_dir() -> Path:
-    """Directory where the CLI stores its settings (~/.config/stalker-gamma)."""
+    """Directory where the CLI stores its settings.
+
+    The CLI uses .NET's ApplicationData folder: ~/.config on Linux,
+    %APPDATA% on Windows - COMMANDER must read the same file.
+    """
+    if os.name == "nt":
+        base = os.environ.get("APPDATA") or os.path.join(Path.home(), "AppData", "Roaming")
+        return Path(base) / "stalker-gamma"
     base = os.environ.get("XDG_CONFIG_HOME")
     if not base:
         base = os.path.join(Path.home(), ".config")

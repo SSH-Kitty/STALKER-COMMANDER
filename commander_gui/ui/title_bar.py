@@ -6,6 +6,8 @@ these provides ``custom_title_bar`` (bool) and ``toggle_maximized()``.
 
 from __future__ import annotations
 
+import os
+
 from PySide6.QtCore import QEvent, QObject, Qt
 from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import QApplication, QHBoxLayout, QPushButton, QWidget
@@ -91,7 +93,7 @@ class WindowButton(QPushButton):
         if self.underMouse():
             color = QColor("#ffffff" if self.kind == "close" else tokens.get("text_bright", "#ffffff"))
         else:
-            color = QColor(tokens.get("text_disabled", "#888888"))
+            color = QColor(tokens.get("text" if os.name == "nt" else "text_disabled", "#888888"))
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, self.kind == "close")
         pen = QPen(color)

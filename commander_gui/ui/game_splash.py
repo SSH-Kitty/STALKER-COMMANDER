@@ -39,7 +39,9 @@ from .. import applog
 ASSETS = Path(__file__).resolve().parents[1] / "assets" / "game_splash"
 SPLASH_FLAG = "-nosplashwindow"
 #: Sent by COMMANDER when one of its pop-ups opens and once it closes.
-POPUP_OPEN, POPUP_CLOSED = signal.SIGUSR1, signal.SIGUSR2
+#: Windows has no SIGUSR1/2; the splash is not shown there (play_page).
+POPUP_OPEN = getattr(signal, "SIGUSR1", None)
+POPUP_CLOSED = getattr(signal, "SIGUSR2", None)
 #: Logged by CRenderDevice::Run, right after the engine closes its splash;
 #: or by a crash while loading, whose error box must not open under the splash
 #: (a crash outside the engine's own checks logs only the stack trace).

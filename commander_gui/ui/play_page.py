@@ -511,6 +511,15 @@ class PlayPage(QWidget):
         )
         self.manage_proton_button.clicked.connect(self._manage_protons)
         grid.addWidget(self.manage_proton_button, 4, 0)
+        if os.name == "nt":
+            # Windows runs MO2 natively: no runner, GameMode or Proton-GE.
+            for widget in (
+                divider, self.runner_combo, self.runner_hint,
+                self.gamemode_check, self.manage_proton_button,
+            ):
+                widget.hide()
+            grid.itemAtPosition(0, 0).layout().itemAt(0).widget().hide()
+            grid.setColumnStretch(0, 0)
 
         grid.addLayout(make_header_row("Launch target"), 0, 2)
         self.target_combo = QComboBox()
@@ -663,6 +672,11 @@ class PlayPage(QWidget):
         )
         cards_row.addWidget(self._frame_gen, 2)
         root.addLayout(cards_row)
+        if os.name == "nt":
+            # Launch options are Linux wrappers/variables (MangoHud,
+            # gamescope, Wine); frame generation is the lsfg-vk layer.
+            options_card.hide()
+            self._frame_gen.hide()
 
         # _refresh_preview_inner() still writes the resolved launch command
         # into this (setPlainText/setStyleSheet) as part of deciding
@@ -1017,7 +1031,8 @@ class PlayPage(QWidget):
         proton_text = (
             f"Proton-GE: {proton_version}" if proton_version else tr("Proton-GE: none")
         )
-        chips.append((proton_text, bool(proton_version)))
+        if os.name != "nt":
+            chips.append((proton_text, bool(proton_version)))
         # GameMode (only if installed AND enabled in Settings)
         if gui_settings.load_gui_settings().get("always_gamemoderun"):
             gamemoderun = available_commands().get("gamemoderun")
@@ -2494,12 +2509,16 @@ class PlayPage(QWidget):
             return None
         if not (coop.is_active(profile.anomaly) if coop_launch is None else coop_launch):
             return None
+        if os.name == "nt":
+            return None  # no COMMANDER splash on Windows: keep the engine's
         return game_splash.splash_arguments(self._target_exe())
 
     def _show_splash(self, coop_launch: bool | None) -> None:
         """COMMANDER's splash in place of the engine's (co-op launches)."""
         profile = self.window.settings.active_profile
-        if profile is None:
+        if profile is None or os.name == "nt":
+            # The splash talks to COMMANDER through SIGUSR1/2 (POSIX only);
+            # Windows keeps the engine's own splash.
             return
         self._close_splash()
         exe = self._target_exe()

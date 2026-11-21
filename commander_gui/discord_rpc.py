@@ -153,7 +153,42 @@ def _owned_by_us(path: Path) -> bool:
         return False
 
 
+class _PipeSocket:
+    """The bits of a socket _IpcClient uses, over Discord's Windows named pipe."""
+
+    def __init__(self, pipe) -> None:
+        self._pipe = pipe
+
+    def sendall(self, data: bytes) -> None:
+        self._pipe.write(data)
+
+    def recv(self, size: int) -> bytes:
+        return self._pipe.read(size)
+
+    def close(self) -> None:
+        self._pipe.close()
+
+
+def _connect_windows(client_id: str) -> _IpcClient | None:
+    # Per-user named pipes: no ownership check needed, unlike /tmp sockets.
+    for n in range(10):
+        try:
+            pipe = open(rf"\\.\pipe\discord-ipc-{n}", "r+b", buffering=0)  # noqa: SIM115
+        except OSError:
+            continue
+        client = _IpcClient(_PipeSocket(pipe))
+        try:
+            if client.handshake(client_id):
+                return client
+        except (OSError, ValueError, struct.error):
+            pass
+        pipe.close()
+    return None
+
+
 def _connect(client_id: str) -> _IpcClient | None:
+    if os.name == "nt":
+        return _connect_windows(client_id)
     for path in _candidate_sockets():
         if not _owned_by_us(path):
             continue

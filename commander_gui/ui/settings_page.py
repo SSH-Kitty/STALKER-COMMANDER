@@ -8,6 +8,7 @@ control. Themes and the UI scale apply live.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer
@@ -609,6 +610,10 @@ class SettingsPage(QWidget):
             button = _tab(tr(name), "subTab")
             self.tab_group.addButton(button, index)
             halves[index >= 4].addWidget(button)
+            # Graphics is MangoHud/vkBasalt (Vulkan layers on Linux).
+            # Plugins: no Windows build of the ModDB plugin is published yet.
+            if os.name == "nt" and key in ("graphics", "plugins"):
+                button.hide()  # hide(), never setVisible(True): unparented, that flashes a window
             page = getattr(self, f"_{key}_tab")()
             body.addWidget(page)
             self._tab_pages.append(page)
@@ -670,11 +675,11 @@ class SettingsPage(QWidget):
                 tr("Choose the page COMMANDER opens when it starts."),
                 self._start_page_combo,
             ),
-            _setting_row(
+            *(() if os.name == "nt" else (_setting_row(  # Deck Mode: SteamOS-only
                 tr("When COMMANDER starts"),
                 tr("Open the desktop interface or Steam Deck Mode."),
                 self._deck_mode_combo,
-            ),
+            ),)),
         )
         layout.addWidget(startup)
 
@@ -795,6 +800,8 @@ class SettingsPage(QWidget):
             ),
         )
         layout.addWidget(runner)
+        # Runner, Winecfg and the Wine DPI scale are Linux-only.
+        runner.setVisible(os.name != "nt")
 
         display, box = _card(tr("MO2 display"))
         self._display_scale_combo = _combo(200)
@@ -818,6 +825,7 @@ class SettingsPage(QWidget):
             ),
         )
         layout.addWidget(display)
+        display.setVisible(os.name != "nt")
 
         folders, box = _card(
             tr("Folders"),
@@ -988,7 +996,8 @@ class SettingsPage(QWidget):
             tr("A short click when you press a button, a tab or a tray menu item."),
         )
         # No switch for a sound that isn't shipped (yet).
-        click_sounds_row.setVisible((project_root() / "commander_gui" / "assets" / "click.wav").is_file())
+        if not (project_root() / "commander_gui" / "assets" / "click.wav").is_file():
+            click_sounds_row.hide()
         self._live_animation_check = QCheckBox(tr("Live theme animation"))
         self._live_animation_check.toggled.connect(self._on_live_animation_toggled)
         self._lights_check = QCheckBox(tr("Christmas lights"))
@@ -1189,6 +1198,7 @@ class SettingsPage(QWidget):
             add_btn,
         ))
         layout.addWidget(steam)
+        steam.setVisible(os.name != "nt")  # shortcuts.vdf at Linux paths
         return page
 
     def _plugins_tab(self) -> QWidget:

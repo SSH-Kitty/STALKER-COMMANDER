@@ -1537,8 +1537,9 @@ class InstallPage(QWidget):
         installs_divider = QFrame()
         installs_divider.setObjectName("vDivider")
         installs_divider.setFixedWidth(1)
-        installs_row.addWidget(self._windows_choice, 1)
-        installs_row.addWidget(installs_divider)
+        if os.name != "nt":  # converts a Windows install for Linux
+            installs_row.addWidget(self._windows_choice, 1)
+            installs_row.addWidget(installs_divider)
         installs_row.addWidget(self._switch_choice, 1)
         installs_layout.addLayout(installs_row)
 
@@ -1775,6 +1776,7 @@ class InstallPage(QWidget):
             tr("Installs Windows runtimes (VC++, DirectX) into the Wine prefix.")
         )
         self.winetricks_button.clicked.connect(self._start_winetricks)
+        self.winetricks_button.setVisible(os.name != "nt")
         step_action(self.winetricks_button)
         self.wt_progress = ProgressArea(show_table=False, show_log=True, log_max_height=180)
         # No Idle/percent bar for Dependencies - the status label and log
@@ -2750,7 +2752,7 @@ class InstallPage(QWidget):
         # and fills in the archive.
         self.checkboxes["offline"].setChecked(offline)
         self._auto_active = True
-        if self._wt_installed is True:
+        if self._wt_installed is True or os.name == "nt":  # no Wine runtimes on Windows
             self._start_auto_gamma()
         else:
             self._start_winetricks(then_install=True)
@@ -5890,6 +5892,11 @@ class InstallPage(QWidget):
 
     def _refresh_winetricks_status(self):
         if not self._winetricks_status_enabled:
+            return
+        if os.name == "nt":  # native Windows: nothing to install
+            self._wt_installed = True
+            self.wt_status.set_state(True)
+            self._update_button_states()
             return
         if self._wt_checking:
             return

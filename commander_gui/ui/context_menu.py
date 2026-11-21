@@ -12,6 +12,8 @@ Two parts, both driven from the app-wide filter in :mod:`pointer_cursor`:
 
 from __future__ import annotations
 
+import os
+
 from PySide6 import QtGui
 from PySide6.QtCore import QPoint, Qt
 from PySide6.QtGui import QGuiApplication, QIcon, QTextDocumentFragment
@@ -53,6 +55,11 @@ def menu_icon(name: str) -> QIcon:
 def polish_menu(menu: QMenu) -> None:
     """Round corners: the window must be see-through before it exists."""
     if not menu.internalWinId():
+        menu.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+    if os.name == "nt" and not menu.isVisible() and not menu.property("ntPolished"):
+        menu.setProperty("ntPolished", True)
+        # The system shadow and square backing show as black corners behind a see-through menu.
+        menu.setWindowFlags(menu.windowFlags() | Qt.WindowType.NoDropShadowWindowHint | Qt.WindowType.FramelessWindowHint)
         menu.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
 
 

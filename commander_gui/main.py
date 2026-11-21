@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -218,7 +219,7 @@ def _cli_binary_problem() -> tuple[str, str] | None:
                 path=binary,
             ),
         )
-    if not os.access(binary, os.X_OK):
+    if os.name != "nt" and not os.access(binary, os.X_OK):
         return (
             tr("COMMANDER can't run one of its files"),
             tr(
@@ -392,19 +393,44 @@ def _ensure_local_bin_on_path() -> None:
     desktop Install page, and a Steam (Game Mode) launch has no
     ``~/.local/bin`` on PATH, so tools installed there were never found.
     """
+    if os.name == "nt":
+        return
     local_bin = os.path.expanduser("~/.local/bin")
     entries = os.environ.get("PATH", "").split(os.pathsep)
     if local_bin not in entries:
         os.environ["PATH"] = os.pathsep.join([local_bin, *filter(None, entries)])
 
 
+def _hide_child_consoles() -> None:
+    """Stop every console child (the CLI, taskkill, git) flashing a black window.
+
+    The Windows build has no console of its own, so each console program it
+    starts would otherwise open one. Patched once here rather than at ~30
+    call sites; ``subprocess.run`` and friends look ``Popen`` up at call time.
+    CREATE_NO_WINDOW is ignored by GUI programs, so MO2 and the game are
+    unaffected.
+    """
+    base = subprocess.Popen
+
+    class _NoWindowPopen(base):  # type: ignore[misc, valid-type]
+        def __init__(self, *args, creationflags: int = 0, **kwargs):
+            super().__init__(
+                *args, creationflags=creationflags | subprocess.CREATE_NO_WINDOW, **kwargs
+            )
+
+    subprocess.Popen = _NoWindowPopen  # type: ignore[misc]
+
+
 def main(argv: list[str] | None = None) -> int:
     global _INSTANCE_LOCK, _PREVIOUS_QT_HANDLER
     install_excepthook()
     install_crash_handler()
+    if os.name == "nt":
+        _hide_child_consoles()
     _ensure_local_bin_on_path()
     argv = list(sys.argv if argv is None else argv)
-    deck = deck_requested(argv)
+    # Deck Mode is SteamOS-only; never offered on Windows.
+    deck = os.name != "nt" and deck_requested(argv)
     from_autostart = AUTOSTART_FLAG in argv
     argv = [arg for arg in argv if arg != AUTOSTART_FLAG]
     _PREVIOUS_QT_HANDLER = qInstallMessageHandler(_quiet_qt_message_handler)
@@ -474,7 +500,7 @@ def main(argv: list[str] | None = None) -> int:
     # hardware if it is still unsettled. Nothing has been built yet, so a
     # "yes" just changes which window class gets constructed below - no
     # re-exec is involved on this path.
-    if not deck:
+    if not deck and os.name != "nt":
         deck = startup_wants_deck(
             _gui.get("deck_mode_preference", "ask"),
             on_deck=steam_deck_model() is not None,

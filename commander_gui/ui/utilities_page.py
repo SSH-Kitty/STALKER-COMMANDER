@@ -921,7 +921,11 @@ class UtilitiesPage(QWidget):
             (
                 tr("Create Log Dump"),
                 tr(
-                    "Collect COMMANDER, Anomaly, GAMMA/MO2 and Wine-prefix logs "
+                    "Collect COMMANDER, Anomaly and GAMMA/MO2 logs "
+                    "plus crash dumps into one zip archive. Open the archive in "
+                    "{assistant} to check all errors and warnings."
+                    if os.name == "nt"
+                    else "Collect COMMANDER, Anomaly, GAMMA/MO2 and Wine-prefix logs "
                     "plus crash dumps into one zip archive. Open the archive in "
                     "{assistant} to check all errors and warnings.",
                     assistant=assistant_token(),
@@ -929,6 +933,8 @@ class UtilitiesPage(QWidget):
                 self._start_log_dump,
             ),
         ]
+        if os.name == "nt":  # no Wine prefix on Windows
+            tools = [t for t in tools if t[2] not in (self._repair_prefix, self._reset_prefix)]
         for index, (title, description, slot) in enumerate(tools):
             if index:
                 # A line between tools, so a row's button is easy to match
@@ -1232,7 +1238,9 @@ class UtilitiesPage(QWidget):
         full_panel, self.full_uninstall_button = self._destructive_panel(
             tr("Full uninstall"),
             tr(
-                "Removes the Anomaly, GAMMA, and cache folders, leaving your "
+                "Removes the Anomaly, GAMMA, and cache folders."
+                if os.name == "nt"
+                else "Removes the Anomaly, GAMMA, and cache folders, leaving your "
                 "Wine/Proton prefix intact."
             ),
             [
@@ -1240,10 +1248,10 @@ class UtilitiesPage(QWidget):
                     "Deletes ALL saves, MO2 settings, MCM settings, added mods "
                     "and the download cache"
                 ),
-                tr(
+                *([] if os.name == "nt" else [tr(
                     "The configured Wine/Proton prefix and its Winetricks "
                     "configuration are kept"
-                ),
+                )]),
             ],
             tr("Full Uninstall"),
             self._start_full_uninstall,
@@ -2145,7 +2153,7 @@ class UtilitiesPage(QWidget):
                 (tr("The download cache"),),
             ),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            info=tr("Your Wine/Proton prefix and its Winetricks setup are kept.") + "\n\n" + tr(_BACKUP_NOTE),
+            info=("" if os.name == "nt" else tr("Your Wine/Proton prefix and its Winetricks setup are kept.") + "\n\n") + tr(_BACKUP_NOTE),
             note=tr("This can't be undone."),
             labels={QMessageBox.StandardButton.Yes: tr("Uninstall"), QMessageBox.StandardButton.No: tr("Cancel")},
         )

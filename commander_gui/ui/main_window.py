@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import itertools
+import os
 import time
 from pathlib import Path
 from typing import ClassVar
@@ -135,6 +136,10 @@ NAV_ITEMS = [
     ("about", "Help"),
     ("credits", "About"),
 ]
+if os.name == "nt":
+    # System Check inspects Wine/Proton/Vulkan tooling; nothing to check
+    # when the game runs natively.
+    NAV_ITEMS = [item for item in NAV_ITEMS if item[0] != "systemcheck"]
 
 #: Tab-bar position for each nav key, fixed by NAV_ITEMS order. Separate from
 #: page construction (see _ensure_page()): pages are built lazily on first
@@ -143,7 +148,7 @@ NAV_ITEMS = [
 _TAB_INDEX: dict[str, int] = {key: i for i, (key, _title) in enumerate(NAV_ITEMS)}
 
 # Indices after which a thin vertical separator is drawn in the tab bar.
-_SEPARATOR_AFTER = {2, 5, 8}
+_SEPARATOR_AFTER = {1, 4, 7} if os.name == "nt" else {2, 5, 8}
 _RELEASES_URL = "https://github.com/SSH-Kitty/STALKER-GAMMA-COMMANDER/releases"
 
 

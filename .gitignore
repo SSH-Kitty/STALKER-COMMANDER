@@ -41,3 +41,6 @@ dist/
 # Exception: MAKO's GPL source archive must ship in the repo (see
 # licenses/THIRD-PARTY-NOTICES.txt), so let it past the *.tar.gz rule above.
 !licenses/MAKO/*-source.tar.gz
+
+# Windows CLI, fetched by scripts/fetch_windows_cli.py
+cli/win-x64/

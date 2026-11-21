@@ -8,6 +8,7 @@ this is the short product card. License texts are read from the bundled
 from __future__ import annotations
 
 import math
+import os
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QPointF, Qt
@@ -215,7 +216,7 @@ class CreditsPage(QWidget):
         text.addWidget(version)
         text.addWidget(
             info_label(
-                tr("STALKER GAMMA COMMANDER is a Linux desktop application for installing, updating, launching, repairing and managing S.T.A.L.K.E.R. Anomaly with the GAMMA modpack. GAMMA is normally installed on Windows with its own launcher and played through Mod Organizer 2. On Linux, the community answer is FaithBeam's stalker-gamma-cli, an installer that runs in a terminal. COMMANDER is a graphical front-end for that CLI, plus everything around it that the CLI does not do on its own.")
+                tr("STALKER GAMMA COMMANDER is a desktop application for installing, updating, launching, repairing and managing S.T.A.L.K.E.R. Anomaly with the GAMMA modpack. GAMMA is normally installed with its own launcher and played through Mod Organizer 2. COMMANDER is a graphical front-end for FaithBeam's stalker-gamma-cli, plus everything around it that the CLI does not do on its own.") if os.name == "nt" else tr("STALKER GAMMA COMMANDER is a Linux desktop application for installing, updating, launching, repairing and managing S.T.A.L.K.E.R. Anomaly with the GAMMA modpack. GAMMA is normally installed on Windows with its own launcher and played through Mod Organizer 2. On Linux, the community answer is FaithBeam's stalker-gamma-cli, an installer that runs in a terminal. COMMANDER is a graphical front-end for that CLI, plus everything around it that the CLI does not do on its own.")
             )
         )
         row.addLayout(text, 1)

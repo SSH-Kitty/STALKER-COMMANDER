@@ -37,6 +37,16 @@ def find_archiver() -> Path:
     COMMANDER ships this 7zz itself: the CLI dropped it in 1.41 for an
     in-process 7z.so, which only the CLI can use. Keep it on a CLI update.
     """
+    if os.name == "nt":
+        # 7z.exe with its own 7z.dll (scripts/fetch_windows_cli.py), then an
+        # installed 7-Zip.
+        program_files = Path(os.environ.get("ProgramFiles", r"C:\Program Files"))
+        for candidate in (
+            cli_binary_path().parent / "7zip" / "7z.exe",
+            program_files / "7-Zip" / "7z.exe",
+        ):
+            if candidate.is_file():
+                return candidate
     bundled = cli_binary_path().parent / "resources" / "7zz"
     if bundled.is_file() and os.access(bundled, os.X_OK):
         return bundled

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -579,10 +580,15 @@ class DashboardPage(QWidget):
             on_change=self._update_install_headline,
         )
         self._install_rows = [self.anomaly_status, self.gamma_status, self.winetricks_status]
+        if os.name == "nt":
+            # Winetricks dependencies belong to a Wine prefix.
+            self._install_rows.pop()
         for row in self._install_rows:
             layout.addWidget(row)
         self._update_install_headline()
-        if op == "dependencies":
+        if os.name == "nt":
+            pass
+        elif op == "dependencies":
             self.winetricks_status.set_installing(tr("Installing dependencies"))
         else:
             self._start_winetricks_status(
@@ -801,7 +807,8 @@ class DashboardPage(QWidget):
         self.runner_combo.currentIndexChanged.connect(
             lambda _index, combo=self.runner_combo: self._on_runner_switch(combo)
         )
-        grid.addLayout(_field(tr("Current runner"), self.runner_combo), 1, 0)
+        if os.name != "nt":  # Windows runs the game natively: no runner
+            grid.addLayout(_field(tr("Current runner"), self.runner_combo), 1, 0)
 
         # Download threads - a fixed "just pick a speed" choice. Each CLI
         # thread downloads and unpacks one mod, so 1 is one mod at a time.
@@ -1608,7 +1615,8 @@ class DashboardPage(QWidget):
         deck_button.setToolTip(tr("Switch to Steam Deck Mode"))
         deck_button.setCursor(Qt.CursorShape.PointingHandCursor)
         deck_button.clicked.connect(lambda: switch_mode(self.window, deck=True))
-        header.addWidget(deck_button)
+        if os.name != "nt":  # Deck Mode is SteamOS-only
+            header.addWidget(deck_button)
         layout.addLayout(header)
         profile = self.settings.active_profile
         # clear_layout() above just deleted the previous render's Play
