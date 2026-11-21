@@ -4013,4 +4013,5 @@ TRANSLATIONS: dict[str, str] = {
     'Install the Windows runtimes first?': 'Спочатку встановити бібліотеки середовища виконання Windows?',
     'The game needs the Visual C++ and DirectX runtimes and they are not installed yet.': 'Грі потрібні бібліотеки Visual C++ і DirectX, а вони ще не встановлені.',
     'Install them': 'Встановити',
+    '{name} did not extract correctly.': 'Не вдалося розпакувати {name}.',
 }

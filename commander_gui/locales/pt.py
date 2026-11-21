@@ -4013,4 +4013,5 @@ TRANSLATIONS: dict[str, str] = {
     'Install the Windows runtimes first?': 'Instalar primeiro os runtimes do Windows?',
     'The game needs the Visual C++ and DirectX runtimes and they are not installed yet.': 'O jogo precisa dos runtimes Visual C++ e DirectX e ainda não estão instalados.',
     'Install them': 'Instalá-los',
+    '{name} did not extract correctly.': 'Não foi possível extrair {name}.',
 }

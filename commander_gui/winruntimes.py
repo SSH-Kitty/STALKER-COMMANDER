@@ -25,6 +25,14 @@ class Runtime:
     dlls: tuple[str, ...]  # all must be in System32
     url: str
     args: tuple[str, ...]  # silent-install switches
+    #: True for the DirectX redist: a self-extracting archive (``/Q /T:dir``)
+    #: holding ``DXSETUP.exe /silent``, not a single silent-install exe like
+    #: the others. ``dxwebsetup.exe`` (the small "web installer") looks like
+    #: the obvious choice but phones home for its legacy D3DX/XAudio2.7/
+    #: XInput component list, which no longer answers - this offline package
+    #: (the same one winetricks' d3dx9/d3dcompiler_43 verbs use) has every
+    #: file inside already.
+    extract: bool = False
 
 
 RUNTIMES = (
@@ -47,8 +55,9 @@ RUNTIMES = (
             "xinput1_3.dll",
             "xaudio2_7.dll",
         ),
-        "https://download.microsoft.com/download/1/7/1/1718CCC4-6315-4D8E-9543-8E28A4E18C4C/dxwebsetup.exe",
-        ("/Q",),
+        "https://download.microsoft.com/download/8/4/A/84A35BF1-DAFE-4AE8-82AF-AD2AE20B6B14/directx_Jun2010_redist.exe",
+        (),
+        extract=True,
     ),
 )
 
@@ -90,6 +99,16 @@ def check_exit_code(code: int, runtime: Runtime) -> bool:
     raise RuntimeError(tr("The {name} installer failed (code {code}).", name=tr(runtime.label), code=code))
 
 
+def _run_elevated(exe: str, args: tuple[str, ...]) -> int:
+    result = subprocess.run(
+        ["powershell", "-NoProfile", "-NonInteractive", "-Command", _SCRIPT],
+        env={**os.environ, "RUNTIME_EXE": exe, "RUNTIME_ARGS": " ".join(args)},
+        creationflags=subprocess.CREATE_NO_WINDOW,
+        check=False,
+    )
+    return result.returncode
+
+
 def _install_one(runtime: Runtime, tmp: str) -> bool:
     name = tr(runtime.label)
     exe = str(Path(tmp) / runtime.url.rsplit("/", 1)[1])
@@ -99,13 +118,16 @@ def _install_one(runtime: Runtime, tmp: str) -> bool:
                 dst.write(chunk)
     except OSError as exc:
         raise RuntimeError(tr("Could not download {name}: {error}", name=name, error=exc)) from exc
-    result = subprocess.run(
-        ["powershell", "-NoProfile", "-NonInteractive", "-Command", _SCRIPT],
-        env={**os.environ, "RUNTIME_EXE": exe, "RUNTIME_ARGS": " ".join(runtime.args)},
-        creationflags=subprocess.CREATE_NO_WINDOW,
-        check=False,
-    )
-    restart = check_exit_code(result.returncode, runtime)
+    if runtime.extract:
+        # Two elevated steps: unpack the archive, then run its real installer.
+        extract_dir = Path(tmp) / "dxredist"
+        check_exit_code(_run_elevated(exe, ("/Q", f"/T:{extract_dir}")), runtime)
+        setup = extract_dir / "DXSETUP.exe"
+        if not setup.is_file():
+            raise RuntimeError(tr("{name} did not extract correctly.", name=name))
+        restart = check_exit_code(_run_elevated(str(setup), ("/silent",)), runtime)
+    else:
+        restart = check_exit_code(_run_elevated(exe, runtime.args), runtime)
     if missing_dlls(runtime):
         raise RuntimeError(tr("The installer finished but {name} is still missing.", name=name))
     return restart
