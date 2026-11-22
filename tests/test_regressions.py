@@ -3012,10 +3012,17 @@ class RegressionTests(unittest.TestCase):
 
         codes: list[int] = []
         worker.finished.connect(lambda rc, _out: codes.append(rc))
-        worker.run()
+        # Windows: no real Ctrl+C. This child shares pytest's console (the app
+        # gives the CLI its own), and just after Popen it may not be listed on
+        # it yet - the Ctrl+C then reached pytest and stopped the whole run.
+        # Refused, cancel() falls back to its kill, as it would in the app.
+        with patch("commander_gui.winjob.send_ctrl_c", return_value=False) as ctrl_c:
+            worker.run()
 
         self.assertEqual(len(codes), 1)
         self.assertNotEqual(codes[0], 0)
+        if os.name == "nt":
+            ctrl_c.assert_called_once()  # the cancel was applied after Popen
 
     @unittest.skipIf(os.name == "nt", "POSIX process groups")
     def test_cli_worker_cancel_reaches_a_paused_process(self):
