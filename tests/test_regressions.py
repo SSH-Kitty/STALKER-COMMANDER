@@ -8811,6 +8811,7 @@ class UserModsTrackerTests(unittest.TestCase):
                 patch(
                     "commander_gui.launcher.STEAM_ROOT_CANDIDATES", (steam_root,)
                 ),
+                patch("commander_gui.launcher._windows_steam_roots", return_value=[steam_root]),
                 patch.object(
                     QInputDialog,
                     "getItem",
@@ -8869,6 +8870,7 @@ class UserModsTrackerTests(unittest.TestCase):
             page = SettingsPage(FakeWindow())
             with (
                 patch("commander_gui.launcher.STEAM_ROOT_CANDIDATES", (steam_root,)),
+                patch("commander_gui.launcher._windows_steam_roots", return_value=[steam_root]),
                 patch(
                     "commander_gui.ui.settings_page.steam_running",
                     return_value=True,

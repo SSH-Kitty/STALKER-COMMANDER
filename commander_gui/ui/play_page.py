@@ -560,7 +560,6 @@ class PlayPage(QWidget):
         self.shortcut_button.setToolTip(
             tr("Create a desktop shortcut for the selected target and runner.")
         )
-        self.shortcut_button.setVisible(os.name != "nt")
         self.shortcut_button.clicked.connect(self._add_desktop_shortcut)
         grid.addWidget(self.shortcut_button, 4, 2)
         root.addWidget(config_card)
@@ -2579,11 +2578,12 @@ class PlayPage(QWidget):
             command, env, cwd = self._resolve_command(
                 open_mo2=False, direct=False, runner=runner
             )
-            # Copied somewhere permanent first: inside an AppImage the
-            # bundled PNG lives in a /tmp mount that vanishes on exit.
-            from ..steam_shortcuts import bundled_icon, install_icon
+            # Linux: copied somewhere permanent first, since inside an
+            # AppImage the bundled PNG lives in a /tmp mount that vanishes on
+            # exit. Windows: COMMANDER.exe's own icon.
+            from ..steam_shortcuts import shortcut_icon
 
-            icon = install_icon(bundled_icon())
+            icon = shortcut_icon()
             path = write_desktop_shortcut(target, command, env, cwd, icon=icon or None)
         except (LaunchError, OSError) as exc:
             QMessageBox.warning(self, tr("Couldn't create the shortcut"), str(exc))

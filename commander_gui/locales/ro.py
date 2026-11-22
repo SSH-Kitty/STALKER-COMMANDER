@@ -1111,6 +1111,8 @@ TRANSLATIONS: dict[str, str] = {
     'Clear filter': 'Șterge filtrul',
     'Enable / disable category': 'Activează / dezactivează categoria',
     'Add COMMANDER and its Deck Mode to your Steam library, so you can launch either one straight from Steam (including Big Picture and Game Mode) without using Steam\'s own "Add a Non-Steam Game" dialog.': 'Adaugă COMMANDER și Modul Deck în biblioteca Steam, ca să le pornești direct din Steam (inclusiv Big Picture și Modul Joc), fără dialogul Steam „Adaugă un joc non-Steam”.',
+    'Add COMMANDER to your Steam library, so you can launch it straight from Steam (including Big Picture) without using Steam\'s own "Add a Non-Steam Game" dialog.': 'Adaugă COMMANDER în biblioteca Steam, ca să-l pornești direct din Steam (inclusiv Big Picture), fără dialogul Steam „Adaugă un joc non-Steam”.',
+    '"STALKER COMMANDER" is now in your Steam library.': '„STALKER COMMANDER” este acum în biblioteca ta Steam.',
     'Adds "STALKER COMMANDER" and "STALKER COMMANDER DECK" to your Steam library, so Game Mode can launch them.': 'Adaugă „STALKER COMMANDER” și „STALKER COMMANDER DECK” în biblioteca Steam, ca Modul Joc să le poată porni.',
     'A fresh install': 'O instalare nouă',
     'A location with enough free space for downloaded addon archives.': 'O locație cu suficient spațiu liber pentru arhivele de addon-uri descărcate.',

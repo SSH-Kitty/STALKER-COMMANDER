@@ -1111,6 +1111,8 @@ TRANSLATIONS: dict[str, str] = {
     'Clear filter': 'Limpar filtro',
     'Enable / disable category': 'Ativar / desativar categoria',
     'Add COMMANDER and its Deck Mode to your Steam library, so you can launch either one straight from Steam (including Big Picture and Game Mode) without using Steam\'s own "Add a Non-Steam Game" dialog.': 'Adiciona o COMMANDER e o seu Modo Deck à tua biblioteca Steam para iniciares qualquer um deles diretamente a partir do Steam (incluindo Big Picture e o Modo de Jogo), sem usar a janela "Adicionar um jogo não-Steam" do Steam.',
+    'Add COMMANDER to your Steam library, so you can launch it straight from Steam (including Big Picture) without using Steam\'s own "Add a Non-Steam Game" dialog.': 'Adiciona o COMMANDER à tua biblioteca Steam para o iniciares diretamente a partir do Steam (incluindo Big Picture), sem usar a janela "Adicionar um jogo não-Steam" do Steam.',
+    '"STALKER COMMANDER" is now in your Steam library.': '"STALKER COMMANDER" já está na tua biblioteca Steam.',
     'Adds "STALKER COMMANDER" and "STALKER COMMANDER DECK" to your Steam library, so Game Mode can launch them.': 'Adiciona "STALKER COMMANDER" e "STALKER COMMANDER DECK" à tua biblioteca Steam, para que o Modo de Jogo os possa iniciar.',
     'A fresh install': 'Uma instalação nova',
     'A location with enough free space for downloaded addon archives.': 'Um local com espaço livre suficiente para os arquivos de addons baixados.',

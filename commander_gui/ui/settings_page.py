@@ -1189,11 +1189,14 @@ class SettingsPage(QWidget):
                 "so you can launch either one straight from Steam "
                 "(including Big Picture and Game Mode) without using "
                 "Steam's own \"Add a Non-Steam Game\" dialog."
+            ) if os.name != "nt" else tr(
+                "Add COMMANDER to your Steam library, so you can launch it "
+                "straight from Steam (including Big Picture) without using "
+                "Steam's own \"Add a Non-Steam Game\" dialog."
             ),
             add_btn,
         ))
         layout.addWidget(steam)
-        steam.setVisible(os.name != "nt")  # shortcuts.vdf at Linux paths
         return page
 
     def _plugins_tab(self) -> QWidget:
@@ -1512,7 +1515,7 @@ class SettingsPage(QWidget):
         added = tr(
             "\"STALKER COMMANDER\" and \"STALKER COMMANDER DECK\" are now in "
             "your Steam library."
-        )
+        ) if os.name != "nt" else tr("\"STALKER COMMANDER\" is now in your Steam library.")
         if not steam_running():
             try:
                 add_to_steam(vdf_path, restart=False)

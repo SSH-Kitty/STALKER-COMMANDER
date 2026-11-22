@@ -1133,6 +1133,8 @@ TRANSLATIONS: dict[str, str] = {
     'Clear filter': '',
     'Enable / disable category': '',
     'Add COMMANDER and its Deck Mode to your Steam library, so you can launch either one straight from Steam (including Big Picture and Game Mode) without using Steam\'s own "Add a Non-Steam Game" dialog.': '',
+    'Add COMMANDER to your Steam library, so you can launch it straight from Steam (including Big Picture) without using Steam\'s own "Add a Non-Steam Game" dialog.': '',
+    '"STALKER COMMANDER" is now in your Steam library.': '',
     'Adds "STALKER COMMANDER" and "STALKER COMMANDER DECK" to your Steam library, so Game Mode can launch them.': '',
     'A fresh install': '',
     'A location with enough free space for downloaded addon archives.': '',

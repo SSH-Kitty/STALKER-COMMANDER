@@ -262,8 +262,10 @@ def add_commander_shortcuts(
     start_dir: str,
     icon: str = "",
     base_launch_options: str = "",
+    deck: bool = True,
 ) -> None:
-    """Add/update both the normal and Deck Mode COMMANDER shortcuts.
+    """Add/update both the normal and Deck Mode COMMANDER shortcuts (only
+    the normal one with ``deck=False``: Deck Mode is SteamOS-only).
 
     *base_launch_options* covers running from a source checkout, where
     *exe* is the bare Python interpreter and ``-m commander_gui`` has to
@@ -294,21 +296,22 @@ def add_commander_shortcuts(
         icon=icon,
         launch_options=base_launch_options,
     )
-    shortcuts = add_or_update_shortcut(
-        shortcuts,
-        "STALKER COMMANDER DECK",
-        exe,
-        start_dir,
-        icon=icon,
-        launch_options=deck_options,
-    )
+    if deck:
+        shortcuts = add_or_update_shortcut(
+            shortcuts,
+            "STALKER COMMANDER DECK",
+            exe,
+            start_dir,
+            icon=icon,
+            launch_options=deck_options,
+        )
     root = set_shortcuts_map(root, shortcuts)
     write_shortcuts(vdf_path, root)
     quoted_exe = f'"{exe}"'
-    for name, source in (
-        ("STALKER COMMANDER", COMMANDER_ARTWORK_DIR),
-        ("STALKER COMMANDER DECK", DECK_ARTWORK_DIR),
-    ):
+    artwork = [("STALKER COMMANDER", COMMANDER_ARTWORK_DIR)]
+    if deck:
+        artwork.append(("STALKER COMMANDER DECK", DECK_ARTWORK_DIR))
+    for name, source in artwork:
         install_artwork(vdf_path, _shortcut_appid(quoted_exe, name) & 0xFFFFFFFF, source)
 
 
@@ -326,11 +329,12 @@ def find_userdata_config_dirs() -> list[Path]:
     "0" is skipped: Steam's placeholder for "no account logged in", not a
     real profile - never a sensible "add this to Steam" target.
     """
-    from .launcher import STEAM_ROOT_CANDIDATES
+    from .launcher import STEAM_ROOT_CANDIDATES, _windows_steam_roots
 
     seen_roots: list[Path] = []
     dirs: list[Path] = []
-    for candidate in STEAM_ROOT_CANDIDATES:
+    candidates = _windows_steam_roots() if os.name == "nt" else STEAM_ROOT_CANDIDATES
+    for candidate in candidates:
         try:
             root = candidate.resolve()
         except OSError:
@@ -429,6 +433,8 @@ def autologin_shortcuts_vdf(registries=REGISTRY_CANDIDATES) -> Path | None:
     this is the value Steam itself acts on.
     """
     names = set()
+    if os.name == "nt" and (name := _windows_autologin_user()):
+        names.add(name)
     for registry in registries:
         try:
             text = registry.read_text(encoding="utf-8", errors="replace")
@@ -442,6 +448,18 @@ def autologin_shortcuts_vdf(registries=REGISTRY_CANDIDATES) -> Path | None:
         if account in names:
             return config_dir / "shortcuts.vdf"
     return None
+
+
+def _windows_autologin_user() -> str | None:
+    """Windows Steam keeps AutoLoginUser in the registry, not registry.vdf."""
+    try:
+        import winreg
+
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Valve\Steam") as key:
+            value = winreg.QueryValueEx(key, "AutoLoginUser")[0]
+    except (ImportError, OSError):
+        return None
+    return value if isinstance(value, str) and value else None
 
 
 def list_steam_accounts() -> list[tuple[str, Path]]:
@@ -487,6 +505,8 @@ def _is_flatpak_steam(steam_root: Path) -> bool:
 
 def steam_launch_command(steam_root: Path) -> list[str]:
     """The command to start Steam matching how it's installed here."""
+    if os.name == "nt":
+        return [str(steam_root / "steam.exe")]
     if _is_flatpak_steam(steam_root):
         return ["flatpak", "run", "com.valvesoftware.Steam"]
     return ["steam"]
@@ -543,11 +563,18 @@ def restart_steam(
         spawn_reaped(
             [*launch_cmd, *(relaunch_args if written else ())],
             env=child_environment(),
-            start_new_session=True,
+            **_detached(),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
+
+
+def _detached() -> dict:
+    """Popen arguments for a Steam that outlives COMMANDER."""
+    if os.name == "nt":
+        return {"creationflags": subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP}
+    return {"start_new_session": True}
 
 
 def _stop_hung_steam() -> bool:
@@ -557,6 +584,8 @@ def _stop_hung_steam() -> bool:
     answers the request, and swallows every ``steam://`` link handed to it.
     The user already agreed to a restart, so it is terminated, then killed.
     """
+    if os.name == "nt":
+        return _stop_hung_steam_windows()
     pkill = shutil.which("pkill")
     if not pkill or os.environ.get("SteamGamepadUI"):
         return False  # Game Mode: Steam is the session, killing it ends the session
@@ -573,8 +602,32 @@ def _stop_hung_steam() -> bool:
     return False
 
 
+def _stop_hung_steam_windows() -> bool:
+    """_stop_hung_steam on Windows: taskkill, politely and then forced."""
+    system32 = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32"
+    for force, wait in (((), 10.0), (("/F",), 5.0)):
+        try:
+            subprocess.run(
+                [str(system32 / "taskkill.exe"), "/IM", "steam.exe", *force],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=10,
+                check=False,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+        if _wait_for_steam_to_exit(wait):
+            return True
+    return False
+
+
 def steam_is_running() -> bool:
     """True when a Steam client process is running (best-effort)."""
+    if os.name == "nt":
+        from .winproc import running
+
+        return running("steam.exe")
     pgrep = shutil.which("pgrep")
     if not pgrep:
         return False
@@ -593,7 +646,7 @@ def steam_is_running() -> bool:
 
 def _wait_for_steam_to_exit(timeout: float) -> bool:
     """True once Steam is gone; False if it is still running at ``timeout``."""
-    if not shutil.which("pgrep"):
+    if os.name != "nt" and not shutil.which("pgrep"):
         # No way to tell - give -shutdown a moment and hope, as before.
         time.sleep(3)
         return True
@@ -642,6 +695,13 @@ def commander_launch_target(
     manual start would, rather than a bare interpreter path that breaks the
     day the venv is rebuilt.
     """
+    if os.name == "nt":
+        # The installed/zip build is COMMANDER.exe itself; a source checkout
+        # runs the package (run.sh is Linux-only).
+        if getattr(sys, "frozen", False):
+            return sys.executable, str(Path(sys.executable).parent), ""
+        root = repo_root or Path(__file__).resolve().parents[1]
+        return _windowless_python(), str(root), "-m commander_gui"
     if appimage is None:
         from .self_update import commander_appimage_path
 
@@ -659,6 +719,48 @@ def commander_launch_target(
     return sys.executable, str(root), "-m commander_gui"
 
 
+def _windowless_python() -> str:
+    """pythonw.exe next to this interpreter, so Steam opens no console."""
+    pythonw = Path(sys.executable).with_name("pythonw.exe")
+    return str(pythonw) if pythonw.is_file() else sys.executable
+
+
+def shortcut_icon() -> str:
+    """The icon for a shortcut to COMMANDER or the game: a permanent copy of
+    the PNG on Linux, an .ico made from it on Windows (see install_ico)."""
+    if os.name == "nt":
+        return install_ico(bundled_icon())
+    return install_icon(bundled_icon())
+
+
+def windows_icon_path() -> Path:
+    from .config import data_home
+
+    return data_home() / "stalker-gamma-commander" / "icons" / "commander.ico"
+
+
+def install_ico(source: Path, dest: Path | None = None) -> str:
+    """COMMANDER's icon as an .ico, in a permanent place; its path, or "".
+
+    Windows shortcuts take an .ico or .exe, never a PNG. Not the exe's own
+    icon either: a source checkout's is Python's, and a shortcut to the game
+    otherwise shows Mod Organizer's, since it starts ModOrganizer.exe. Made
+    from the same PNG as the Linux icon, so both look the same, and rewritten
+    only when the PNG changed.
+    """
+    from .winshortcut import ico_bytes, scaled_pngs
+
+    dest = dest or windows_icon_path()
+    try:
+        data = ico_bytes(scaled_pngs(source.read_bytes()))
+        if not (dest.is_file() and dest.read_bytes() == data):
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            atomic.write_bytes(dest, data, lock=False)
+    except (OSError, ValueError):
+        return ""
+    return str(dest)
+
+
 def bundled_icon() -> Path:
     return Path(__file__).resolve().parents[1] / "cli" / "stalker-gamma.png"
 
@@ -672,7 +774,7 @@ def add_to_steam(vdf_path: Path, *, restart: bool) -> None:
     before anything was written.
     """
     exe, start_dir, base_launch_options = commander_launch_target()
-    icon = install_icon(bundled_icon())
+    icon = shortcut_icon()
     # Parse up front: a file this module can't read must stop the action
     # before Steam is shut down for nothing.
     read_shortcuts(vdf_path)
@@ -684,6 +786,7 @@ def add_to_steam(vdf_path: Path, *, restart: bool) -> None:
             start_dir=start_dir,
             icon=icon,
             base_launch_options=base_launch_options,
+            deck=os.name != "nt",  # Deck Mode is SteamOS-only
         )
 
     if restart:

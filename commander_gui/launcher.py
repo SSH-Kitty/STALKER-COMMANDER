@@ -1349,6 +1349,15 @@ def build_direct_command(
 
 def desktop_dir() -> Path:
     """Return the user's desktop directory, honoring XDG user dirs."""
+    if os.name == "nt":
+        # The shell's own answer: OneDrive and a moved Desktop folder both
+        # put it somewhere other than ~/Desktop.
+        from .winshortcut import desktop_dir as windows_desktop
+
+        path = windows_desktop() or Path.home() / "Desktop"
+        if not path.is_dir():
+            raise LaunchError(f"Desktop directory not found: {path}")
+        return path
     try:
         out = subprocess.run(
             ["xdg-user-dir", "DESKTOP"],
@@ -1427,6 +1436,8 @@ def write_desktop_shortcut(
     for value in (name, cwd, icon or ""):
         _reject_control_chars(value)
     directory = directory or desktop_dir()
+    if os.name == "nt":
+        return _write_windows_shortcut(name, command, cwd, icon, directory)
     argv = [_desktop_quote(arg) for arg in command]
     if env:
         pairs = [f"{key}={value}" for key, value in sorted(env.items())]
@@ -1446,6 +1457,35 @@ def write_desktop_shortcut(
     # Atomic, and no .lock dotfile left on the user's Desktop.
     write_bytes(path, ("\n".join(lines) + "\n").encode("utf-8"), lock=False)
     path.chmod(path.stat().st_mode | 0o111)
+    return path
+
+
+def _write_windows_shortcut(
+    name: str, command: list[str], cwd: str, icon: str | None, directory: Path
+) -> Path:
+    """The Windows side of write_desktop_shortcut: a .lnk.
+
+    No environment: a .lnk has no place for one, and the native runner sets
+    none (frame generation's variables are read by COMMANDER itself, so a
+    shortcut starts the game without Lossless Scaling).
+
+    Named like the installer's own shortcut, not slugged as on Linux (where
+    the Desktop shows the file's Name= instead): Windows shows the file name.
+    """
+    from .winshortcut import shortcut_name, write_lnk
+
+    path = directory / f"{shortcut_name(name)}.lnk"
+    try:
+        write_lnk(
+            path,
+            command[0],
+            subprocess.list2cmdline(command[1:]),
+            working_dir=cwd,
+            icon=icon or "",
+            description=f"Starts {name} through Mod Organizer.",
+        )
+    except OSError as exc:
+        raise LaunchError(f"Couldn't write {path}: {exc}") from exc
     return path
 
 
