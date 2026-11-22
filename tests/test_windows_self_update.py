@@ -224,15 +224,22 @@ class RunningMutexTests(unittest.TestCase):
 
         from commander_gui import main
 
-        main._announce_running()
-        self.assertTrue(main._RUNNING_MUTEX)
-        main.release_instance_lock()
-        self.assertIsNone(main._RUNNING_MUTEX)
+        # A name of its own: a COMMANDER running on this machine holds the
+        # real one, and would keep it open whatever this process does.
+        name = f"STALKER-COMMANDER-test-{os.getpid()}"
+        kernel32 = ctypes.WinDLL("kernel32")  # its own: no global ctypes changes
+        kernel32.CreateMutexW.restype = ctypes.c_void_p
+        kernel32.OpenMutexW.restype = ctypes.c_void_p
+        kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+        with patch.object(main, "_RUNNING_MUTEX", kernel32.CreateMutexW(None, False, name)):
+            self.assertTrue(main._RUNNING_MUTEX)
+            main.release_instance_lock()
+            self.assertIsNone(main._RUNNING_MUTEX)
         # Nothing holds it now: opening it by name finds no such mutex.
         SYNCHRONIZE = 0x00100000
-        handle = ctypes.windll.kernel32.OpenMutexW(SYNCHRONIZE, False, "STALKER-COMMANDER-running")
+        handle = kernel32.OpenMutexW(SYNCHRONIZE, False, name)
         if handle:
-            ctypes.windll.kernel32.CloseHandle(handle)
+            kernel32.CloseHandle(handle)
         self.assertFalse(handle)
 
 
