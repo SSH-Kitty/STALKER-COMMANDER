@@ -5,7 +5,7 @@ Two builds can update themselves:
 * the AppImage (``commander_appimage_path()`` returns a path): the new
   AppImage is downloaded next to it and swapped in place;
 * the Windows build installed by Setup (``commander_windows_install_dir()``
-  returns a path): the new ``STALKER-COMMANDER-Setup-<version>.exe`` is
+  returns a path): the new ``COMMANDER-Installer-<version>.exe`` is
   downloaded to %TEMP%, and on restart COMMANDER quits and runs it silently
   over the install (``packaging/windows/installer/COMMANDER.iss`` reopens
   COMMANDER when it is done, see its ``/RELAUNCH=1`` entry).
@@ -214,7 +214,7 @@ def commander_update_asset_url(tag: str) -> str:
 
 def commander_setup_filename(tag: str) -> str:
     """Setup's file name for *tag*, as COMMANDER.iss's ``OutputBaseFilename``."""
-    return f"STALKER-COMMANDER-Setup-{_release_version(tag)}.exe"
+    return f"COMMANDER-Installer-{_release_version(tag)}.exe"
 
 
 def commander_setup_asset_url(tag: str) -> str:

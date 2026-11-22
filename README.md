@@ -66,7 +66,7 @@ and has a full Steam Deck Mode. See [Windows and Linux](#windows-and-linux) for 
 
 ### Windows: installer (recommended)
 
-Download `STALKER-COMMANDER-Setup-<version>.exe` from
+Download `COMMANDER-Installer-<version>.exe` from
 [**Releases**](https://github.com/SSH-Kitty/STALKER-GAMMA-COMMANDER/releases/latest) and run it. It needs Windows 10
 (version 1809 or newer) or Windows 11, 64-bit, and no administrator rights: by default it installs for your user only.
 
@@ -79,13 +79,18 @@ checksum, runs the new Setup and restarts COMMANDER.
 > anyway**. To check the file first, compare its checksum with the `.exe.sha512sum` file from the release:
 >
 > ```powershell
-> (Get-FileHash -Algorithm SHA512 .\STALKER-COMMANDER-Setup-*.exe).Hash.ToLower()
+> (Get-FileHash -Algorithm SHA512 .\COMMANDER-Installer-*.exe).Hash.ToLower()
 > ```
 
 ### Windows: portable zip
 
-Prefer not to install? Download `COMMANDER-windows-x64.zip`, unpack it anywhere and start `COMMANDER.exe`. The
-portable version tells you about new releases but doesn't update itself.
+Prefer not to install? Download the **COMMANDER Portable** zip, unpack it anywhere and start `COMMANDER.exe` (the
+`data` folder next to it holds the rest of the app). The portable version tells you about new releases but doesn't
+update itself. To check it, compare `COMMANDER.exe` with the `COMMANDER.exe.sha512sum` file inside the zip:
+
+```powershell
+(Get-FileHash -Algorithm SHA512 .\COMMANDER.exe).Hash.ToLower()
+```
 
 ### Linux: AppImage (recommended)
 

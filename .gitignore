@@ -25,6 +25,8 @@ htmlcov/
 # Python build outputs
 build/
 dist/
+# The workflow stages the portable download here.
+/portable/
 *.egg-info/
 .eggs/
 

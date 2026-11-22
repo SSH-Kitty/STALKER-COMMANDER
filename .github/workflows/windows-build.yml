@@ -1,7 +1,10 @@
-# Tests the Windows version, then builds the portable version
-# (COMMANDER-windows-x64.zip) and the installer
-# (STALKER-COMMANDER-Setup-<version>.exe) on every push to the
-# COMMANDER-Windows branch, or by hand from the Actions tab.
+# Tests the Windows version, then builds it on every push to the
+# COMMANDER-Windows branch, or by hand from the Actions tab. Two downloads:
+#   "COMMANDER Portable"  - the app, ready to run (COMMANDER.exe + data\),
+#                           with COMMANDER.exe.sha512sum
+#   "COMMANDER Installer" - COMMANDER-Installer-<version>.exe and its
+#                           .exe.sha512sum (attach both to a release: the
+#                           installed version's self-update needs the pair)
 name: Windows build
 
 on:
@@ -92,9 +95,9 @@ jobs:
           $info = (Get-Item $exe).VersionInfo
           if (-not $info.ProductName) { Write-Error "COMMANDER.exe has no version info"; exit 1 }
           Write-Output "COMMANDER.exe $($info.FileVersion) - $($info.ProductName)"
-      - name: Zip
-        shell: pwsh
-        run: Compress-Archive -Path dist/COMMANDER -DestinationPath COMMANDER-windows-x64.zip
+          # The app's files go in data\ (commander.spec's contents_directory).
+          if (-not (Test-Path dist/COMMANDER/data/commander_gui)) { Write-Error "dist/COMMANDER/data is missing"; exit 1 }
+          if (Test-Path dist/COMMANDER/_internal) { Write-Error "dist/COMMANDER still has an _internal folder"; exit 1 }
       - name: Build the installer
         shell: pwsh
         run: |
@@ -107,35 +110,42 @@ jobs:
           & $iscc.FullName "/DAppVersion=$version" "/DNumericVersion=$numeric" packaging/windows/installer/COMMANDER.iss
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Checksums
-        # Testers (and antivirus false-positive reports) can tell the file they
-        # have is the one CI built.
+        # Each download carries its own checksum, so testers (and antivirus
+        # false-positive reports) can tell the file they have is the one CI
+        # built. SHA512, the format COMMANDER's self-update checks.
         shell: pwsh
         run: |
-          $files = @("COMMANDER-windows-x64.zip") + (Get-ChildItem dist/STALKER-COMMANDER-Setup-*.exe | ForEach-Object { $_.FullName })
-          $lines = foreach ($f in $files) { "{0}  {1}" -f (Get-FileHash $f -Algorithm SHA256).Hash.ToLower(), (Split-Path $f -Leaf) }
-          $lines | Set-Content -Encoding ascii SHA256SUMS.txt
-          Get-Content SHA256SUMS.txt
-          # COMMANDER's self-update refuses a Setup without this file next to
-          # it on the release (commander_gui/self_update.py): attach both.
-          foreach ($setup in Get-ChildItem dist/STALKER-COMMANDER-Setup-*.exe) {
-            "{0}  {1}" -f (Get-FileHash $setup.FullName -Algorithm SHA512).Hash.ToLower(), $setup.Name |
-              Set-Content -Encoding ascii -NoNewline "$($setup.FullName).sha512sum"
-            Get-Content "$($setup.FullName).sha512sum"
+          function Write-Sha512($path) {
+            $item = Get-Item $path
+            "{0}  {1}" -f (Get-FileHash $item.FullName -Algorithm SHA512).Hash.ToLower(), $item.Name |
+              Set-Content -Encoding ascii -NoNewline "$($item.FullName).sha512sum"
+            Get-Content "$($item.FullName).sha512sum"
           }
+          # Portable: a copy of the app with the checksum beside COMMANDER.exe.
+          # A copy, so the installer (built above from dist/COMMANDER) never
+          # gets the checksum file.
+          New-Item -ItemType Directory -Force portable | Out-Null
+          Copy-Item -Recurse dist/COMMANDER/* portable/
+          Write-Sha512 portable/COMMANDER.exe
+          # Installer: the installed version's self-update refuses a Setup
+          # without this file next to it on the release (self_update.py).
+          foreach ($setup in Get-ChildItem dist/COMMANDER-Installer-*.exe) { Write-Sha512 $setup.FullName }
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: COMMANDER-windows-x64
-          path: COMMANDER-windows-x64.zip
+          # A folder's contents go in the artifact as they are: the download
+          # unzips straight to COMMANDER.exe, data\ and the checksum.
+          name: COMMANDER Portable
+          path: portable/
+          if-no-files-found: error
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: COMMANDER-windows-installer
+          name: COMMANDER Installer
           path: |
-            dist/STALKER-COMMANDER-Setup-*.exe
-            dist/STALKER-COMMANDER-Setup-*.exe.sha512sum
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: SHA256SUMS
-          path: SHA256SUMS.txt
+            dist/COMMANDER-Installer-*.exe
+            dist/COMMANDER-Installer-*.exe.sha512sum
+          if-no-files-found: error
+          # Inno Setup already compressed it (lzma2): zipping again only costs time.
+          compression-level: 0
 
   moddb-plugin:
     # The ModDB browser plugin (Settings > Plugins): COMMANDER.exe leaves

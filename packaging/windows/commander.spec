@@ -2,7 +2,8 @@
 # Build from the repo root on Windows:
 #   python scripts/fetch_windows_cli.py
 #   pyinstaller packaging/windows/commander.spec
-# Output: dist/COMMANDER/COMMANDER.exe
+# Output: dist/COMMANDER/COMMANDER.exe, with the rest of the app in
+# dist/COMMANDER/data (PyInstaller's default name is _internal).
 import re
 from pathlib import Path
 
@@ -68,7 +69,7 @@ LINUX_ONLY = {
     "commander_gui.winetricks",
 }
 
-# project_root() is <bundle>/_internal, so data keeps its repo-relative path.
+# project_root() is <bundle>/data, so data keeps its repo-relative path.
 datas = [
     (str(ROOT / "commander_gui" / "assets"), "commander_gui/assets"),
     (str(ROOT / "commander_gui" / "fonts"), "commander_gui/fonts"),
@@ -124,5 +125,9 @@ exe = EXE(  # noqa: F821
     version=version_info(),
     console=False,
     upx=False,  # UPX-packed exes are a classic antivirus false positive
+    # Everything but COMMANDER.exe goes in data\ (not "_internal"), so a
+    # player opening the folder sees what to start and what to leave alone.
+    # project_root() follows __file__, so no code depends on the name.
+    contents_directory="data",
 )
 coll = COLLECT(exe, a.binaries, a.datas, upx=False, name="COMMANDER")  # noqa: F821

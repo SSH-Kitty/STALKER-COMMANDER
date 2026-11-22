@@ -5,7 +5,7 @@
 ;   python packaging\windows\installer\make_images.py
 ;   ISCC packaging\windows\installer\COMMANDER.iss
 ;
-; Output: dist\STALKER-COMMANDER-Setup-<version>.exe
+; Output: dist\COMMANDER-Installer-<version>.exe
 ;
 ; Override on the command line when needed (CI passes the real version):
 ;   ISCC /DSourceDir=C:\path\to\COMMANDER /DAppVersion=1.4.1 /DNumericVersion=1.4.1 COMMANDER.iss
@@ -46,7 +46,7 @@ VersionInfoDescription={#AppName} Setup
 VersionInfoProductName={#AppName}
 VersionInfoProductVersion={#NumericVersion}
 VersionInfoProductTextVersion={#AppVersion}
-VersionInfoOriginalFileName=STALKER-COMMANDER-Setup-{#AppVersion}.exe
+VersionInfoOriginalFileName=COMMANDER-Installer-{#AppVersion}.exe
 ; Qt 6.11 (PySide6) needs Windows 10 1809 or newer.
 MinVersion=10.0.17763
 
@@ -83,7 +83,7 @@ SetupIconFile=images\app.ico
 
 LicenseFile=..\..\..\LICENSE
 OutputDir=..\..\..\dist
-OutputBaseFilename=STALKER-COMMANDER-Setup-{#AppVersion}
+OutputBaseFilename=COMMANDER-Installer-{#AppVersion}
 Compression=lzma2/ultra64
 SolidCompression=yes
 ; The 150 MB payload is mostly already-compressed Qt/Python files.
@@ -105,7 +105,9 @@ Name: "runtimes"; Description: "Install the Visual C++ and DirectX runtimes the 
 
 [InstallDelete]
 ; An upgrade copies over the old install: Qt plugins or .pyd files the new
-; version no longer has would be left in _internal and could be loaded.
+; version no longer has would be left in data and could be loaded.
+; _internal is where builds before the rename kept them.
+Type: filesandordirs; Name: "{app}\data"
 Type: filesandordirs; Name: "{app}\_internal"
 
 [Files]

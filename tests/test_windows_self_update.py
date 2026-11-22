@@ -44,7 +44,7 @@ class _FakeResponse:
 
 def _serve(body, checksum=True):
     """Fake GitHub: the Setup and (unless *checksum* is False) its .sha512sum."""
-    digest = hashlib.sha512(body).hexdigest().encode() + b"  STALKER-COMMANDER-Setup-9.9.9.exe"
+    digest = hashlib.sha512(body).hexdigest().encode() + b"  COMMANDER-Installer-9.9.9.exe"
     urls = []
 
     def fake_urlopen(request, timeout=None):
@@ -74,11 +74,11 @@ class SetupFileTests(unittest.TestCase):
                     self_update.verify_setup_file(path)
 
     def test_asset_names_match_the_installer_build(self):
-        # COMMANDER.iss: OutputBaseFilename=STALKER-COMMANDER-Setup-{#AppVersion},
+        # COMMANDER.iss: OutputBaseFilename=COMMANDER-Installer-{#AppVersion},
         # AppVersion = __version__ (lowercase), the tag without its "v".
-        self.assertIn("OutputBaseFilename=STALKER-COMMANDER-Setup-{#AppVersion}", ISS.read_text())
+        self.assertIn("OutputBaseFilename=COMMANDER-Installer-{#AppVersion}", ISS.read_text())
         url = self_update.commander_setup_asset_url("v1.4.0-Unstable2")
-        self.assertTrue(url.endswith("/releases/download/v1.4.0-Unstable2/STALKER-COMMANDER-Setup-1.4.0-unstable2.exe"))
+        self.assertTrue(url.endswith("/releases/download/v1.4.0-Unstable2/COMMANDER-Installer-1.4.0-unstable2.exe"))
         for bad in ("../x", "v1/../2", "a/b", ""):
             with self.assertRaises(CommanderSelfUpdateError):
                 self_update.commander_setup_asset_url(bad)
@@ -94,7 +94,7 @@ class InstallerScriptTests(unittest.TestCase):
         self.assertIn("skipifnotsilent", entry)
         self.assertIn("runasoriginaluser", entry)
         self.assertIn("{param:relaunch|0}') = '1'", text)
-        command = self_update.setup_command(Path("C:/t/STALKER-COMMANDER-Setup-9.9.9.exe"))
+        command = self_update.setup_command(Path("C:/t/COMMANDER-Installer-9.9.9.exe"))
         self.assertIn("/RELAUNCH=1", command)
         self.assertIn("/SILENT", command)
         # The mutex COMMANDER holds is the one Setup waits on.
@@ -104,7 +104,7 @@ class InstallerScriptTests(unittest.TestCase):
     def test_ci_publishes_the_checksum_the_update_needs(self):
         workflow = (ROOT / ".github" / "workflows" / "windows-build.yml").read_text()
         self.assertIn("-Algorithm SHA512", workflow)
-        self.assertIn("dist/STALKER-COMMANDER-Setup-*.exe.sha512sum", workflow)
+        self.assertIn("dist/COMMANDER-Installer-*.exe.sha512sum", workflow)
 
 
 @unittest.skipUnless(os.name == "nt", "Windows only")
@@ -160,11 +160,11 @@ class SetupDownloadTests(unittest.TestCase):
         served, urls = _serve(body)
         with served:
             path = self_update.download_and_install_commander_update("v9.9.9")
-        self.assertEqual(path, self.tmp / "STALKER-COMMANDER-update" / "STALKER-COMMANDER-Setup-9.9.9.exe")
+        self.assertEqual(path, self.tmp / "STALKER-COMMANDER-update" / "COMMANDER-Installer-9.9.9.exe")
         self.assertEqual(path.read_bytes(), body)
         self.assertEqual(sorted(p.name for p in path.parent.iterdir()), [path.name])
         self.assertEqual((self.install / "COMMANDER.exe").read_bytes(), b"old")
-        self.assertTrue(urls[0].endswith("STALKER-COMMANDER-Setup-9.9.9.exe.sha512sum"))
+        self.assertTrue(urls[0].endswith("COMMANDER-Installer-9.9.9.exe.sha512sum"))
 
     def test_a_release_without_a_windows_setup_says_so(self):
         served, _urls = _serve(_FAKE_PE, checksum=False)
@@ -192,7 +192,7 @@ class SetupDownloadTests(unittest.TestCase):
                 self.assertEqual(self_update.check_commander_update_for_this_build("1.4.0"), "v9.9.9")
 
     def test_restart_runs_setup_after_dropping_the_locks(self):
-        setup = self.tmp / "STALKER-COMMANDER-Setup-9.9.9.exe"
+        setup = self.tmp / "COMMANDER-Installer-9.9.9.exe"
         setup.write_bytes(_FAKE_PE)
         order = []
         with (
