@@ -32,6 +32,15 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import tempfile
 
+if os.name == "nt":
+    # GitHub's runner hands out %TEMP% as an 8.3 short path
+    # (C:\Users\RUNNER~1\...). The app resolves paths, which spells them out
+    # in full (runneradmin), so tests comparing against the short form failed
+    # on CI only. Use the long form everywhere, child processes included.
+    _long_temp = os.path.realpath(tempfile.gettempdir())
+    tempfile.tempdir = _long_temp
+    os.environ["TMP"] = os.environ["TEMP"] = _long_temp
+
 # On Windows COMMANDER keeps its settings in %APPDATA% (config.settings_dir),
 # which the XDG_* redirects below do not touch: without this, a run overwrote
 # the developer's real settings.json / gui-settings.json. Done here, at import
