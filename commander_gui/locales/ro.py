@@ -4044,4 +4044,9 @@ TRANSLATIONS: dict[str, str] = {
     "COMMANDER couldn't link GAMMA's downloads folder to the cache folder:\n{folder}\n\nPick a cache folder on a local drive, or allow admin rights when Windows asks.": 'COMMANDER nu a putut lega folderul de descărcări al GAMMA de folderul cache:\n{folder}\n\nAlege un folder cache pe o unitate locală sau acordă drepturi de administrator când Windows le cere.',
     "GAMMA can't be updated yet": 'GAMMA nu poate fi actualizat încă',
     "COMMANDER couldn't link GAMMA's downloads folder to the cache folder:\n{folder}\n\nPick a cache folder on a local drive in Settings > Game.": 'COMMANDER nu a putut lega folderul de descărcări al GAMMA de folderul cache:\n{folder}\n\nAlege un folder cache pe o unitate locală în Setări > Joc.',
+    "Mod Organizer won't load this mod yet": 'Mod Organizer nu va încărca încă acest mod',
+    "'{name}' was installed, but it has no gamedata folder at its top, so Mod Organizer marks it invalid and the game won't see its files.": "'{name}' a fost instalat, dar nu are un folder gamedata în partea de sus, așa că Mod Organizer îl marchează ca invalid și jocul nu îi va vedea fișierele.",
+    "Open its folder from the right-click menu and move the game files up, or check the mod's page for how to install it.": 'Deschide-i folderul din meniul de clic dreapta și mută fișierele jocului mai sus, sau vezi pe pagina modului cum se instalează.',
+    'None of the options you picked install any files. Install the mod again and tick at least one.': 'Niciuna dintre opțiunile alese nu instalează fișiere. Instalează modul din nou și bifează cel puțin una.',
+    "Only this folder of the archive holds game files. It's what gets installed.": 'Doar acest folder din arhivă conține fișiere ale jocului. El este instalat.',
 }

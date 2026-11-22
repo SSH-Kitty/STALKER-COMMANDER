@@ -2069,7 +2069,7 @@ class RegressionTests(unittest.TestCase):
             mods_dir = gamma_dir / "mods"
             mods_dir.mkdir(parents=True)
             new_mod = mods_dir / "Terrain Textures Redone"
-            new_mod.mkdir()
+            (new_mod / "gamedata").mkdir(parents=True)
 
             profile = CliProfile(
                 active=True,
@@ -12587,7 +12587,7 @@ class UserModsTrackerTests(unittest.TestCase):
                 mo2_profile="G.A.M.M.A",
             )
             dest = Path(profile.gamma) / "mods" / "NewMod"
-            dest.mkdir(parents=True)
+            (dest / "gamedata").mkdir(parents=True)
 
             class FakeWindow:
                 settings = CliSettings(profiles=[profile])

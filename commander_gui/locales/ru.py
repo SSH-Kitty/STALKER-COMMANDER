@@ -4044,4 +4044,9 @@ TRANSLATIONS: dict[str, str] = {
     "COMMANDER couldn't link GAMMA's downloads folder to the cache folder:\n{folder}\n\nPick a cache folder on a local drive, or allow admin rights when Windows asks.": 'COMMANDER не удалось связать папку загрузок GAMMA с папкой кэша:\n{folder}\n\nВыберите папку кэша на локальном диске или разрешите права администратора, когда Windows спросит.',
     "GAMMA can't be updated yet": 'GAMMA пока нельзя обновить',
     "COMMANDER couldn't link GAMMA's downloads folder to the cache folder:\n{folder}\n\nPick a cache folder on a local drive in Settings > Game.": 'COMMANDER не удалось связать папку загрузок GAMMA с папкой кэша:\n{folder}\n\nВыберите папку кэша на локальном диске в Настройки > Игра.',
+    "Mod Organizer won't load this mod yet": 'Mod Organizer пока не загрузит этот мод',
+    "'{name}' was installed, but it has no gamedata folder at its top, so Mod Organizer marks it invalid and the game won't see its files.": "'{name}' установлен, но наверху у него нет папки gamedata, поэтому Mod Organizer помечает его как недействительный, и игра не увидит его файлы.",
+    "Open its folder from the right-click menu and move the game files up, or check the mod's page for how to install it.": 'Откройте его папку через меню правой кнопки и переместите файлы игры выше или посмотрите на странице мода, как его установить.',
+    'None of the options you picked install any files. Install the mod again and tick at least one.': 'Ни один из выбранных вариантов не устанавливает файлы. Установите мод заново и отметьте хотя бы один.',
+    "Only this folder of the archive holds game files. It's what gets installed.": 'Только эта папка архива содержит файлы игры. Она и будет установлена.',
 }

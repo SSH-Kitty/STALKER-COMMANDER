@@ -1,6 +1,8 @@
 import os
+import shutil
 import tempfile
 import unittest
+import unittest.mock
 import zipfile
 from pathlib import Path
 from unittest.mock import patch
@@ -12,24 +14,30 @@ from commander_gui.fomod import (
     FomodOption,
     FomodStep,
     apply_options,
+    bundle_config,
     parse_config,
 )
 from commander_gui.mod_install import (
     ModInstallError,
+    _list_archive_paths,
     _validate_archive_entries,
     default_mod_name,
     drop_romeo_prefix,
     install_archive,
     make_staging_dir,
+    payload_root,
     sanitize_name,
 )
 from commander_gui.modlist import (
     add_category,
+    add_custom_mod,
     add_mod,
     count_mods,
     flip_priority,
     grouped,
+    install_conflict,
     move_mod,
+    rename_category,
     seed_new_mo2_profile,
 )
 
@@ -631,6 +639,137 @@ class ModInstallTests(unittest.TestCase):
                 zf.writestr("gamedata/a.txt", "x")
             install_archive(archive, mods)
             self.assertEqual(sorted(p.name for p in gamma.iterdir()), ["mods"])
+
+    def test_listing_ignores_seven_zips_closing_warning_count(self):
+        # A 7z saved as .zip (4 of GAMMA's own downloads) opens, but 7-Zip
+        # ends the listing with "Warnings: 1" - not an entry name.
+        listing = (
+            "Listing archive: mod.zip\n\n--\nPath = mod.zip\n"
+            "Open WARNING: Cannot open the file as [zip] archive\nType = 7z\n"
+            "Physical Size = 10\n\n----------\nPath = gamedata\nSize = 0\n"
+            "Attributes = D drwxr-xr-x\n\nPath = gamedata\\a.script\nSize = 1\n"
+            "Attributes = A -rw-r--r--\n\nWarnings: 1\n"
+        )
+        result = unittest.mock.Mock(returncode=0, stdout=listing)
+        with patch("commander_gui.mod_install.subprocess.run", return_value=result):
+            paths = _list_archive_paths(Path("7z"), Path("mod.zip"))
+        self.assertEqual(paths, ["gamedata", "gamedata\\a.script"])
+
+    def test_listing_still_refuses_a_name_with_a_line_break(self):
+        listing = "----------\nPath = gamedata\nWarnings: 1\nSize = 0\n"
+        result = unittest.mock.Mock(returncode=0, stdout=listing)
+        with (
+            patch("commander_gui.mod_install.subprocess.run", return_value=result),
+            self.assertRaises(ModInstallError),
+        ):
+            _list_archive_paths(Path("7z"), Path("mod.zip"))
+
+    @unittest.skipIf(os.name != "nt", "Windows folders ignore case; Linux ones don't")
+    def test_windows_name_in_another_case_is_the_listed_mod(self):
+        # Seen as a "leftover", Replace deleted the listed mod's folder.
+        with tempfile.TemporaryDirectory() as tmp:
+            mods = Path(tmp) / "mods"
+            (mods / "My Mod").mkdir(parents=True)
+            self.assertEqual(install_conflict(["-My Mod"], mods, "my mod"), "listed")
+            self.assertEqual(count_mods(["+my mod"], mods), (1, 1))
+        with self.assertRaises(ValueError):
+            add_custom_mod(["-My Mod"], "MY MOD")
+        with self.assertRaises(ValueError):
+            add_mod(["-My Mod"], "my mod")
+        with self.assertRaises(ValueError):
+            add_category(["-Weapons_separator"], "weapons")
+
+    @unittest.skipIf(os.name != "nt", "Windows folders ignore case; Linux ones don't")
+    def test_windows_category_case_only_rename_is_allowed(self):
+        lines = ["-A", "-weapons_separator", "-B", "-Armor_separator"]
+        self.assertEqual(
+            rename_category(lines, "weapons", "Weapons")[1], "-Weapons_separator"
+        )
+        with self.assertRaises(ValueError):
+            rename_category(lines, "weapons", "armor")
+
+    @staticmethod
+    def _tree(root: Path, files: list[str]) -> None:
+        for relative in files:
+            path = root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("x")
+
+    def test_payload_root_skips_packaging_files_around_the_mod_folder(self):
+        # GitHub downloads, LICENSE/readme beside the folder, Mac zips:
+        # gamedata landed one level down and MO2 flagged the mod invalid.
+        layouts = {
+            "github": (["mod-main/README.md", "mod-main/.github/workflows/a.yml",
+                        "mod-main/.gitattributes", "mod-main/src/gamedata/a.script"],
+                       "mod-main/src"),
+            "license": (["ARC/gamedata/a.ltx", "ARC - LICENSE.txt"], "ARC"),
+            "macosx": (["Icons/gamedata/a.dds", "Icons/.DS_Store",
+                        "__MACOSX/Icons/._gamedata"], "Icons"),
+        }
+        for label, (files, expected) in layouts.items():
+            with tempfile.TemporaryDirectory() as tmp:
+                staging = Path(tmp)
+                self._tree(staging, files)
+                self.assertEqual(payload_root(staging), staging / expected, msg=label)
+
+    def test_payload_root_keeps_a_layout_it_cannot_fix(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            staging = Path(tmp)
+            self._tree(staging, ["Mod/notes.txt", "Mod/Option A/readme.txt", "README.md"])
+            self.assertEqual(payload_root(staging), staging)
+            self._tree(staging, ["gamedata/a.script"])  # real data on top wins
+            self.assertEqual(payload_root(staging), staging)
+
+    def test_bundle_finds_parts_nested_below_the_payload(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            staging = Path(tmp)
+            self._tree(staging, [
+                "Grok/Complete/gamedata/a.ltx",
+                "Grok/Modular/No recipes/gamedata/b.ltx",
+                "Grok/Modular/Half price/gamedata/c.ltx",
+                "Grok/README.txt",
+            ])
+            config, root = bundle_config(staging, "Grok.zip")
+            self.assertEqual(root, staging / "Grok")
+            names = [option.name for option in config.steps[0].groups[0].options]
+            self.assertEqual(
+                names, ["Complete", "Modular / Half price", "Modular / No recipes"]
+            )
+            destination = staging.parent / f"{staging.name}-out"
+            try:
+                apply_options(config, root, destination, {(0, 0): [2]})
+                self.assertTrue((destination / "gamedata" / "b.ltx").is_file())
+            finally:
+                shutil.rmtree(destination, ignore_errors=True)
+
+    def test_bundle_ticks_the_main_file_part(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            staging = Path(tmp)
+            self._tree(staging, [
+                "Audio/[Main file]/gamedata/a.ogg",
+                "Audio/Bonus steps/gamedata/b.ogg",
+                "Readme.rtf",
+            ])
+            config, root = bundle_config(staging, "Dark_signal_audio.rar")
+            options = config.steps[0].groups[0].options
+            self.assertEqual(root, staging / "Audio")
+            self.assertEqual(options[0].name, "[Main file]")
+            self.assertEqual(options[0].default_type, "Recommended")
+
+    def test_bundle_offers_a_single_buried_part(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            staging = Path(tmp)
+            self._tree(staging, [
+                "ARC/1P78/gamedata/a.dds",
+                "ARC/SUSAT/NOTE.txt",
+                "ARC/CORTEX/NOTE.txt",
+                "LICENSE.txt",
+            ])
+            config, root = bundle_config(staging, "ARC.zip")
+            options = config.steps[0].groups[0].options
+            self.assertEqual([o.name for o in options], ["1P78"])
+            self.assertEqual(options[0].default_type, "Recommended")
+            self.assertEqual(root, staging / "ARC")
 
 
 class LocalBinPathTests(unittest.TestCase):

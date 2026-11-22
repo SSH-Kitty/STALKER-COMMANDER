@@ -4044,4 +4044,9 @@ TRANSLATIONS: dict[str, str] = {
     "COMMANDER couldn't link GAMMA's downloads folder to the cache folder:\n{folder}\n\nPick a cache folder on a local drive, or allow admin rights when Windows asks.": "COMMANDER, GAMMA'nın indirme klasörünü önbellek klasörüne bağlayamadı:\n{folder}\n\nYerel bir sürücüde önbellek klasörü seçin veya Windows sorduğunda yönetici iznini verin.",
     "GAMMA can't be updated yet": 'GAMMA henüz güncellenemiyor',
     "COMMANDER couldn't link GAMMA's downloads folder to the cache folder:\n{folder}\n\nPick a cache folder on a local drive in Settings > Game.": "COMMANDER, GAMMA'nın indirme klasörünü önbellek klasörüne bağlayamadı:\n{folder}\n\nAyarlar > Oyun bölümünden yerel bir sürücüde önbellek klasörü seçin.",
+    "Mod Organizer won't load this mod yet": 'Mod Organizer bu modu henüz yüklemeyecek',
+    "'{name}' was installed, but it has no gamedata folder at its top, so Mod Organizer marks it invalid and the game won't see its files.": "'{name}' kuruldu ama en üstünde gamedata klasörü yok, bu yüzden Mod Organizer onu geçersiz olarak işaretler ve oyun dosyalarını görmez.",
+    "Open its folder from the right-click menu and move the game files up, or check the mod's page for how to install it.": 'Klasörünü sağ tık menüsünden açıp oyun dosyalarını yukarı taşıyın veya nasıl kurulacağını modun sayfasından öğrenin.',
+    'None of the options you picked install any files. Install the mod again and tick at least one.': 'Seçtiğiniz seçeneklerin hiçbiri dosya kurmuyor. Modu yeniden kurun ve en az birini işaretleyin.',
+    "Only this folder of the archive holds game files. It's what gets installed.": 'Arşivde yalnızca bu klasör oyun dosyaları içeriyor. Kurulan odur.',
 }

@@ -79,7 +79,11 @@ def unpacked_size(archiver: Path, archive: Path) -> int | None:
         ).stdout
     except (OSError, subprocess.TimeoutExpired):
         return None
-    lines = [line for line in out.splitlines() if line.strip()]
+    # A 7z saved as .zip ends with a "Warnings: 1" count after the summary.
+    lines = [
+        line for line in out.splitlines()
+        if line.strip() and not re.match(r"^(?:Warnings|Errors): \d+$", line)
+    ]
     match = re.match(r"^(?:\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)?\s+(\d+)\s", lines[-1]) if lines else None
     return int(match.group(1)) if match else None
 

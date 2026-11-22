@@ -10,6 +10,7 @@ any Qt, so the desktop dialog and Deck Mode's screen drive the same logic.
 
 from __future__ import annotations
 
+import os
 import shutil
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
@@ -21,6 +22,8 @@ from .mod_install import (
     _GAME_DATA_FOLDER_NAMES,
     ModInstallError,
     default_mod_name,
+    has_game_data,
+    is_packaging_folder,
     payload_root,
 )
 
@@ -255,36 +258,80 @@ def bundle_config(staging: Path, archive_name: str = "") -> tuple[FomodConfig, P
     folder (Anomaly Popup Messages, for one). Installed as-is, none of
     them has game data at the mod's top level, so MO2 ignores the mod;
     MO2 itself asks which folder to use. Each folder becomes an option,
-    and the one named like the archive starts ticked.
+    and the one named like the archive (or "Main file", "Core") starts
+    ticked. Parts are found up to three levels down ("Modular/<tweak>/
+    gamedata"), past packaging files like README.md or ``__MACOSX``.
     """
     root = payload_root(staging)
-    if any(child.name.lower() in _GAME_DATA_FOLDER_NAMES for child in root.iterdir()):
+    if has_game_data(root):
         return None
-    parts = [
-        folder
-        for folder in _subdirs(root)
-        if any(child.name.lower() in _GAME_DATA_FOLDER_NAMES for child in _subdirs(folder))
-    ]
-    if len(parts) < 2:
+    parts = _bundle_parts(root)
+    if not parts:
         return None
+    # Name the parts from the folder they all share ("Latest Version (2.0)/
+    # Striker Reanimation" and "Old Version (1.1)/Protecta 1.1" keep their
+    # first level; one wrapper around all of them is dropped).
+    base = Path(os.path.commonpath([str(part) for part in parts]))
+    if len(parts) == 1:
+        # One folder holds game data among notes and screenshots (ARC
+        # 3DSS): still asked, so the player sees what goes in.
+        base = parts[0].parent
     archive_key = _squash(archive_name)
 
+    def label(folder: Path) -> str:
+        return folder.relative_to(base).as_posix().replace("/", " / ")
+
     def is_main(folder: Path) -> bool:
-        return bool(archive_key) and archive_key.startswith(_squash(folder.name))
+        name = _squash(folder.name)
+        return bool(name) and (
+            (bool(archive_key) and archive_key.startswith(name))
+            or name in ("main", "mainfile", "core", "base")
+        )
 
     options = tuple(
         FomodOption(
-            name=folder.name,
-            files=(FomodFile(source=folder.name, destination="", is_folder=True),),
-            default_type=RECOMMENDED if is_main(folder) else OPTIONAL,
+            name=label(folder),
+            files=(
+                FomodFile(
+                    source=folder.relative_to(base).as_posix(), destination="", is_folder=True
+                ),
+            ),
+            default_type=RECOMMENDED if is_main(folder) or len(parts) == 1 else OPTIONAL,
         )
         # The main mod first, then its add-ons.
         for folder in sorted(parts, key=lambda folder: not is_main(folder))
     )
     group = FomodGroup(tr("Parts to install"), "SelectAtLeastOne", options)
-    step = FomodStep(tr("This archive holds several parts. Tick the ones you want."), (group,))
-    name = default_mod_name(Path(archive_name)) if archive_name else root.name
-    return FomodConfig(name=name, author="", steps=(step,)), root
+    question = (
+        tr("This archive holds several parts. Tick the ones you want.")
+        if len(parts) > 1
+        else tr("Only this folder of the archive holds game files. It's what gets installed.")
+    )
+    step = FomodStep(question, (group,))
+    name = default_mod_name(Path(archive_name)) if archive_name else base.name
+    return FomodConfig(name=name, author="", steps=(step,)), base
+
+
+#: How deep below the payload a bundle's parts are looked for: Grok's
+#: "Modular/<tweak>/gamedata" and Armsel's "Latest Version/<part>/gamedata"
+#: are two levels down.
+_BUNDLE_DEPTH = 3
+
+
+def _bundle_parts(root: Path) -> list[Path]:
+    """Folders under ``root`` holding game data at their top, not looking
+    inside one (its own subfolders are its files, not more parts)."""
+    parts: list[Path] = []
+    level = [root]
+    for _depth in range(_BUNDLE_DEPTH):
+        deeper: list[Path] = []
+        for folder in level:
+            for child in _subdirs(folder):
+                if is_packaging_folder(child.name) or child.name.lower() in _GAME_DATA_FOLDER_NAMES:
+                    continue
+                (parts if has_game_data(child) else deeper).append(child)
+        level = deeper
+    return sorted(parts)
 
 
 def find_installer(staging: Path, archive_name: str = "") -> tuple[FomodConfig, Path] | None:

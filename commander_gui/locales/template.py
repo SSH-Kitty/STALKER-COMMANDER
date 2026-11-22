@@ -4066,4 +4066,9 @@ TRANSLATIONS: dict[str, str] = {
     "COMMANDER couldn't link GAMMA's downloads folder to the cache folder:\n{folder}\n\nPick a cache folder on a local drive, or allow admin rights when Windows asks.": '',
     "GAMMA can't be updated yet": '',
     "COMMANDER couldn't link GAMMA's downloads folder to the cache folder:\n{folder}\n\nPick a cache folder on a local drive in Settings > Game.": '',
+    "Mod Organizer won't load this mod yet": '',
+    "'{name}' was installed, but it has no gamedata folder at its top, so Mod Organizer marks it invalid and the game won't see its files.": '',
+    "Open its folder from the right-click menu and move the game files up, or check the mod's page for how to install it.": '',
+    'None of the options you picked install any files. Install the mod again and tick at least one.': '',
+    "Only this folder of the archive holds game files. It's what gets installed.": '',
 }

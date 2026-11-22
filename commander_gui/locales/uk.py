@@ -4044,4 +4044,9 @@ TRANSLATIONS: dict[str, str] = {
     "COMMANDER couldn't link GAMMA's downloads folder to the cache folder:\n{folder}\n\nPick a cache folder on a local drive, or allow admin rights when Windows asks.": "COMMANDER не вдалося зв'язати папку завантажень GAMMA з папкою кешу:\n{folder}\n\nВибери папку кешу на локальному диску або надай права адміністратора, коли Windows попросить.",
     "GAMMA can't be updated yet": 'GAMMA поки не можна оновити',
     "COMMANDER couldn't link GAMMA's downloads folder to the cache folder:\n{folder}\n\nPick a cache folder on a local drive in Settings > Game.": "COMMANDER не вдалося зв'язати папку завантажень GAMMA з папкою кешу:\n{folder}\n\nВибери папку кешу на локальному диску в Налаштування > Гра.",
+    "Mod Organizer won't load this mod yet": 'Mod Organizer поки не завантажить цей мод',
+    "'{name}' was installed, but it has no gamedata folder at its top, so Mod Organizer marks it invalid and the game won't see its files.": "'{name}' встановлено, але нагорі в нього немає теки gamedata, тож Mod Organizer позначає його як недійсний, і гра не побачить його файли.",
+    "Open its folder from the right-click menu and move the game files up, or check the mod's page for how to install it.": 'Відкрий його теку через меню правої кнопки й перемісти файли гри вище або подивися на сторінці мода, як його встановити.',
+    'None of the options you picked install any files. Install the mod again and tick at least one.': 'Жоден із вибраних варіантів не встановлює файли. Встанови мод знову й познач хоча б один.',
+    "Only this folder of the archive holds game files. It's what gets installed.": 'Лише ця тека архіву містить файли гри. Саме вона буде встановлена.',
 }

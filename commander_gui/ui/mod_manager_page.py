@@ -60,6 +60,7 @@ from ..mod_install import (
     drop_romeo_prefix,
     extract_archive,
     find_archiver,
+    has_game_data,
     make_staging_dir,
     move_payload,
     sanitize_name,
@@ -2236,6 +2237,10 @@ class ModManagerPage(QWidget):
             if fomod is not None:
                 config, fomod_root, selections = fomod
                 apply_options(config, fomod_root, source, selections)
+                if not any(source.iterdir()):
+                    raise ModInstallError(
+                        tr("None of the options you picked install any files. Install the mod again and tick at least one.")
+                    )
             destination = mods_dir / name
             move_payload(source, destination, self._finalize_task.cancel_event)
             write_basic_meta_ini(destination, installation_file)
@@ -2284,6 +2289,7 @@ class ModManagerPage(QWidget):
             # a reinstalled mod often sits somewhere already on screen,
             # so there's no other obvious sign anything happened.
             QMessageBox.information(self, tr("Mod reinstalled"), done_message)
+            self._warn_if_not_loadable(destination)
             return
         try:
             new_lines = add_custom_mod(self._lines, destination.name, enabled=False)
@@ -2312,6 +2318,7 @@ class ModManagerPage(QWidget):
             except RuntimeError:
                 pass
             self._finish_install()
+            self._warn_if_not_loadable(destination)
             return
         try:
             shutil.rmtree(destination)
@@ -2332,6 +2339,23 @@ class ModManagerPage(QWidget):
             tr("The mod list (modlist.txt) couldn't be updated, so the copied files were removed again. Try installing the mod again."),
         )
         self._finish_install()
+
+    def _warn_if_not_loadable(self, destination: Path) -> None:
+        """Say so when an installed mod has no game data at its top.
+
+        MO2 marks such a mod invalid (a red X in its Flags column) and the
+        game never sees its files: an archive of nested archives, or one
+        that isn't a game mod at all. Installed anyway, as MO2 itself does,
+        so the player can sort the folder out by hand.
+        """
+        if not destination.is_dir() or has_game_data(destination):
+            return
+        QMessageBox.warning(
+            self,
+            tr("Mod Organizer won't load this mod yet"),
+            tr("'{name}' was installed, but it has no gamedata folder at its top, so Mod Organizer marks it invalid and the game won't see its files.", name=destination.name),
+            info=tr("Open its folder from the right-click menu and move the game files up, or check the mod's page for how to install it."),
+        )
 
     def _refuse_xrrazom(self, archive: Path) -> bool:
         """Stop an xrRazom Co-op archive before it is unpacked: it is more

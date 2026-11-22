@@ -4044,4 +4044,9 @@ TRANSLATIONS: dict[str, str] = {
     "COMMANDER couldn't link GAMMA's downloads folder to the cache folder:\n{folder}\n\nPick a cache folder on a local drive, or allow admin rights when Windows asks.": 'COMMANDER konnte den Download-Ordner von GAMMA nicht mit dem Cache-Ordner verknüpfen:\n{folder}\n\nWähle einen Cache-Ordner auf einem lokalen Laufwerk oder erlaube Administratorrechte, wenn Windows fragt.',
     "GAMMA can't be updated yet": 'GAMMA kann noch nicht aktualisiert werden',
     "COMMANDER couldn't link GAMMA's downloads folder to the cache folder:\n{folder}\n\nPick a cache folder on a local drive in Settings > Game.": 'COMMANDER konnte den Download-Ordner von GAMMA nicht mit dem Cache-Ordner verknüpfen:\n{folder}\n\nWähle unter Einstellungen > Spiel einen Cache-Ordner auf einem lokalen Laufwerk.',
+    "Mod Organizer won't load this mod yet": 'Mod Organizer lädt diese Mod noch nicht',
+    "'{name}' was installed, but it has no gamedata folder at its top, so Mod Organizer marks it invalid and the game won't see its files.": "'{name}' wurde installiert, hat aber oben keinen gamedata-Ordner. Mod Organizer markiert sie deshalb als ungültig, und das Spiel sieht ihre Dateien nicht.",
+    "Open its folder from the right-click menu and move the game files up, or check the mod's page for how to install it.": 'Öffne ihren Ordner über das Rechtsklickmenü und verschiebe die Spieldateien nach oben, oder sieh auf der Seite der Mod nach, wie sie installiert wird.',
+    'None of the options you picked install any files. Install the mod again and tick at least one.': 'Keine der gewählten Optionen installiert Dateien. Installiere die Mod erneut und hake mindestens eine an.',
+    "Only this folder of the archive holds game files. It's what gets installed.": 'Nur dieser Ordner des Archivs enthält Spieldateien. Er wird installiert.',
 }
