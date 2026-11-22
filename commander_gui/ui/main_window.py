@@ -437,6 +437,9 @@ class MainWindow(QMainWindow):
         # The Welcome screen (latest patch notes, links), unless "Don't show
         # again" was ticked - here or in Deck Mode, which shares the setting.
         QTimer.singleShot(0, self._maybe_show_welcome)
+        if os.name == "nt":
+            # After the Welcome screen is up, so the notice sits on top of it.
+            QTimer.singleShot(1500, self._maybe_warn_smart_app_control)
 
         start_page = gui_settings.load_gui_settings().get("start_page")
         if os.name == "nt" and not self._gamma_is_installed():
@@ -455,6 +458,22 @@ class MainWindow(QMainWindow):
         """True when the active profile's GAMMA folder holds an install."""
         profile = self.settings.active_profile
         return profile is not None and gamma_installed(profile.gamma, profile.mo2_profile)
+
+    def _maybe_warn_smart_app_control(self) -> None:
+        """Once: Smart App Control can stop the CLI, MO2 or the game (all
+        unsigned) from starting, with no "Run anyway" (winsecurity.py)."""
+        from ..winsecurity import SAC_ON, smart_app_control_state
+
+        if gui_settings.load_gui_settings().get("smart_app_control_notice_shown"):
+            return
+        if smart_app_control_state() != SAC_ON:
+            return
+        gui_settings.save_gui_settings(smart_app_control_notice_shown=True)
+        QMessageBox.warning(
+            self,
+            tr("Smart App Control is on"),
+            tr("Windows' Smart App Control blocks programs that aren't code-signed. That can include the GAMMA installer, Mod Organizer 2 and the game itself, and Windows then offers no way to run them anyway.\n\nIf something won't start, turn Smart App Control off in Windows Security > App & browser control > Smart App Control settings."),
+        )
 
     def _maybe_show_welcome(self) -> None:
         from .welcome_overlay import maybe_show_welcome

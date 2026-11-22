@@ -4071,4 +4071,13 @@ TRANSLATIONS: dict[str, str] = {
     "Open its folder from the right-click menu and move the game files up, or check the mod's page for how to install it.": '',
     'None of the options you picked install any files. Install the mod again and tick at least one.': '',
     "Only this folder of the archive holds game files. It's what gets installed.": '',
+    'This folder is in OneDrive': '',
+    "OneDrive uploads this folder and can leave GAMMA's files online only, so installs break and the game fails to start. Pick a folder outside OneDrive, such as C:\\GAMMA.": '',
+    "Windows blocked this program. Smart App Control or an app control policy stops programs that aren't code-signed. Turn Smart App Control off in Windows Security > App & browser control, or ask whoever manages this PC to allow it.": '',
+    "Your antivirus blocked this program. Restore it from Windows Security > Protection history (or your antivirus' quarantine), then try again.": '',
+    'Graphics card': '',
+    'Use the high-performance graphics card': '',
+    "On laptops with two graphics cards, the game runs on the faster one. A choice you made in Windows' graphics settings stays as it is.": '',
+    'Smart App Control is on': '',
+    "Windows' Smart App Control blocks programs that aren't code-signed. That can include the GAMMA installer, Mod Organizer 2 and the game itself, and Windows then offers no way to run them anyway.\n\nIf something won't start, turn Smart App Control off in Windows Security > App & browser control > Smart App Control settings.": '',
 }

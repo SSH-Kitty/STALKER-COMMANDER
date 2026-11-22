@@ -81,6 +81,10 @@ checksum, runs the new Setup and restarts COMMANDER.
 > ```powershell
 > (Get-FileHash -Algorithm SHA512 .\COMMANDER-Installer-*.exe).Hash.ToLower()
 > ```
+>
+> On Windows 11, **Smart App Control** blocks programs that aren't code-signed and offers no "Run anyway". That can
+> stop COMMANDER, Mod Organizer 2 or the game from starting. COMMANDER tells you when it's on; to turn it off, open
+> **Windows Security → App & browser control → Smart App Control settings**.
 
 ### Windows: portable zip
 
@@ -187,6 +191,9 @@ Everything added since the last stable release, **1.3.1**.
 - **Frame generation through Lossless Scaling**, started with the game from the Play page.
 - **Add to Steam, desktop shortcuts, tray icon, co-op, ROMEO and the ModDB plugin** all work on Windows.
 - **ASSISTANT explains Windows crash codes** in plain words.
+- **Windows extras.** Installs and updates keep the PC awake and show their progress on the taskbar button.
+  On laptops with two graphics cards, the game runs on the faster one. COMMANDER warns before you install into
+  OneDrive, and explains when Smart App Control or an antivirus blocks a program.
 
 #### Modpacks and co-op
 

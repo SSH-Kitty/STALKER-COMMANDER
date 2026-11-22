@@ -827,6 +827,19 @@ class SettingsPage(QWidget):
         layout.addWidget(display)
         display.setVisible(os.name != "nt")
 
+        gpu, box = _card(tr("Graphics card"))
+        self._gpu_check = QCheckBox(tr("Use the high-performance graphics card"))
+        self._gpu_check.toggled.connect(self._on_gpu_toggled)
+        _rows(
+            box,
+            _check_row(
+                self._gpu_check,
+                tr("On laptops with two graphics cards, the game runs on the faster one. A choice you made in Windows' graphics settings stays as it is."),
+            ),
+        )
+        layout.addWidget(gpu)
+        gpu.setVisible(os.name == "nt")  # Windows' per-app GPU preference
+
         folders, box = _card(
             tr("Folders"),
             tr("Click a box to pick a folder. To swap between GAMMA installs, use Install > Switch install."),
@@ -843,6 +856,13 @@ class SettingsPage(QWidget):
         )
         layout.addWidget(folders)
         return page
+
+    def _on_gpu_toggled(self, on: bool) -> None:
+        from .. import wingpu
+
+        gui_settings.save_gui_settings(high_performance_gpu=on)
+        profile = self.window.settings.active_profile
+        wingpu.sync(profile.anomaly if profile is not None else "")
 
     # ---------------------------------------------------------------- folders
     def _load_folders(self) -> None:
@@ -1968,6 +1988,9 @@ class SettingsPage(QWidget):
         self._update_notify_check.blockSignals(True)
         self._update_notify_check.setChecked(bool(state.get("update_notifications", True)))
         self._update_notify_check.blockSignals(False)
+        self._gpu_check.blockSignals(True)
+        self._gpu_check.setChecked(bool(state.get("high_performance_gpu", True)))
+        self._gpu_check.blockSignals(False)
         self._developer_check.blockSignals(True)
         self._developer_check.setChecked(state["developer_mode"])
         self._developer_check.blockSignals(False)

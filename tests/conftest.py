@@ -157,10 +157,17 @@ def _never_change_windows_security():
     with no UAC prompt: the suite once added a dozen exclusions for its own
     temp folders. The elevated step fails loudly instead, and the Install
     page skips the step altogether; tests/test_winprep.py tests it with the
-    real method, saved before this patch."""
+    real method, saved before this patch.
+
+    The same goes for the per-game graphics card choice (a launch writes it
+    to the real registry) and the Smart App Control notice, a modal box that
+    never closes offscreen on a PC that has it on. tests/test_windows_extras.py
+    tests both with the real functions."""
     with (
         patch("commander_gui.winprep.apply", side_effect=_elevation_disabled_in_tests),
         patch("commander_gui.ui.install_page.InstallPage._windows_prep_first", return_value=False),
+        patch("commander_gui.wingpu.sync"),
+        patch("commander_gui.winsecurity.smart_app_control_state", return_value=None),
     ):
         yield
 

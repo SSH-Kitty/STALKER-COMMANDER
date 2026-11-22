@@ -149,6 +149,10 @@ class CliWorker(QObject):
             self._process = None
             name = command[0] if command else "<empty>"
             message = f"Failed to start {name!r}: {exc}"
+            from .winsecurity import start_blocked_hint
+
+            if hint := start_blocked_hint(exc):
+                message += "\n" + hint
             self.line_ready.emit(message)
             self.finished.emit(SPAWN_FAILED_RC, message)
             return

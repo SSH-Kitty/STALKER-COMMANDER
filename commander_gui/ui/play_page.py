@@ -34,7 +34,15 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .. import applog, coop, gui_settings, launch_options, lossless_win, overlays
+from .. import (
+    applog,
+    coop,
+    gui_settings,
+    launch_options,
+    lossless_win,
+    overlays,
+    wingpu,
+)
 from ..assistant_launcher import AssistantLaunchError, launch_assistant
 from ..config import logs_dir
 from ..discord_rpc import (
@@ -1344,6 +1352,7 @@ class PlayPage(QWidget):
             if not no_mo2:
                 unblock_mo2_python(profile.gamma)
             coop.prepare_launch(profile.anomaly, profile.gamma, profile.mo2_profile)
+            wingpu.sync(profile.anomaly)
             base_fields = self._coop_shortcut_fields(profile, "")
             fields = with_coop_options(base_fields)
         except (LaunchError, coop.CoopError, OSError) as exc:
@@ -1635,6 +1644,7 @@ class PlayPage(QWidget):
                     coop.prepare_launch(profile.anomaly, profile.gamma, profile.mo2_profile)
                 except (OSError, coop.CoopError):
                     pass  # MO2 shows its own error then.
+            wingpu.sync(profile.anomaly)  # Windows: the laptop's fast graphics card
         self._launch_status_clear_timer.stop()
         # A crash-dump poll from the previous session must not fire a
         # warning attributed to this brand-new one (e.g. a quick retry

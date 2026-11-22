@@ -52,6 +52,7 @@ _DEFAULTS = {
     "tray_close_to_tray": True,  # the window's close button hides COMMANDER to the tray instead of quitting
     "tray_hide_while_playing": True,  # hide to the tray while the game runs, back when it closes
     "tray_hint_shown": False,  # the one-time "still running in the tray" notification was sent
+    "smart_app_control_notice_shown": False,  # Windows: the one-time Smart App Control notice was shown
     "custom_launch_options": "",  # extra tokens prepended to the launch command
     "lossless_dll": "",  # Lossless Scaling DLL picked by hand for frame generation
     "lossless_exe": "",  # LosslessScaling.exe picked by hand for frame generation on Windows
@@ -110,6 +111,8 @@ _DEFAULTS = {
     "verify_repair_prompt": False,  # Install page Verify step: open the repair list when a check finds problems
     "verify_after_gamma": False,  # Install page Verify step: run Verify Integrity after a GAMMA install
     "defender_excluded": [],  # Windows: install folders COMMANDER added to Defender's exclusions (winprep.py)
+    "high_performance_gpu": True,  # Windows: run the game on a laptop's fast graphics card (wingpu.py)
+    "gpu_preferences_set": [],  # Windows: game exes COMMANDER set to the fast graphics card (wingpu.py)
 }
 
 _cache: dict | None = None
@@ -187,6 +190,10 @@ def load_gui_settings() -> dict:
             data[key] = _DEFAULTS[key]
     excluded = data.get("defender_excluded")
     data["defender_excluded"] = [p for p in excluded if isinstance(p, str)] if isinstance(excluded, list) else []
+    gpu_set = data.get("gpu_preferences_set")
+    data["gpu_preferences_set"] = [p for p in gpu_set if isinstance(p, str)] if isinstance(gpu_set, list) else []
+    if not isinstance(data.get("high_performance_gpu"), bool):
+        data["high_performance_gpu"] = True
     if not isinstance(data.get("theme"), str) or data["theme"] not in _allowed_themes:
         data["theme"] = "black"
     if not isinstance(data.get("language"), str) or data["language"] not in _allowed_languages:
@@ -304,6 +311,7 @@ def load_gui_settings() -> dict:
         "always_gamemoderun",
         "autostart",
         "tray_hint_shown",
+        "smart_app_control_notice_shown",
         "discord_rpc_enabled",
         "discord_show_mods",
         "discord_show_playtime",

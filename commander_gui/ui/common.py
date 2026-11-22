@@ -50,7 +50,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .. import gui_settings
+from .. import gui_settings, winpower, wintaskbar
 from ..config import child_environment, is_secondary_instance, spawn_reaped
 from ..desktop_integration import DESKTOP_ID
 from ..i18n import tr
@@ -169,8 +169,11 @@ def warn_wine_unsafe_folder(parent, folder: str) -> None:
 
 
 def windows_drive_ok(parent, *paths: str) -> bool:
-    """True unless one of *paths* is on a Windows drive and the user picks
-    another folder instead of using it anyway."""
+    """True unless one of *paths* is on a drive that breaks GAMMA (a Windows
+    drive on Linux, a OneDrive folder on Windows) and the user picks another
+    folder instead of using it anyway."""
+    if os.name == "nt":
+        return _onedrive_ok(parent, *paths)
     from ..game_installs import windows_drive_folder
 
     folder = windows_drive_folder(*paths)
@@ -180,6 +183,24 @@ def windows_drive_ok(parent, *paths: str) -> bool:
         parent,
         tr("This folder is on a Windows drive"),
         tr("GAMMA can run slow, fail to save or not start from a Windows drive (NTFS). Pick a folder on your Linux drive instead."),
+        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        QMessageBox.StandardButton.No,
+        info=folder,
+        labels={QMessageBox.StandardButton.Yes: tr("Use it anyway"), QMessageBox.StandardButton.No: tr("Pick another folder")},
+    )
+    return answer == QMessageBox.StandardButton.Yes
+
+
+def _onedrive_ok(parent, *paths: str) -> bool:
+    from ..winsecurity import onedrive_folder
+
+    folder = onedrive_folder(*paths)
+    if folder is None:
+        return True
+    answer = QMessageBox.warning(
+        parent,
+        tr("This folder is in OneDrive"),
+        tr("OneDrive uploads this folder and can leave GAMMA's files online only, so installs break and the game fails to start. Pick a folder outside OneDrive, such as C:\\GAMMA."),
         QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         QMessageBox.StandardButton.No,
         info=folder,
@@ -1057,6 +1078,7 @@ class CommandRunner(QObject):
         self._cancel_requested = False
         # Output lines are handed to the UI in ~100 ms batches; see _on_line.
         self._pending_lines: list[str] = []
+        self._keeping_awake = False
         self._flush_timer = QTimer(self)
         self._flush_timer.setSingleShot(True)
         self._flush_timer.setInterval(100)
@@ -1091,6 +1113,10 @@ class CommandRunner(QObject):
         self._thread = thread
         self._worker = worker
         _ACTIVE_RUNNERS.add(self)
+        # Windows: no sleeping halfway through an hours-long download.
+        if not self._keeping_awake:
+            self._keeping_awake = True
+            winpower.hold()
         thread.start()
 
     def cancel(self) -> None:
@@ -1173,6 +1199,9 @@ class CommandRunner(QObject):
         if thread is not None and self._thread is not thread:
             return
         _ACTIVE_RUNNERS.discard(self)
+        if self._keeping_awake:
+            self._keeping_awake = False
+            winpower.release()
         self._worker = None
         self._thread = None
 
@@ -2684,6 +2713,7 @@ class ProgressArea(QWidget):
         self._paused = False
         if self.table is not None:
             self.table.reset()
+        wintaskbar.end(self, None)
         self.status_label.setText(self._status_idle)
         if not self._bar_follows_log and self._show_status:
             self.status_label.show()
@@ -2855,6 +2885,7 @@ class ProgressArea(QWidget):
         self.bar.setValue(0)
         # The console stays collapsed until the user opens it.
         self.bar.setFormat(tr("Starting"))
+        wintaskbar.begin(self)
 
     def on_finished(self, rc: int, output: str) -> None:
         self.cancel_button.hide()
@@ -2862,7 +2893,9 @@ class ProgressArea(QWidget):
         self._paused = False
         from ..settings import cli_ok
 
-        if cli_ok(rc, output, ""):
+        ok = cli_ok(rc, output, "")
+        wintaskbar.end(self, ok)
+        if ok:
             self.bar.setRange(0, 1)
             self.bar.setValue(1)
             self.bar.setFormat(tr("Finished"))
@@ -2887,6 +2920,7 @@ class ProgressArea(QWidget):
         self._paused = False
         if self.table is not None:
             self.table.mark_interrupted()
+        wintaskbar.end(self, None)
         self.bar.setRange(0, 1)
         self.bar.setValue(0)
         self.bar.setFormat(tr("Cancelled"))

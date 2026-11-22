@@ -1635,7 +1635,12 @@ def launch_detached(
                 threading.Thread(target=process.wait, daemon=True).start()
             return process
         except OSError as exc:
-            raise LaunchError(f"Failed to start {command[0]!r}: {exc}") from exc
+            from .winsecurity import start_blocked_hint
+
+            message = f"Failed to start {command[0]!r}: {exc}"
+            if hint := start_blocked_hint(exc):
+                message += "\n\n" + hint
+            raise LaunchError(message) from exc
 
 
 def prefix_debugger_pids(runner_env: dict[str, str] | None) -> list[int]:
