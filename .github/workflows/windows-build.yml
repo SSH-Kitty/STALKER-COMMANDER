@@ -115,6 +115,13 @@ jobs:
           $lines = foreach ($f in $files) { "{0}  {1}" -f (Get-FileHash $f -Algorithm SHA256).Hash.ToLower(), (Split-Path $f -Leaf) }
           $lines | Set-Content -Encoding ascii SHA256SUMS.txt
           Get-Content SHA256SUMS.txt
+          # COMMANDER's self-update refuses a Setup without this file next to
+          # it on the release (commander_gui/self_update.py): attach both.
+          foreach ($setup in Get-ChildItem dist/STALKER-COMMANDER-Setup-*.exe) {
+            "{0}  {1}" -f (Get-FileHash $setup.FullName -Algorithm SHA512).Hash.ToLower(), $setup.Name |
+              Set-Content -Encoding ascii -NoNewline "$($setup.FullName).sha512sum"
+            Get-Content "$($setup.FullName).sha512sum"
+          }
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: COMMANDER-windows-x64
@@ -122,7 +129,9 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: COMMANDER-windows-installer
-          path: dist/STALKER-COMMANDER-Setup-*.exe
+          path: |
+            dist/STALKER-COMMANDER-Setup-*.exe
+            dist/STALKER-COMMANDER-Setup-*.exe.sha512sum
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: SHA256SUMS

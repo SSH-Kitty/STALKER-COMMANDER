@@ -119,6 +119,12 @@ Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExe}"; Tasks: desktopico
 
 [Run]
 Filename: "{app}\{#AppExe}"; Description: "Launch {#AppName}"; Flags: nowait postinstall skipifsilent
+; COMMANDER's self-update (commander_gui/self_update.py, setup_command) runs
+; Setup with /SILENT /RELAUNCH=1 after quitting, so the box above is skipped:
+; this reopens it, as the user who started the update (not elevated, even when
+; an all-users install made Setup ask for administrator rights).
+; Keep this entry: the Setup being downloaded is the one that runs it.
+Filename: "{app}\{#AppExe}"; Flags: nowait runasoriginaluser skipifnotsilent; Check: RelaunchAfterUpdate
 
 [Registry]
 ; "Start COMMANDER when I log in" (commander_gui/autostart.py) writes this
@@ -244,6 +250,13 @@ begin
   if Failed <> '' then
     SuppressibleMsgBox(Failed + #13#10#13#10 + 'COMMANDER is installed. You can install the runtimes later from ' +
       'COMMANDER''s Install page (Dependencies).', mbInformation, MB_OK, IDOK);
+end;
+
+// ---------------------------------------------------------- self-update
+// True when COMMANDER started this Setup to update itself (see [Run]).
+function RelaunchAfterUpdate: Boolean;
+begin
+  Result := ExpandConstant('{param:relaunch|0}') = '1';
 end;
 
 // ---------------------------------------------------------------- events

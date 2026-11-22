@@ -54,7 +54,9 @@ from .. import __version__, __version_label__, gui_settings
 from ..diagnostics import debug_summary
 from ..i18n import LANGUAGE_INFO, active_language, set_active_language
 from ..self_update import (
+    check_commander_update_for_this_build,
     commander_appimage_path,
+    commander_windows_install_dir,
     download_and_install_commander_update,
     relaunch_commander,
     switch_commander_build,
@@ -71,7 +73,6 @@ from ..themes import (
     set_active_theme,
 )
 from ..updates import (
-    check_commander_update,
     check_updates,
     effective_update_channel,
 )
@@ -151,6 +152,11 @@ _TAB_INDEX: dict[str, int] = {key: i for i, (key, _title) in enumerate(NAV_ITEMS
 # Indices after which a thin vertical separator is drawn in the tab bar.
 _SEPARATOR_AFTER = {1, 4, 7} if os.name == "nt" else {2, 5, 8}
 _RELEASES_URL = "https://github.com/SSH-Kitty/STALKER-GAMMA-COMMANDER/releases"
+
+
+def _can_self_update() -> bool:
+    """The AppImage, or the Windows build Setup installed (see self_update)."""
+    return commander_appimage_path() is not None or commander_windows_install_dir() is not None
 
 
 #: Text grows to this fraction of its normal size while a tab is hovered.
@@ -1078,8 +1084,9 @@ class MainWindow(QMainWindow):
             gui_settings.load_gui_settings().get("update_channel"), __version__
         )
         self._commander_checked_at = time.monotonic()
+        # The installed Windows build skips a release until its Setup is up.
         task = BackgroundTask(
-            check_commander_update, __version__, channel=channel, parent=self
+            check_commander_update_for_this_build, __version__, channel=channel, parent=self
         )
         task.result.connect(self._on_commander_update_status_checked)
         task.error.connect(self._on_commander_update_check_failed)
@@ -1137,7 +1144,7 @@ class MainWindow(QMainWindow):
             button.setStyleSheet(f"color: {WARN.name()}; border: none;")
             button.setCursor(Qt.CursorShape.PointingHandCursor)
             button.setEnabled(True)
-            if commander_appimage_path() is not None:
+            if _can_self_update():
                 button.setToolTip(tr("Download and install {tag} now", tag=tag))
             else:
                 button.setToolTip(tr("Open the Releases page for {tag}", tag=tag))
@@ -1158,12 +1165,13 @@ class MainWindow(QMainWindow):
 
     def _start_commander_update(self, tag: str) -> None:
         """The status bar's and the banner's Update button."""
-        if commander_appimage_path() is not None:
-            # Running as an AppImage - offer to download and swap it in
-            # place instead of just sending the user to the browser. A
-            # source checkout or the AUR package (pacman-tracked, see
-            # packaging/aur/PKGBUILD) never sets APPIMAGE, so they fall
-            # through to the plain "open the releases page" behavior.
+        if _can_self_update():
+            # Running as an AppImage, or the Windows build Setup installed -
+            # offer to download and install the update instead of just
+            # sending the user to the browser. A source checkout, the AUR
+            # package (pacman-tracked, see packaging/aur/PKGBUILD) and the
+            # portable Windows zip fall through to the plain "open the
+            # releases page" behavior.
             self._offer_commander_self_update(tag)
         else:
             open_url(_RELEASES_URL)
@@ -1243,7 +1251,8 @@ class MainWindow(QMainWindow):
 
     def _offer_commander_self_update(self, tag: str) -> None:
         """Show the patch notes (the Welcome screen's layout), then download
-        and install over the running AppImage."""
+        and install over the running AppImage (on Windows: download Setup,
+        which installs on restart)."""
         from .welcome_overlay import show_welcome
 
         show_welcome(

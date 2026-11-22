@@ -48,7 +48,7 @@ from ..launcher import (
     find_extra_protons,
     launch_detached,
 )
-from ..self_update import commander_appimage_path
+from ..self_update import commander_appimage_path, commander_windows_install_dir
 from ..steam_shortcuts import (
     ShortcutsFileError,
     add_to_steam,
@@ -1399,14 +1399,17 @@ class SettingsPage(QWidget):
         kind = tr("Unstable") if unstable else tr("Stable")
         self._build_label.setText(kind)
         tint(self._build_label, WARN if unstable else OK_GREEN)
-        if os.name == "nt":
-            # Switching builds is the AppImage's (and its note talks about
-            # git and the AUR); Windows builds come from the Releases page.
+        windows_installed = os.name == "nt" and commander_windows_install_dir() is not None
+        if os.name == "nt" and not windows_installed:
+            # The portable zip or a source checkout: nothing to switch with
+            # (and the note below talks about git and the AUR); those
+            # Windows builds come from the Releases page.
             box = getattr(self, "_build_box", None)
             if box is not None:
                 box.setVisible(False)
             return
-        appimage = commander_appimage_path() is not None
+        # The installed Windows build switches through Setup, as it updates.
+        appimage = windows_installed or commander_appimage_path() is not None
         if unstable:
             self._switch_build_button.setText(tr("Go back to the stable build"))
             self._switch_build_button.setEnabled(appimage)

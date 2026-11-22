@@ -199,6 +199,10 @@ def release_instance_lock() -> None:
     """
     global _INSTANCE_LOCK
 
+    # Windows: also the mutex Setup's AppMutex waits on. The self-update
+    # starts Setup just before this process quits; with the mutex still held
+    # it would stop at "COMMANDER is running, close it" instead of updating.
+    _release_running_mutex()
     lock = _INSTANCE_LOCK
     _INSTANCE_LOCK = None
     if lock is None:
@@ -443,6 +447,21 @@ def _announce_running() -> None:
         _RUNNING_MUTEX = ctypes.windll.kernel32.CreateMutexW(None, False, "STALKER-COMMANDER-running")
     except (AttributeError, OSError):
         _RUNNING_MUTEX = None
+
+
+def _release_running_mutex() -> None:
+    """Close the handle :func:`_announce_running` opened (Windows; else a no-op)."""
+    global _RUNNING_MUTEX
+
+    handle, _RUNNING_MUTEX = _RUNNING_MUTEX, None
+    if not handle:
+        return
+    try:
+        import ctypes
+
+        ctypes.windll.kernel32.CloseHandle(handle)
+    except (AttributeError, OSError):
+        pass
 
 
 def _stable_working_directory() -> None:
