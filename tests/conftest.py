@@ -19,8 +19,10 @@ simply becomes the "real" function those inner ``patch()`` calls save
 and restore around, so it changes nothing for them.
 """
 
+import atexit
 import logging
 import os
+import shutil
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -69,6 +71,11 @@ _fake_bin = Path(tempfile.mkdtemp(prefix="commander-tests-bin-"))
 (_fake_bin / "notify-send").write_text("#!/bin/sh\nexit 0\n")
 (_fake_bin / "notify-send").chmod(0o755)
 os.environ["PATH"] = f"{_fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"
+
+# Both folders are per test process (every xdist worker makes its own): gone
+# when it exits, or each run left two more in the temp folder for good.
+for _folder in (_SESSION_HOME, _fake_bin):
+    atexit.register(shutil.rmtree, _folder, ignore_errors=True)
 
 # commander.log attaches its file once, at first use - often before any
 # fixture has pointed XDG_CONFIG_HOME away - so tests that launch, fail a

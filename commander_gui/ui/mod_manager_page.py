@@ -7,7 +7,6 @@ category) are done directly on the file with automatic backups.
 
 from __future__ import annotations
 
-import os
 import shutil
 import time
 import uuid
@@ -977,8 +976,6 @@ class ModManagerPage(QWidget):
             tr("Browse ModDB and install mods. Needs the ModDB plugin.")
         )
         self.moddb_button.clicked.connect(lambda: moddb_controller(self.window).open())
-        # No Windows build of the ModDB plugin is published yet.
-        self.moddb_button.setVisible(os.name != "nt")
         toolbar.addWidget(reflow.group(self.install_button, self.moddb_button))
         self.new_category_button = QPushButton(tr("New Category"))
         self.new_category_button.setToolTip(

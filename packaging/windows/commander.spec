@@ -117,7 +117,7 @@ exe = EXE(  # noqa: F821
     a.scripts,
     # UTF-8 mode: open() and pipes default to UTF-8 like on Linux, not the
     # ANSI code page (which cannot write names such as "Δ").
-    [("X utf8_mode=1", None, "OPTION")],
+    [("X utf8", None, "OPTION")],
     exclude_binaries=True,
     name="COMMANDER",
     icon=str(ROOT / "cli" / "stalker-gamma.png"),

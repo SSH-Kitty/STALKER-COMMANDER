@@ -600,6 +600,9 @@ def main(argv: list[str] | None = None) -> int:
     # 30 s for those kept the process alive with no window, and a relaunch
     # meanwhile was told COMMANDER was already open.
     def _shutdown() -> None:
+        from .ui import moddb_plugin
+
+        moddb_plugin.shutdown()  # first: the os._exit() below would orphan it
         begin_shutdown()
         if _WAKE_SERVER is not None:
             _WAKE_SERVER.close()  # a relaunch now starts fresh

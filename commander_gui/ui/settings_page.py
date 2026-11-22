@@ -612,8 +612,7 @@ class SettingsPage(QWidget):
             self.tab_group.addButton(button, index)
             halves[index >= 4].addWidget(button)
             # Graphics is MangoHud/vkBasalt (Vulkan layers on Linux).
-            # Plugins: no Windows build of the ModDB plugin is published yet.
-            if os.name == "nt" and key in ("graphics", "plugins"):
+            if os.name == "nt" and key == "graphics":
                 button.hide()  # hide(), never setVisible(True): unparented, that flashes a window
             page = getattr(self, f"_{key}_tab")()
             body.addWidget(page)

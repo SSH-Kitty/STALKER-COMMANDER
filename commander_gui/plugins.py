@@ -135,12 +135,14 @@ def installed() -> dict | None:
 def needs_update(info: dict, qt_version: str | None = None) -> bool:
     """True when *info*'s protocol differs, or its Qt is older than *qt_version*.
 
-    Only the AppImage passes its Qt by default: the plugin is built from the
-    same pinned Qt, so a newer one there means a newer plugin exists. A
-    source or AUR install runs whatever Qt the system has, which no plugin
-    release may match - comparing there would ask for the same update forever.
+    Only the AppImage and the Windows build pass their Qt by default: the
+    plugin is built from the same pinned Qt, so a newer one there means a
+    newer plugin exists. A source or AUR install runs whatever Qt the system
+    has, which no plugin release may match - comparing there would ask for
+    the same update forever.
     """
-    if qt_version is None and os.environ.get("APPIMAGE"):
+    pinned = os.environ.get("APPIMAGE") or (os.name == "nt" and getattr(sys, "frozen", False))
+    if qt_version is None and pinned:
         import PySide6
 
         qt_version = PySide6.__version__

@@ -99,6 +99,20 @@ class PluginTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"APPIMAGE": ""}):
             self.assertFalse(plugins.needs_update({**ok, "qt": "6.0.0"}))
 
+    @unittest.skipUnless(os.name == "nt", "the Windows build")
+    def test_the_windows_build_asks_for_a_plugin_built_with_its_qt(self) -> None:
+        """COMMANDER.exe and the plugin come from the same pinned Qt (CI), so
+        an older plugin Qt means a newer plugin exists - as in the AppImage.
+        A source checkout runs any Qt, so it never compares."""
+        import PySide6
+
+        old = {"protocol": plugins.PROTOCOL, "qt": "6.0.0"}
+        with mock.patch.dict(os.environ, {"APPIMAGE": ""}):
+            self.assertFalse(plugins.needs_update(old))
+            with mock.patch.object(plugins.sys, "frozen", True, create=True):
+                self.assertTrue(plugins.needs_update(old))
+                self.assertFalse(plugins.needs_update({**old, "qt": PySide6.__version__}))
+
     def test_parse_event_only_trusts_the_downloads_folder(self) -> None:
         plugins.downloads_dir().mkdir(parents=True)
         inside = plugins.downloads_dir() / "mod.7z"
@@ -160,6 +174,78 @@ class AdBlockTests(unittest.TestCase):
         self.assertFalse(is_ad_host("sjc3.dl.dbolical.com"))
         self.assertFalse(is_ad_host("challenges.cloudflare.com"))
         self.assertFalse(is_ad_host("notdoubleclick.net"))
+
+
+class BrowserShutdownTests(unittest.TestCase):
+    """The browser closes with COMMANDER: left running, a download it then
+    finished reached nobody, and the next COMMANDER let a second one start on
+    the same cookie and cache folder."""
+
+    def setUp(self) -> None:
+        from PySide6.QtWidgets import QApplication
+
+        from commander_gui.ui import moddb_plugin
+
+        QApplication.instance() or QApplication([])
+        self.module = moddb_plugin
+        self.plugin = moddb_plugin.ModDBPlugin(window=None)
+        patcher = mock.patch.object(moddb_plugin, "_CONTROLLER", self.plugin)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _process(self, finishes: bool) -> mock.Mock:
+        process = mock.Mock()
+        process.waitForFinished.return_value = finishes
+        self.plugin._process = process
+        return process
+
+    def test_nothing_open_is_nothing_to_do(self) -> None:
+        self.module.shutdown()
+        self.assertFalse(self.plugin.running)
+
+    def test_the_browser_is_asked_to_close_and_no_crash_box_follows(self) -> None:
+        process = self._process(finishes=True)
+        self.module.shutdown()
+        process.terminate.assert_called_once()
+        process.kill.assert_not_called()
+        # Its own exit must not raise "closed unexpectedly" during the quit.
+        process.finished.disconnect.assert_called_once_with(self.plugin._finished)
+        process.errorOccurred.disconnect.assert_called_once_with(self.plugin._failed)
+        self.assertFalse(self.plugin.running)
+
+    def test_a_browser_that_ignores_the_close_is_killed(self) -> None:
+        process = self._process(finishes=False)
+        self.module.shutdown()
+        process.terminate.assert_called_once()
+        process.kill.assert_called_once()
+        self.assertFalse(self.plugin.running)
+
+    def test_the_quit_handler_closes_it_before_anything_can_exit(self) -> None:
+        """main's aboutToQuit handler may os._exit(): the browser goes first."""
+        source = (Path(__file__).resolve().parents[1] / "commander_gui" / "main.py").read_text(encoding="utf-8")
+        handler = source[source.index("def _shutdown() -> None:"):]
+        self.assertLess(handler.index("moddb_plugin.shutdown()"), handler.index("os._exit(0)"))
+
+
+class WindowsSpecTests(unittest.TestCase):
+    ROOT = Path(__file__).resolve().parents[1] / "packaging" / "windows"
+
+    def test_both_exes_turn_utf8_mode_on(self) -> None:
+        """PyInstaller's bootloader takes Python's own -X key, "utf8": the
+        "utf8_mode=1" both specs had was silently ignored, so COMMANDER.exe
+        ran on the ANSI code page and the plugin read its stdin with it."""
+        for spec in ("commander.spec", "moddb-browser.spec"):
+            with self.subTest(spec=spec):
+                text = (self.ROOT / spec).read_text(encoding="utf-8")
+                self.assertIn('("X utf8", None, "OPTION")', text)
+                self.assertNotIn("utf8_mode", text)
+
+    def test_the_plugin_launches_its_own_exe(self) -> None:
+        """plugin.json's exec, the spec's exe name and the pack script agree."""
+        spec = (self.ROOT / "moddb-browser.spec").read_text(encoding="utf-8")
+        pack = (self.ROOT / "pack_moddb_plugin.py").read_text(encoding="utf-8")
+        self.assertIn('name="moddb-browser"', spec)
+        self.assertIn('EXE = "moddb-browser.exe"', pack)
 
 
 if __name__ == "__main__":
