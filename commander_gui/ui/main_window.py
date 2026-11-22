@@ -88,6 +88,7 @@ from .common import (
     activate_profile,
     count_active_mods,
     game_running,
+    gamma_installed,
     human_size,
     instance_window_title,
     notice,
@@ -438,6 +439,10 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(0, self._maybe_show_welcome)
 
         start_page = gui_settings.load_gui_settings().get("start_page")
+        if os.name == "nt" and not self._gamma_is_installed():
+            # Nothing to play or manage yet: a new player starts where the
+            # install is. Once GAMMA is in, the saved start page applies.
+            start_page = "install"
         if start_page and start_page in _TAB_INDEX:
             self.tabs.setCurrentIndex(_TAB_INDEX[start_page])
         # tabs.setCurrentIndex() above is a no-op (fires no currentChanged,
@@ -445,6 +450,11 @@ class MainWindow(QMainWindow):
         # default current index (0, Dashboard) - called explicitly here so
         # the initial page is always built, lazy pages notwithstanding.
         self._on_nav(self.tabs.currentIndex())
+
+    def _gamma_is_installed(self) -> bool:
+        """True when the active profile's GAMMA folder holds an install."""
+        profile = self.settings.active_profile
+        return profile is not None and gamma_installed(profile.gamma, profile.mo2_profile)
 
     def _maybe_show_welcome(self) -> None:
         from .welcome_overlay import maybe_show_welcome

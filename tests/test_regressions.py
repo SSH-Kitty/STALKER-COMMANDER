@@ -721,7 +721,10 @@ class RegressionTests(unittest.TestCase):
             # Step 1 previews a newly picked Installation directory.
             self.assertEqual(page.folder_tiles["anomaly"].state, "warn")
             page.root_card_edit.setText(str(Path(tmp) / "new"))
-            (Path(tmp) / "new" / "anomaly").mkdir(parents=True)
+            # On Windows the folders go in a GAMMA folder inside the pick.
+            from commander_gui.ui.install_page import install_base
+
+            (install_base(Path(tmp) / "new") / "anomaly").mkdir(parents=True)
             page._refresh_folder_tiles(profile)
             self.assertEqual(page.folder_tiles["anomaly"].state, "ok")
             self.assertEqual(page.folder_tiles["gamma"].value.text(), "Not created")
@@ -14353,13 +14356,41 @@ class CreateInstallFoldersConfirmationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             profile = CliProfile(anomaly="old-a", gamma="old-g", cache="old-c")
             page = self._page(tmp, profile)
+            from commander_gui.ui.install_page import install_base
+
             with patch("commander_gui.ui.install_page.QMessageBox.information") as info:
                 page._create_install_folders()
+            base = install_base(tmp)
             for name in ("anomaly", "gamma", "cache"):
-                self.assertTrue((Path(tmp) / name).is_dir())
+                self.assertTrue((base / name).is_dir())
             info.assert_called_once()
             self.assertIn("steps 3 and 4", info.call_args.args[2])
-            self.assertEqual(profile.gamma, str(Path(tmp) / "gamma"))
+            self.assertEqual(profile.gamma, str(base / "gamma"))
+
+    @unittest.skipIf(os.name != "nt", "the GAMMA folder is a Windows layout")
+    def test_windows_folders_go_in_a_gamma_folder_inside_the_pick(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            profile = CliProfile(anomaly="old-a", gamma="old-g", cache="old-c")
+            page = self._page(tmp, profile)
+            with patch("commander_gui.ui.install_page.QMessageBox.information"):
+                page._create_install_folders()
+            self.assertEqual(profile.gamma, str(Path(tmp) / "GAMMA" / "gamma"))
+            self.assertFalse((Path(tmp) / "anomaly").exists())
+
+    @unittest.skipIf(os.name != "nt", "the GAMMA folder is a Windows layout")
+    def test_a_folder_already_named_gamma_is_not_nested_again(self):
+        from commander_gui.ui.install_page import install_base
+
+        self.assertEqual(install_base("C:\\GAMMA"), Path("C:\\GAMMA"))
+        self.assertEqual(install_base("D:\\Games\\gamma"), Path("D:\\Games\\gamma"))
+        self.assertEqual(install_base("D:\\"), Path("D:\\GAMMA"))
+
+    def test_the_folder_an_install_already_uses_is_kept(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "Games"
+            profile = CliProfile(anomaly=str(root / "anomaly"), gamma=str(root / "gamma"), cache=str(root / "cache"))
+            page = self._page(str(root), profile)
+            self.assertEqual(page._install_base(str(root)), root)
 
     def test_no_confirmation_when_the_folders_could_not_be_saved(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -14371,6 +14402,56 @@ class CreateInstallFoldersConfirmationTests(unittest.TestCase):
                 page._create_install_folders()
             info.assert_not_called()
             warning.assert_called_once()
+
+
+class OfflineCacheDownloadLinkTests(unittest.TestCase):
+    def _lookup(self, body: bytes | None):
+        from unittest.mock import MagicMock
+
+        from commander_gui.ui import install_page as ip
+
+        if body is None:
+            opener = Mock(side_effect=OSError("offline"))
+        else:
+            response = MagicMock()
+            response.__enter__.return_value = response
+            response.headers = {}
+            response.read.side_effect = [body, b""]
+            opener = Mock(return_value=response)
+        with patch("commander_gui.network.urlopen_with_retry", opener):
+            return ip.offline_cache_download_url()
+
+    def test_the_guide_link_is_read_from_the_page(self):
+        body = b"## Get a cache archive\n\n[https://gofile.io/d/Ab12Cd](https://gofile.io/d/Ab12Cd) ~45GB\n"
+        self.assertEqual(self._lookup(body), "https://gofile.io/d/Ab12Cd")
+
+    def test_the_guide_opens_when_the_link_cannot_be_found(self):
+        from commander_gui.ui.install_page import OFFLINE_GUIDE_URL
+
+        self.assertEqual(self._lookup(None), OFFLINE_GUIDE_URL)
+        self.assertEqual(self._lookup(b"no link here"), OFFLINE_GUIDE_URL)
+
+
+class StartsOnInstallUntilGammaIsInstalledTests(unittest.TestCase):
+    def _window(self, profile):
+        from commander_gui.ui.main_window import MainWindow
+
+        window = MainWindow.__new__(MainWindow)
+        window.settings = Mock(active_profile=profile)
+        return window
+
+    def test_no_profile_or_no_install_means_not_installed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertFalse(self._window(None)._gamma_is_installed())
+            profile = CliProfile(gamma=str(Path(tmp) / "gamma"))
+            self.assertFalse(self._window(profile)._gamma_is_installed())
+
+    def test_an_installed_gamma_is_seen(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            profile = CliProfile(gamma=str(Path(tmp) / "gamma"))
+            with patch("commander_gui.ui.main_window.gamma_installed", return_value=True) as check:
+                self.assertTrue(self._window(profile)._gamma_is_installed())
+            check.assert_called_once_with(profile.gamma, profile.mo2_profile)
 
 
 class UpdateChannelTests(unittest.TestCase):

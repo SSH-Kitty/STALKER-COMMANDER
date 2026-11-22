@@ -145,6 +145,7 @@ from .common import (
     normalize_path,
     notify_desktop,
     open_in_file_manager,
+    open_url,
     paused_dependency_status,
     save_profile_dirs,
     section_label,
@@ -426,6 +427,46 @@ def offline_install_problem(archive: str, cache: str = "") -> str | None:
             return tr("Your cache is already unpacked. Untick Offline: a normal install reuses it and downloads only what's missing.")
         return tr("Pick the offline cache archive. It holds the cache folder and both list files.")
     return None
+
+
+#: The guide page's Markdown source, read for its current download link.
+OFFLINE_GUIDE_SOURCE_URL = "https://raw.githubusercontent.com/wiki/FaithBeam/stalker-gamma-cli/Offline-Install.md"
+
+_GOFILE_LINK = re.compile(r"https://gofile\.io/d/[A-Za-z0-9]+")
+
+
+def offline_cache_download_url() -> str:
+    """The offline cache archive's download link from the CLI's guide, or
+    the guide itself when it can't be read or names no link. Read each time,
+    not pinned: the CLI author replaces the upload with newer snapshots."""
+    from ..network import read_response_bytes, urlopen_with_retry
+
+    try:
+        with urlopen_with_retry(OFFLINE_GUIDE_SOURCE_URL, timeout=10) as response:
+            text = read_response_bytes(response, 512 * 1024).decode("utf-8", "replace")
+    except (OSError, ValueError):
+        return OFFLINE_GUIDE_URL
+    match = _GOFILE_LINK.search(text)
+    return match.group(0) if match else OFFLINE_GUIDE_URL
+
+
+#: Where a fresh Windows install goes unless the player picks elsewhere. The
+#: CLI's own default is relative to the folder it runs from, so a player
+#: starting COMMANDER from, say, C:\Stalker got C:\Stalker\gamma\... A short
+#: path also keeps MO2's deep mod paths clear of Windows' 260-character limit.
+DEFAULT_WINDOWS_ROOT = "C:\\GAMMA"
+
+
+def install_base(root: str | Path) -> Path:
+    """The folder anomaly, gamma and cache go in for a picked *root*.
+
+    On Windows that is a GAMMA folder inside it, so picking a drive or a
+    Games folder doesn't spill three folders into it. A root already named
+    GAMMA is used as it is, rather than nested again."""
+    base = Path(root).expanduser()
+    if os.name != "nt" or base.name.lower() == "gamma":
+        return base
+    return base / "GAMMA"
 
 
 def _verify_phase_value(start: int, end: int, fraction: float) -> int:
@@ -1563,9 +1604,11 @@ class InstallPage(QWidget):
         setup_layout.setSpacing(14)
         auto_layout.addWidget(self._auto_setup)
         setup_layout.addLayout(auto_root_row)
-        auto_folder_hint = info_label(tr(
-            "Pick an empty folder on a drive with about 150 GB free. COMMANDER makes anomaly, gamma and cache folders inside it."
-        ))
+        auto_folder_hint = info_label(
+            tr("Pick a drive or folder with about 150 GB free. COMMANDER makes a GAMMA folder in it, with anomaly, gamma and cache inside.")
+            if os.name == "nt"
+            else tr("Pick an empty folder on a drive with about 150 GB free. COMMANDER makes anomaly, gamma and cache folders inside it.")
+        )
         # Offline: the same install from an extracted cache archive. Above
         # the hints it swaps, so it stays put when clicked.
         self.auto_offline = QCheckBox(tr("Offline install (cache only)"))
@@ -1730,9 +1773,11 @@ class InstallPage(QWidget):
             )
         )
         body.addLayout(self.root_card_row)
-        body.addWidget(info_label(tr(
-            "Pick an empty folder on a drive with about 150 GB free. Create folders makes anomaly, gamma and cache folders inside it and saves them to your profile."
-        )))
+        body.addWidget(info_label(
+            tr("Pick a drive or folder with about 150 GB free. Create folders makes a GAMMA folder in it, with anomaly, gamma and cache inside, and saves them to your profile.")
+            if os.name == "nt"
+            else tr("Pick an empty folder on a drive with about 150 GB free. Create folders makes anomaly, gamma and cache folders inside it and saves them to your profile.")
+        ))
         self.storage_group = QGroupBox(tr("Storage usage"))
         storage_layout = QVBoxLayout(self.storage_group)
         storage_layout.setContentsMargins(0, 0, 0, 0)  # borderless, like the option groups
@@ -2724,7 +2769,7 @@ class InstallPage(QWidget):
                 return
         offline = self.auto_offline.isChecked()
         if offline:
-            problem = offline_install_problem(offline_archive(), str(Path(root).expanduser() / "cache"))
+            problem = offline_install_problem(offline_archive(), str(self._install_base(root) / "cache"))
             if problem:
                 QMessageBox.warning(self, tr("Offline install"), problem)
                 return
@@ -2743,7 +2788,7 @@ class InstallPage(QWidget):
         answer = QMessageBox.question(
             self,
             tr("Install GAMMA automatically?"),
-            tr("COMMANDER installs the Windows runtimes, then Anomaly, then GAMMA, into:\n{path}\n\nThis can take a few hours. You can keep using your computer meanwhile.", path=root),
+            tr("COMMANDER installs the Windows runtimes, then Anomaly, then GAMMA, into:\n{path}\n\nThis can take a few hours. You can keep using your computer meanwhile.", path=str(self._install_base(root))),
             (QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No),
             note=note,
             labels={QMessageBox.StandardButton.Yes: tr("Install now"), QMessageBox.StandardButton.No: tr("Cancel")},
@@ -2873,20 +2918,30 @@ class InstallPage(QWidget):
             parents = {str(Path(p).expanduser().parent) for p in paths.values() if p}
             if len(parents) == 1 and all(paths.values()):
                 parent = parents.pop()
+            suggested = parent
+            if (
+                os.name == "nt"
+                and not Path(profile.gamma).expanduser().is_absolute()
+                and not gamma_installed(profile.gamma, profile.mo2_profile)
+            ):
+                # The CLI's relative default: suggest the fixed root instead
+                # of a folder that depends on where COMMANDER was started.
+                suggested = DEFAULT_WINDOWS_ROOT
             folders = (profile.anomaly, profile.gamma, profile.cache)
             if getattr(self, "_seen_folders", None) != folders:
                 # The folders changed elsewhere (Switch install, Settings >
                 # Game): a root picked for the old ones would quietly point
                 # the profile back there on Create folders or Automatic.
                 self._seen_folders = folders
-                self.root_card_edit.setText(parent or "")
-                self.auto_root_edit.setText(parent or "")
-            elif parent and not self.root_card_edit.text():
-                self.root_card_edit.setText(parent)
+                self.root_card_edit.setText(suggested or "")
+                self.auto_root_edit.setText(suggested or "")
+            elif suggested and not self.root_card_edit.text():
+                self.root_card_edit.setText(suggested)
         root = self.root_card_edit.text().strip()
-        preview = bool(root) and str(Path(root).expanduser()) != parent
+        base = self._install_base(root) if root else None
+        preview = base is not None and str(base) != parent
         if preview:
-            paths = {key: str(Path(root).expanduser() / key) for key in ("anomaly", "gamma", "cache")}
+            paths = {key: str(base / key) for key in ("anomaly", "gamma", "cache")}
         for key in ("anomaly", "gamma", "cache"):
             path = paths.get(key, "")
             if not path:
@@ -3179,6 +3234,18 @@ class InstallPage(QWidget):
             if self._step == 1:
                 self._refresh_winetricks_status()
 
+    def _install_base(self, root: str) -> Path:
+        """Where Create folders and Automatic put anomaly, gamma and cache
+        for *root*: the folder the profile already uses as it is (an install
+        in D:\\Games\\anomaly etc. must not move), else ``install_base``."""
+        base = Path(root).expanduser()
+        profile = self.window.settings.active_profile
+        if profile is not None:
+            parents = {str(Path(p).expanduser().parent) for p in (profile.anomaly, profile.gamma, profile.cache)}
+            if parents == {str(base)}:
+                return base
+        return install_base(base)
+
     def _create_install_folders(self, quiet: bool = False) -> bool:
         """Create the anomaly/gamma/cache folders under the chosen install root.
 
@@ -3197,7 +3264,7 @@ class InstallPage(QWidget):
             if not root:
                 return False
             self.root_card_edit.setText(root)
-        base = Path(root).expanduser()
+        base = self._install_base(root)
         if os.name != "nt" and (bad := wine_unsafe_folder(str(base))):  # a Wine-only problem
             warn_wine_unsafe_folder(self, bad)
             return False
@@ -3276,13 +3343,39 @@ class InstallPage(QWidget):
         layout.addWidget(edit, 1, 1)
         guide = QLabel(
             f'<a href="{OFFLINE_GUIDE_URL}" style="color: {ACCENT.name()};">'
-            + html.escape(tr("Where to download the offline cache"))
+            + html.escape(tr("Offline install guide"))
             + " ↗</a>"
         )
         guide.setOpenExternalLinks(True)
-        layout.addWidget(guide, 2, 0, 1, 2)
+        # The guide explains it; the button goes straight to the download.
+        download = QPushButton(tr("Download offline cache"))
+        # The theme's accent button, like Install GAMMA: easy to spot.
+        download.setObjectName("primary")
+        download.setToolTip(tr("Opens the current download page for the offline cache archive, about 45 GB."))
+        download.clicked.connect(lambda: self._open_offline_download(download))
+        links = QHBoxLayout()
+        links.setSpacing(12)
+        links.addWidget(download)
+        links.addWidget(guide)
+        links.addStretch(1)
+        layout.addLayout(links, 2, 0, 1, 2)
         layout.setColumnStretch(1, 1)
         return box, edit
+
+    def _open_offline_download(self, button: QPushButton) -> None:
+        """Open the archive's current download link, looked up off the UI
+        thread; the guide opens instead if the link can't be found."""
+        button.setEnabled(False)
+        task = BackgroundTask(offline_cache_download_url, parent=self)
+
+        def done(url) -> None:
+            button.setEnabled(True)
+            open_url(url if isinstance(url, str) else OFFLINE_GUIDE_URL)
+
+        task.result.connect(done)
+        task.error.connect(lambda _msg: done(None))
+        self._offline_download_task = task
+        task.start()
 
     def _browse_offline_archive(self, edit) -> None:
         start = edit.text() or str(Path.home())

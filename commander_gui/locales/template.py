@@ -4048,4 +4048,9 @@ TRANSLATIONS: dict[str, str] = {
     "Windows couldn't find a file (DLL) the program needs, most often the Visual C++ or DirectX runtime. Install them on COMMANDER's Install page (Install Dependencies), then launch again.": '',
     "A file (DLL) the program needs failed to start. Install the Visual C++ and DirectX runtimes again on COMMANDER's Install page; if that doesn't help, check whether your antivirus is blocking the game.": '',
     "The program used a processor instruction this CPU doesn't have. Pick the version of the game without AVX, Anomaly (DX11), on COMMANDER's Play page.": '',
+    'Pick a drive or folder with about 150 GB free. COMMANDER makes a GAMMA folder in it, with anomaly, gamma and cache inside.': '',
+    'Pick a drive or folder with about 150 GB free. Create folders makes a GAMMA folder in it, with anomaly, gamma and cache inside, and saves them to your profile.': '',
+    'Download offline cache': '',
+    'Opens the current download page for the offline cache archive, about 45 GB.': '',
+    'Offline install guide': '',
 }
