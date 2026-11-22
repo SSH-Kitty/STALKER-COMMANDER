@@ -35,6 +35,11 @@ jobs:
             requirements-dev.txt
       - name: Install dependencies
         run: pip install -r requirements-dev.txt
+      - name: Fetch the Windows CLI and 7-Zip
+        # Tests install real archives and run the real CLI, as the app does:
+        # on Linux those binaries are in the repo, on Windows they are fetched
+        # (pinned and hash-checked) - without them 14 tests fail.
+        run: python scripts/fetch_windows_cli.py
       - name: Lint
         run: ruff check .
       - name: Test
