@@ -235,11 +235,12 @@ def signed_by_microsoft(path: str) -> bool:
         wintrust.WinVerifyTrust(None, ctypes.byref(action), ctypes.byref(data))
 
 
-def _run_elevated(exe: str, args: tuple[str, ...], *, verb: str = "runas") -> int:
+def _run_elevated(exe: str, args: tuple[str, ...], *, verb: str = "runas", show: int = 1) -> int:
     """Run *exe* as administrator (one UAC prompt) and return its exit code.
 
     ShellExecuteEx's "runas" directly - the same prompt PowerShell's
     ``Start-Process -Verb RunAs`` showed, without a hidden PowerShell.
+    *show* 0 (SW_HIDE) keeps a console program's window from flashing up.
     """
     import ctypes
     from ctypes import wintypes
@@ -270,7 +271,7 @@ def _run_elevated(exe: str, args: tuple[str, ...], *, verb: str = "runas") -> in
     info.lpFile = exe
     info.lpParameters = command_line(args) or None
     info.lpDirectory = str(Path(exe).parent)
-    info.nShow = 1  # SW_SHOWNORMAL; the installers run quiet anyway
+    info.nShow = show  # SW_SHOWNORMAL by default; the installers run quiet anyway
     if not shell32.ShellExecuteExW(ctypes.byref(info)) or not info.hProcess:
         return _DECLINED  # ERROR_CANCELLED (1223) when UAC was declined
     try:

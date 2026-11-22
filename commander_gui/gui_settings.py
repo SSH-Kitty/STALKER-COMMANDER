@@ -109,6 +109,7 @@ _DEFAULTS = {
     "offline_archive": "",  # offline cache archive for --offline-archive-path (desktop and Deck)
     "verify_repair_prompt": False,  # Install page Verify step: open the repair list when a check finds problems
     "verify_after_gamma": False,  # Install page Verify step: run Verify Integrity after a GAMMA install
+    "defender_excluded": [],  # Windows: install folders COMMANDER added to Defender's exclusions (winprep.py)
 }
 
 _cache: dict | None = None
@@ -184,6 +185,8 @@ def load_gui_settings() -> dict:
     for key in ("wine_prefix", "target", "custom_launch_options", "offline_archive"):
         if not isinstance(data.get(key), str):
             data[key] = _DEFAULTS[key]
+    excluded = data.get("defender_excluded")
+    data["defender_excluded"] = [p for p in excluded if isinstance(p, str)] if isinstance(excluded, list) else []
     if not isinstance(data.get("theme"), str) or data["theme"] not in _allowed_themes:
         data["theme"] = "black"
     if not isinstance(data.get("language"), str) or data["language"] not in _allowed_languages:

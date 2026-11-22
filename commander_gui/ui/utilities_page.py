@@ -446,7 +446,9 @@ def _copy_dir_tree(src: Path, dst: Path, report, cancel_event=None) -> None:
             raise RuntimeError("Move cancelled")
         rel = item.relative_to(src)
         target = dst / rel
-        if item.is_symlink():
+        # A junction too (gamma\downloads on Windows): os.walk goes into
+        # one, so the whole download cache would be copied into GAMMA.
+        if item.is_symlink() or item.is_junction():
             raise ValueError(f"Move source contains a symlink: {item}")
         if item.is_dir():
             target.mkdir(parents=True, exist_ok=True)

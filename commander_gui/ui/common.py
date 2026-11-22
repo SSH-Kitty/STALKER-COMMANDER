@@ -1868,7 +1868,9 @@ def dir_size(path: str | Path, *, max_entries: int | None = 200_000) -> int:
     ``os.scandir``: the entry type comes with the directory listing, so each
     file costs one ``lstat`` instead of ``Path.rglob``'s two stat calls and
     its per-path object overhead - over twice as fast on a real GAMMA tree.
-    Symlinks are neither followed nor counted.
+    Symlinks and junctions are neither followed nor counted: on Windows
+    ``gamma\\downloads`` is a junction to the download cache, which
+    ``is_dir(follow_symlinks=False)`` would otherwise walk into.
     """
     total = 0
     count = 0
@@ -1878,6 +1880,8 @@ def dir_size(path: str | Path, *, max_entries: int | None = 200_000) -> int:
             with os.scandir(stack.pop()) as entries:
                 for entry in entries:
                     try:
+                        if entry.is_junction():
+                            continue
                         if entry.is_dir(follow_symlinks=False):
                             stack.append(entry.path)
                         elif entry.is_file(follow_symlinks=False):

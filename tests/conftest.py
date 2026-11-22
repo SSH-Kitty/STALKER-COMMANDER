@@ -137,6 +137,27 @@ def _never_run_the_real_cli():
         yield
 
 
+def _elevation_disabled_in_tests(*_args, **_kwargs):
+    raise AssertionError("a test tried to run the elevated Defender/long paths step")
+
+
+@pytest.fixture(autouse=True)
+def _never_change_windows_security():
+    """No test may add Defender exclusions or turn on long paths for real.
+
+    Install pages built in tests have the Defender/long paths option ticked
+    (the default), and a developer VM or CI runner is often an administrator
+    with no UAC prompt: the suite once added a dozen exclusions for its own
+    temp folders. The elevated step fails loudly instead, and the Install
+    page skips the step altogether; tests/test_winprep.py tests it with the
+    real method, saved before this patch."""
+    with (
+        patch("commander_gui.winprep.apply", side_effect=_elevation_disabled_in_tests),
+        patch("commander_gui.ui.install_page.InstallPage._windows_prep_first", return_value=False),
+    ):
+        yield
+
+
 @pytest.fixture(autouse=True)
 def _ignore_the_real_game_and_mo2():
     """Answer "not running" wherever the UI asks about MO2 or the game.

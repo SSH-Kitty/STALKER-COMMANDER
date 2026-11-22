@@ -243,6 +243,18 @@ def _copy_tree(src: Path, dst: Path, copied: list[int], on_file) -> None:
             dirs.remove(WINDOWS_LAUNCHER_DIR)
         rel = Path(folder).relative_to(src)
         (dst / rel).mkdir(parents=True, exist_ok=True)
+        # os.walk steps over a symlinked folder but walks into a junction
+        # (gamma\downloads on Windows), which would copy the whole cache:
+        # it is copied as a link like a symlink, and not walked.
+        junctions = [d for d in dirs if (Path(folder) / d).is_junction()]
+        dirs[:] = [d for d in dirs if d not in junctions]
+        for name in junctions:
+            import _winapi
+
+            # readlink gives "\\?\C:\..."; a junction made from that
+            # spelling doesn't resolve.
+            target = os.readlink(Path(folder) / name).removeprefix("\\\\?\\")
+            _winapi.CreateJunction(target, str(dst / rel / name))
         for name in [*files, *(d for d in dirs if (Path(folder) / d).is_symlink())]:
             source, target = Path(folder) / name, dst / rel / name
             if source.is_symlink():

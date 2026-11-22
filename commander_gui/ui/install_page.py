@@ -38,7 +38,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .. import gui_settings, winruntimes
+from .. import gui_settings, winprep, winruntimes
 from ..cli_runner import cli_command, cli_resume_args
 from ..config import logs_dir
 from ..dependencies import check_all_dependencies
@@ -229,8 +229,25 @@ _OFFLINE_DISABLES = ("minimal", "redownload_github", "auto_retry_large_files")
 #: session.
 _DEFAULT_CHECKED_OPTIONS = {
     "auto_retry_large_files", "auto_continue_gamma", "anomaly_mirror",
-    "check_mods", "check_anomaly", "check_cache",
+    "check_mods", "check_anomaly", "check_cache", "win_prep",
 }
+
+#: Windows only, on the Anomaly and GAMMA steps alike (the two boxes follow
+#: each other): see winprep.py.
+_WIN_PREP_OPTION = (
+    "win_prep",
+    "Defender exclusion and long paths",
+    "Add the install folders to Windows Defender's exclusions and turn on long paths, so no download is blocked. Windows asks for admin rights once.",
+)
+
+
+def _with_win_prep(columns):
+    """*columns* of option groups, with the Windows-only option last in the
+    first group (Install) on Windows."""
+    if os.name != "nt":
+        return columns
+    (title, keys), *rest = columns[0]
+    return (((title, (*keys, _WIN_PREP_OPTION[0])), *rest), *columns[1:])
 
 _ANOMALY_CHECKBOXES = [
     (
@@ -1438,6 +1455,10 @@ class InstallPage(QWidget):
         self._resume_state: dict[str, str] | None = None
         self._auto_cancelled = False
         self._auto_retry_count = 0
+        # Windows: folder sets the Defender/long paths step already ran (or
+        # was declined) for since COMMANDER started, so it asks once only.
+        self._win_prep_asked: set[tuple[str, ...]] = set()
+        self._win_prep_task = None
         # Broken archives already replaced during this run of retries; a
         # second failure on the same one stops and asks the user instead.
         self._replaced_archives: set[str] = set()
@@ -1865,12 +1886,12 @@ class InstallPage(QWidget):
         )
         body.addLayout(self.anomaly_folder_row)
         self.anomaly_checkboxes = {}
-        for key, label, tooltip in _ANOMALY_CHECKBOXES:
+        for key, label, tooltip in [*_ANOMALY_CHECKBOXES, *([_WIN_PREP_OPTION] if os.name == "nt" else [])]:
             cb = QCheckBox(tr(label))
             cb.setToolTip(tr(tooltip))
             cb.setChecked(key in _DEFAULT_CHECKED_OPTIONS)
             self.anomaly_checkboxes[key] = cb
-        option_groups(body, _ANOMALY_OPTION_GROUPS, self.anomaly_checkboxes)
+        option_groups(body, _with_win_prep(_ANOMALY_OPTION_GROUPS), self.anomaly_checkboxes)
         # Says why Install Anomaly is greyed out while Offline is ticked.
         self.anomaly_offline_note = info_label(tr(_ANOMALY_OFFLINE_NOTE))
         self.anomaly_offline_note.hide()
@@ -1909,12 +1930,17 @@ class InstallPage(QWidget):
         folders.addLayout(self.cache_folder_row, 1)
         body.addLayout(folders)
         self.checkboxes = {}
-        for key, label, tooltip in _CHECKBOXES:
+        for key, label, tooltip in [*_CHECKBOXES, *([_WIN_PREP_OPTION] if os.name == "nt" else [])]:
             cb = QCheckBox(tr(label))
             cb.setToolTip(tr(tooltip))
             cb.setChecked(key in _DEFAULT_CHECKED_OPTIONS)
             self.checkboxes[key] = cb
-        option_groups(body, _GAMMA_OPTION_GROUPS, self.checkboxes)
+        option_groups(body, _with_win_prep(_GAMMA_OPTION_GROUPS), self.checkboxes)
+        if os.name == "nt":
+            # One option shown on both steps: ticking either ticks both.
+            pair = (self.anomaly_checkboxes["win_prep"], self.checkboxes["win_prep"])
+            pair[0].toggled.connect(pair[1].setChecked)
+            pair[1].toggled.connect(pair[0].setChecked)
 
         # Offline install: the archive, shown only while ticked.
         # Checkbox states to put back when Offline is unticked again.
@@ -2897,7 +2923,8 @@ class InstallPage(QWidget):
 
     def _update_chain_note(self) -> None:
         """Step 3's line naming the step 4 options the chained GAMMA install uses."""
-        picked = [cb.text() for cb in self.checkboxes.values() if cb.isChecked()]
+        # Not the Defender option: step 3 shows its own box for it.
+        picked = [cb.text() for key, cb in self.checkboxes.items() if cb.isChecked() and key != "win_prep"]
         self.gamma_chain_note.setText(
             tr("GAMMA installs right after, with these options from step 4: {options}.", options=", ".join(picked))
             if picked
@@ -3649,6 +3676,17 @@ class InstallPage(QWidget):
                 self.window.set_install_busy(False)
                 self._update_button_states()
                 return
+        if self._windows_prep_first(
+            profile,
+            lambda: self._start_full_install(
+                skip_confirm=True,
+                preserve_user=preserve_user,
+                preserve_mcm=preserve_mcm,
+                _is_auto_retry=_is_auto_retry,
+            ),
+            gamma_step=True,
+        ):
+            return
         use_stock_mo2_profile_if_missing(self.window.settings, profile)
         backup_error = None
         if not _is_auto_retry and gamma_installed(profile.gamma, profile.mo2_profile):
@@ -4038,6 +4076,104 @@ class InstallPage(QWidget):
             self._start_win_runtimes()
         return answer == QMessageBox.StandardButton.Yes
 
+    def _windows_prep_first(self, profile, then, *, gamma_step: bool) -> bool:
+        """Windows: get the install folders ready before the CLI runs (see
+        winprep.py). True = wait: *then* starts the install once it is done.
+
+        GAMMA's ``downloads`` link to the cache is made here as a junction,
+        no admin rights needed; without it the CLI tries to make it itself
+        and stops. The Defender exclusion and long paths then run elevated
+        (one UAC prompt), when the option is on and not done yet - asked
+        once per folder set while COMMANDER runs, so a declined prompt
+        doesn't come back on every retry."""
+        if os.name != "nt":
+            return False
+        link = None
+        if gamma_step and not winprep.make_downloads_link(profile.gamma, profile.cache):
+            # A cache on a network drive: only a symlink reaches it.
+            link = (
+                os.path.abspath(Path(profile.gamma).expanduser() / winprep.DOWNLOADS),
+                os.path.abspath(Path(profile.cache).expanduser()),
+            )
+        folders = [profile.anomaly, profile.gamma, profile.cache]
+        key = tuple(winprep.norm(folder) for folder in folders)
+        if not hasattr(self, "_win_prep_asked"):
+            self._win_prep_asked = set()
+        option = getattr(self, "checkboxes", {}).get("win_prep")
+        wanted = option is not None and option.isChecked() and key not in self._win_prep_asked
+        step = winprep.plan(
+            folders,
+            gui_settings.load_gui_settings()["defender_excluded"],
+            wanted=wanted,
+            long_paths_on=winprep.long_paths_enabled(),
+            link=link,
+        )
+        if not step:
+            return False
+        self._win_prep_asked.add(key)
+        self.window.set_install_busy(True, "gamma" if gamma_step else "anomaly")
+        self.install_button.setEnabled(False)
+        self.anomaly_button.setEnabled(False)
+        self.window.statusBar().showMessage(tr("Waiting for Windows to allow the Defender exclusion and long paths"))
+        task = BackgroundTask(winprep.apply, step, parent=self)
+        task.result.connect(lambda result: self._on_windows_prep_done(step, result, then))
+        task.error.connect(
+            lambda _error: self._on_windows_prep_done(
+                step,
+                winprep.Result(
+                    exclusion_failed=bool(step.exclude),
+                    long_paths_failed=step.long_paths,
+                    link_failed=bool(step.link),
+                ),
+                then,
+            )
+        )
+        self._win_prep_task = task
+        task.start()
+        return True
+
+    def _on_windows_prep_done(self, step, result, then) -> None:
+        self._win_prep_task = None
+        self.window.statusBar().clearMessage()
+        if step.exclude and not result.declined and not result.exclusion_failed:
+            # Saved, since only an administrator can read the list back.
+            # Also when another antivirus is active: nothing to ask again.
+            excluded = gui_settings.load_gui_settings()["defender_excluded"]
+            known = {winprep.norm(p) for p in excluded}
+            gui_settings.save_gui_settings(
+                defender_excluded=[*excluded, *(p for p in step.exclude if winprep.norm(p) not in known)]
+            )
+        notes = []
+        if result.declined and (step.exclude or step.long_paths):
+            notes.append(tr("Windows didn't give admin rights, so the install folders weren't added to Defender's exclusions. Defender may block or remove some downloads."))
+        if result.exclusion_failed:
+            notes.append(tr("COMMANDER couldn't add the install folders to Defender's exclusions. Defender may block or remove some downloads."))
+        if result.no_defender:
+            notes.append(tr(
+                "Windows Defender isn't your active antivirus. Add these folders to your antivirus' exclusions yourself:\n{folders}",
+                folders="\n".join(step.exclude),
+            ))
+        if result.long_paths_failed:
+            notes.append(tr("COMMANDER couldn't turn on long paths. Keep the install folder short, like C:\\GAMMA."))
+        if step.link and (result.declined or result.link_failed):
+            self.window.set_install_busy(False)
+            self._update_button_states()
+            QMessageBox.warning(
+                self,
+                tr("GAMMA can't be installed yet"),
+                "\n\n".join([
+                    tr(
+                        "COMMANDER couldn't link GAMMA's downloads folder to the cache folder:\n{folder}\n\nPick a cache folder on a local drive, or allow admin rights when Windows asks.",
+                        folder=step.link[1],
+                    ),
+                    *notes,
+                ]),
+            )
+            return
+        if notes:
+            QMessageBox.warning(self, tr("Defender exclusion and long paths"), "\n\n".join(notes))
+        then()
+
     def _on_anomaly_button_clicked(self) -> None:
         if self._win_runtimes_block():
             return
@@ -4201,6 +4337,12 @@ class InstallPage(QWidget):
                     tr("Couldn't create a folder"),
                     tr("COMMANDER couldn't create this folder:\n{folder}\n\n{exc}", folder=profile.anomaly, exc=exc),
                 )
+                return
+            if self._windows_prep_first(
+                profile,
+                lambda: self._start_anomaly_install(skip_confirm=True, respect_options=respect_options),
+                gamma_step=False,
+            ):
                 return
         if respect_options:
             # A direct "Install Anomaly" click (not an internal auto-chain
@@ -5483,6 +5625,21 @@ class InstallPage(QWidget):
         args = _repair_install_args()
         if self._repair_resume_written:
             args.append("--resume")
+        profile = self.window.settings.active_profile
+        if (
+            os.name == "nt"
+            and profile is not None
+            and profile.gamma
+            and profile.cache
+            and Path(profile.gamma).expanduser().is_dir()
+        ):
+            # The repair is a full-install too: without gamma\downloads it
+            # makes a symlink, which needs admin rights (see winprep.py).
+            try:
+                Path(profile.cache).expanduser().mkdir(parents=True, exist_ok=True)
+                winprep.make_downloads_link(profile.gamma, profile.cache)
+            except OSError:
+                pass  # the CLI says what went wrong
         runner = CommandRunner(
             cli_command(args, progress_interval_ms=200),
             parent=self,
