@@ -33,8 +33,9 @@ import time
 import zipfile
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
+from .atomic import replace_file
 from .i18n import tr
 
 #: Why a backup was made. ``manual`` backups are never pruned; the others
@@ -88,8 +89,9 @@ class BackupInfo:
 
 
 def backups_root() -> Path:
-    base = os.environ.get("XDG_DATA_HOME") or os.path.join(Path.home(), ".local", "share")
-    return Path(base) / "stalker-gamma-commander" / "backups"
+    from .config import data_home
+
+    return data_home() / "stalker-gamma-commander" / "backups"
 
 
 def _slug(name: str) -> str:
@@ -366,11 +368,51 @@ def delete_backup(info: BackupInfo) -> None:
 
 
 # -- restoring ----------------------------------------------------------------
+_WINDOWS_RESERVED = frozenset(
+    {"con", "prn", "aux", "nul"}
+    | {f"com{i}" for i in range(1, 10)}
+    | {f"lpt{i}" for i in range(1, 10)}
+)
+
+
 def _safe_member(name: str) -> PurePosixPath | None:
-    path = PurePosixPath(name)
-    if path.is_absolute() or ".." in path.parts or not path.parts or "\\" in name:
+    """The member's path when it is a plain relative path, else None.
+
+    Splits the raw name itself rather than trusting ``PurePosixPath.parts``,
+    which silently folds ``a//b`` into ``a/b``: callers slice the raw name
+    (``name[len("Anomaly/"):]``), so ``Anomaly//Windows/x.dll`` would leave
+    ``/Windows/x.dll`` - rooted at the drive once joined on Windows. A part
+    holding ``:`` (``C:``, NTFS streams) or a drive/UNC prefix is refused for
+    the same reason, as are Windows device names and parts that end in a dot
+    or space (Windows drops those, so two members could land on one file).
+    """
+    if not name or "\\" in name or "\0" in name or name.startswith("/"):
         return None
-    return path
+    raw = name.removesuffix("/")
+    parts = raw.split("/")
+    for part in parts:
+        if part in ("", ".", "..") or ":" in part:
+            return None
+        if part != part.rstrip(" ."):
+            return None
+        if os.name == "nt" and part.split(".", 1)[0].strip().lower() in _WINDOWS_RESERVED:
+            return None
+    windows = PureWindowsPath(raw)
+    if windows.drive or windows.root:
+        return None
+    return PurePosixPath(raw)
+
+
+def _inside(root: Path, target: Path) -> bool:
+    """True when ``target`` is lexically under ``root`` - a second check
+    behind ``_safe_member``. Lexical on purpose: a user's symlinked saves or
+    mod folder must not count as "outside"."""
+    base = os.path.normcase(os.path.abspath(root))
+    full = os.path.normcase(os.path.abspath(target))
+    try:
+        return os.path.commonpath([base, full]) == base and full != base
+    except ValueError:  # different drives on Windows
+        return False
 
 
 def _mcm_target(gamma: Path, rel: str) -> Path:
@@ -413,12 +455,16 @@ def restore_plan(
             continue
         top = member.parts[0]
         if saves and top == "saves" and len(member.parts) > 1:
-            plan.append((name, saves_dir(anomaly_dir).joinpath(*member.parts[1:])))
+            dest = saves_dir(anomaly_dir).joinpath(*member.parts[1:])
+            if _inside(saves_dir(anomaly_dir), dest):
+                plan.append((name, dest))
         elif settings and user_ltx and name == "user.ltx":
             plan.append((name, user_ltx_path(anomaly_dir)))
         elif settings and mcm and top == "mcm" and member.name == MCM_FILE:
             rel = PurePosixPath(*member.parts[1:]).as_posix()
-            mcm_members.append((name, _mcm_target(gamma_dir, rel)))
+            dest = _mcm_target(gamma_dir, rel)
+            if _inside(gamma_dir, dest):
+                mcm_members.append((name, dest))
     # Overwrite-folder copies last: MO2 gives that folder the final say.
     mcm_members.sort(key=lambda item: item[0].startswith("mcm/overwrite/"))
     plan.extend(mcm_members)
@@ -471,9 +517,12 @@ def restore_backup(
             try:
                 with os.fdopen(fd, "wb") as out, archive.open(name) as src:
                     shutil.copyfileobj(src, out)
-                os.replace(tmp, dest)
+                replace_file(Path(tmp), dest)  # a read-only user.ltx too
             except BaseException:
-                Path(tmp).unlink(missing_ok=True)
+                try:
+                    Path(tmp).unlink(missing_ok=True)
+                except OSError:
+                    pass
                 raise
             written += 1
     report(tr("Restored {count} files.", count=written))

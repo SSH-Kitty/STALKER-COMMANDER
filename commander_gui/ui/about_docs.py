@@ -21,6 +21,8 @@ one of:
 
 from __future__ import annotations
 
+import os
+
 from ..launch_options import GROUPS
 from .graphics_window import TITLE, UMBRIEL_RULE
 
@@ -51,9 +53,13 @@ TOPICS: list[dict] = [
             (
                 "What COMMANDER is",
                 [
-                    "STALKER GAMMA COMMANDER is a Linux desktop application for installing, updating, launching, repairing and managing S.T.A.L.K.E.R. Anomaly with the GAMMA modpack. GAMMA is normally installed on Windows with its own launcher and played through Mod Organizer 2. On Linux, the community answer is FaithBeam's stalker-gamma-cli, an installer that runs in a terminal. COMMANDER is a graphical front-end for that CLI, plus everything around it that the CLI does not do on its own.",
+                    "STALKER GAMMA COMMANDER is a desktop application for installing, updating, launching, repairing and managing S.T.A.L.K.E.R. Anomaly with the GAMMA modpack. GAMMA is normally installed with its own launcher and played through Mod Organizer 2. COMMANDER is a graphical front-end for FaithBeam's stalker-gamma-cli, plus everything around it that the CLI does not do on its own."
+                    if os.name == "nt"
+                    else "STALKER GAMMA COMMANDER is a Linux desktop application for installing, updating, launching, repairing and managing S.T.A.L.K.E.R. Anomaly with the GAMMA modpack. GAMMA is normally installed on Windows with its own launcher and played through Mod Organizer 2. On Linux, the community answer is FaithBeam's stalker-gamma-cli, an installer that runs in a terminal. COMMANDER is a graphical front-end for that CLI, plus everything around it that the CLI does not do on its own.",
                     "COMMANDER does not reimplement the installer. Every download, checksum check and archive extraction is done by the real stalker-gamma binary, which COMMANDER starts as a separate process and whose output it reads line by line. That means an install made with COMMANDER is exactly the same as one made with the CLI by hand: you can switch between the two at any time, and they share the same settings file.",
-                    "On top of the CLI, COMMANDER adds: launching through Mod Organizer 2 inside a Wine/Proton prefix, a Proton-GE downloader, installing the Windows runtime libraries the game needs, a mod list editor with backups, FOMOD installers, integrity checks with automatic repair, save and settings backups, co-op through xrRazom, a controller-friendly Steam Deck interface and a log analyser.",
+                    "On top of the CLI, COMMANDER adds: launching through Mod Organizer 2, a mod list editor with backups, FOMOD installers, integrity checks with automatic repair, save and settings backups, co-op through xrRazom and a log analyser."
+                    if os.name == "nt"
+                    else "On top of the CLI, COMMANDER adds: launching through Mod Organizer 2 inside a Wine/Proton prefix, a Proton-GE downloader, installing the Windows runtime libraries the game needs, a mod list editor with backups, FOMOD installers, integrity checks with automatic repair, save and settings backups, co-op through xrRazom, a controller-friendly Steam Deck interface and a log analyser.",
                     ("widget", "update"),
                 ],
             ),

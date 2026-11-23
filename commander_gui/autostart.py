@@ -98,7 +98,49 @@ def autostart_desktop_path() -> Path:
     return _autostart_dir() / _DESKTOP_NAME
 
 
+_RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+_RUN_VALUE = "STALKER COMMANDER"
+
+
+def _windows_run_value() -> str | None:
+    import winreg
+
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _RUN_KEY) as key:
+            return winreg.QueryValueEx(key, _RUN_VALUE)[0]
+    except OSError:
+        return None
+
+
+def _windows_set_run(command: list[str] | None) -> bool:
+    """Write (or with None, delete) COMMANDER's HKCU Run entry."""
+    global _LAST_ERROR
+    import subprocess
+    import winreg
+
+    try:
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER, _RUN_KEY, 0, winreg.KEY_SET_VALUE
+        ) as key:
+            if command is None:
+                try:
+                    winreg.DeleteValue(key, _RUN_VALUE)
+                except FileNotFoundError:
+                    pass
+            else:
+                winreg.SetValueEx(
+                    key, _RUN_VALUE, 0, winreg.REG_SZ, subprocess.list2cmdline(command)
+                )
+    except OSError as exc:
+        _LAST_ERROR = f"Could not update the Windows startup entry: {exc}"
+        return False
+    _LAST_ERROR = ""
+    return True
+
+
 def is_autostart_enabled() -> bool:
+    if os.name == "nt":
+        return _windows_run_value() is not None
     return autostart_desktop_path().is_file()
 
 
@@ -116,6 +158,8 @@ def enable_autostart() -> bool:
     if not cmd:
         _LAST_ERROR = "Could not determine the command to autostart."
         return False
+    if os.name == "nt":
+        return _windows_set_run([*cmd, AUTOSTART_FLAG])
     path = autostart_desktop_path()
     try:
         exec_line = _desktop_exec([*cmd, AUTOSTART_FLAG])
@@ -172,6 +216,8 @@ def add_autostart_flag() -> None:
 
 def disable_autostart() -> bool:
     global _LAST_ERROR
+    if os.name == "nt":
+        return _windows_set_run(None)
     path = autostart_desktop_path()
     if not path.exists():
         return True

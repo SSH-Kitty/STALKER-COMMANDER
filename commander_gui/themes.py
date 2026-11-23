@@ -96,15 +96,50 @@ def parse_color(value: str, fallback: str) -> QColor:
     return color if color.isValid() else QColor(fallback)
 
 
-_FALLBACK_FONT = '"Exo 2", "DejaVu Sans", "Noto Sans", sans-serif'
+if os.name == "nt":
+    # Windows: Noto Sans / Liberation Sans / Inter are not installed there (Qt
+    # silently fell back to DejaVu Sans), so offer fonts Windows ships instead.
+    # Exo 2 is bundled with the app; DejaVu Sans is not on Windows either.
+    FONT_FAMILIES: tuple[str, ...] = (
+        "Exo 2",
+        "Segoe UI",
+        "Verdana",
+        "Arial",
+        "Bahnschrift",
+    )
+    #: Old saved Linux choices -> their Windows replacement.
+    _FONT_MIGRATION = {
+        "Noto Sans": "Segoe UI",
+        "Liberation Sans": "Arial",
+        "Inter": "Bahnschrift",
+        "DejaVu Sans": "Verdana",
+    }
+    MONO_FONT = '"Consolas", monospace'
+    _FALLBACK_FONT = '"Exo 2", "Segoe UI", sans-serif'
+    _FONT_FAMILY_MAP: dict[str, str] = {
+        "Exo 2": '"Exo 2", "Segoe UI", sans-serif',
+        "Segoe UI": '"Segoe UI", sans-serif',
+        "Verdana": '"Verdana", "Segoe UI", sans-serif',
+        "Arial": '"Arial", "Segoe UI", sans-serif',
+        "Bahnschrift": '"Bahnschrift", "Segoe UI", sans-serif',
+    }
+else:
+    FONT_FAMILIES = ("Exo 2", "Noto Sans", "DejaVu Sans", "Liberation Sans", "Inter")
+    _FONT_MIGRATION = {}
+    MONO_FONT = '"DejaVu Sans Mono", monospace'
+    _FALLBACK_FONT = '"Exo 2", "DejaVu Sans", "Noto Sans", sans-serif'
+    _FONT_FAMILY_MAP = {
+        "Exo 2": '"Exo 2", "DejaVu Sans", "Noto Sans", sans-serif',
+        "Noto Sans": '"Noto Sans", "DejaVu Sans", sans-serif',
+        "DejaVu Sans": '"DejaVu Sans", "Noto Sans", sans-serif',
+        "Liberation Sans": '"Liberation Sans", "DejaVu Sans", sans-serif',
+        "Inter": '"Inter", "DejaVu Sans", sans-serif',
+    }
 
-_FONT_FAMILY_MAP: dict[str, str] = {
-    "Exo 2": '"Exo 2", "DejaVu Sans", "Noto Sans", sans-serif',
-    "Noto Sans": '"Noto Sans", "DejaVu Sans", sans-serif',
-    "DejaVu Sans": '"DejaVu Sans", "Noto Sans", sans-serif',
-    "Liberation Sans": '"Liberation Sans", "DejaVu Sans", sans-serif',
-    "Inter": '"Inter", "DejaVu Sans", sans-serif',
-}
+
+def migrate_font_family(name: object) -> object:
+    """Map a font saved on another platform to this platform's equivalent."""
+    return _FONT_MIGRATION.get(name, name) if isinstance(name, str) else name
 
 
 _ROOT = Path(__file__).resolve().parent.parent
@@ -132,6 +167,7 @@ def build_stylesheet(
     qss = qss.replace("%FONT_SIZE%", f"{font_size}px")
     resolved_family = _FONT_FAMILY_MAP.get(font_family or "Exo 2", _FALLBACK_FONT)
     qss = qss.replace("%FONT_FAMILY%", resolved_family)
+    qss = qss.replace('"DejaVu Sans Mono", monospace', MONO_FONT)
     qss = qss.replace("%COMBO_ARROW%", _combo_arrow(tokens["text_dim"]))
     return qss.replace("%SLIDER_HANDLE%", (_ROOT / "cli" / "stalker-gamma.png").as_posix())
 

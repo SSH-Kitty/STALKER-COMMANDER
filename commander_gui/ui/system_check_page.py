@@ -25,7 +25,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .. import gui_settings, launch_options, overlays
+from .. import gui_settings, launch_options, overlays, winruntimes
 from ..cli_runner import cli_binary_path
 from ..dependencies import (
     configured_tool,
@@ -589,6 +589,7 @@ class SystemCheckPage(QWidget):
         super().__init__()
         self.window = window
         self._task: BackgroundTask | None = None
+        self._vc_task: BackgroundTask | None = None
         self._override_edits: dict[str, QLineEdit] = {}
         self._override_checks: dict[str, QCheckBox] = {}
         self._override_browse: dict[str, QPushButton] = {}
@@ -710,21 +711,54 @@ class SystemCheckPage(QWidget):
         if self._task is None and not self._settling and time.monotonic() - last > 60:
             self.refresh()
 
-    def refresh(self) -> None:
-        if os.name == "nt":
-            self.summary.setText(
-                tr("System check is only relevant on Linux; this Windows install runs the game natively.")
-            )
-            for layout in self._sections.values():
-                clear_layout(layout)
+    def _refresh_windows(self) -> None:
+        """Windows runs the game natively: what to check is the Visual C++
+        and DirectX runtimes, which a fresh Windows lacks."""
+        lacking = winruntimes.missing()
+        self.summary.setText(
+            tr("Windows runtimes are missing. The game will not start without them.")
+            if lacking
+            else tr("Everything the game needs is installed.")
+        )
+        for layout in self._sections.values():
+            clear_layout(layout)
+        layout = next(iter(self._sections.values()))
+        for rt in winruntimes.RUNTIMES:
+            dlls = winruntimes.missing_dlls(rt)
             self._add_row(
-                next(iter(self._sections.values())),
-                "Windows",
-                tr("No Wine/Proton tooling required."),
-                "ready",
+                layout,
+                rt.label,
+                tr("{dll} was not found.", dll=dlls[0]) if dlls else tr("Needed by the game and Mod Organizer."),
+                "missing" if dlls else "ready",
                 "",
             )
-            self.refresh_button.setEnabled(False)
+        if lacking:
+            button = QPushButton(tr("Download and install"))
+            button.setObjectName("primary")
+            button.clicked.connect(lambda _checked=False, b=button: self._install_runtimes(b))
+            layout.addWidget(button, 0, Qt.AlignmentFlag.AlignRight)
+        self.refresh_button.setEnabled(True)
+        self.refresh_button.setText(tr("Refresh Checks"))
+
+    def _install_runtimes(self, button: QPushButton) -> None:
+        button.setEnabled(False)
+        button.setText(tr("Installing"))
+        task = BackgroundTask(winruntimes.install, parent=self)
+        task.result.connect(lambda _msg, t=task: self._runtimes_done(t, None))
+        task.error.connect(lambda msg, t=task: self._runtimes_done(t, msg))
+        self._vc_task = task
+        task.start()
+
+    def _runtimes_done(self, task: BackgroundTask, error: str | None) -> None:
+        if task is self._vc_task:
+            self._vc_task = None
+        self._refresh_windows()
+        if error:
+            self.summary.setText(error)
+
+    def refresh(self) -> None:
+        if os.name == "nt":
+            self._refresh_windows()
             return
         if self._task is not None:
             return

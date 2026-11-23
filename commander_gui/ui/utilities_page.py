@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import os
+import re
 import shutil
 import time
 import uuid
@@ -445,7 +446,9 @@ def _copy_dir_tree(src: Path, dst: Path, report, cancel_event=None) -> None:
             raise RuntimeError("Move cancelled")
         rel = item.relative_to(src)
         target = dst / rel
-        if item.is_symlink():
+        # A junction too (gamma\downloads on Windows): os.walk goes into
+        # one, so the whole download cache would be copied into GAMMA.
+        if item.is_symlink() or item.is_junction():
             raise ValueError(f"Move source contains a symlink: {item}")
         if item.is_dir():
             target.mkdir(parents=True, exist_ok=True)
@@ -584,7 +587,16 @@ def _move_folders(
                 # Same folder, so normally one atomic rename: no second copy
                 # of a 100+ GB install on the (often nearly full) source disk.
                 os.rename(src, backup)
-            except OSError:
+            except OSError as exc:
+                if os.name == "nt":
+                    # Windows refuses the rename while any program has a file
+                    # in the folder open. Copying instead would need a second
+                    # full copy on the source disk, and deleting it would hit
+                    # the same open files - stop, nothing has changed yet.
+                    raise OSError(
+                        f"{label} is in use, so it can't be moved: {src}. Close Mod Organizer 2, "
+                        "the game and any File Explorer window in that folder, then try again."
+                    ) from exc
                 # src is a mount point or similar: fall back to a real copy.
                 shutil.copytree(src, backup, symlinks=True)
                 shutil.rmtree(src)
@@ -664,21 +676,39 @@ def _rewrite_mo2_ini_paths(
     text = ini.read_text(encoding="utf-8", errors="replace")
     pairs: list[tuple[str, str]] = []
     for old, new in replacements:
-        old_path = str(Path(old).expanduser())
-        new_path = str(Path(new).expanduser())
+        # as_posix(), not str(): on Windows str() already has backslashes, so
+        # the "/" -> sep variants below all came out identical - MO2's usual
+        # "C:/..." spelling never matched, and a new path that contained the
+        # old one was substituted into itself once per duplicate.
+        old_path = Path(old).expanduser().as_posix()
+        new_path = Path(new).expanduser().as_posix()
         pairs.extend(
             (old_path.replace("/", sep), new_path.replace("/", sep))
             for sep in ("/", "\\", "\\\\")
         )
+    pairs = list(dict.fromkeys(pairs))
     # Longest old string first: if one source path is a literal substring
     # prefix of another (e.g. ".../anomaly" and ".../anomaly-gamma", both
     # plausible sibling folder names), replacing the shorter one first would
     # mangle the longer path's occurrences before its own replacement runs,
     # silently corrupting it into a hybrid old/new path.
     pairs.sort(key=lambda pair: len(pair[0]), reverse=True)
-    updated = text
+    # Windows paths are case-insensitive: MO2 may have written "c:/games/gamma"
+    # for a profile saved as "C:\Games\GAMMA". One pass over one pattern, so a
+    # new path that contains an old one is never substituted into again.
+    nocase = os.name == "nt"
+
+    def key(value: str) -> str:
+        return value.lower() if nocase else value
+
+    lookup: dict[str, str] = {}
     for old_variant, new_variant in pairs:
-        updated = updated.replace(old_variant, new_variant)
+        lookup.setdefault(key(old_variant), new_variant)
+    pattern = re.compile(
+        "|".join(re.escape(old_variant) for old_variant, _new in pairs),
+        re.IGNORECASE if nocase else 0,
+    )
+    updated = pattern.sub(lambda match: lookup[key(match.group(0))], text)
     if updated == text:
         raise ValueError(f"No configured paths were found in {ini}")
     # A new path may itself contain an old one (".../GAMMA" moved to
@@ -686,8 +716,8 @@ def _rewrite_mo2_ini_paths(
     # freshly written new paths.
     remainder = updated
     for _old_variant, new_variant in sorted(pairs, key=lambda pair: len(pair[1]), reverse=True):
-        remainder = remainder.replace(new_variant, "")
-    if any(old_variant in remainder for old_variant, _new_variant in pairs):
+        remainder = re.sub(re.escape(new_variant), "", remainder, flags=re.IGNORECASE if nocase else 0)
+    if pattern.search(remainder):
         raise ValueError(f"Old paths remain in {ini}")
     backup = ini.with_name(ini.name + ".gammagui.bak")
     if not backup.exists():
@@ -921,7 +951,11 @@ class UtilitiesPage(QWidget):
             (
                 tr("Create Log Dump"),
                 tr(
-                    "Collect COMMANDER, Anomaly, GAMMA/MO2 and Wine-prefix logs "
+                    "Collect COMMANDER, Anomaly and GAMMA/MO2 logs "
+                    "plus crash dumps into one zip archive. Open the archive in "
+                    "{assistant} to check all errors and warnings."
+                    if os.name == "nt"
+                    else "Collect COMMANDER, Anomaly, GAMMA/MO2 and Wine-prefix logs "
                     "plus crash dumps into one zip archive. Open the archive in "
                     "{assistant} to check all errors and warnings.",
                     assistant=assistant_token(),
@@ -929,6 +963,8 @@ class UtilitiesPage(QWidget):
                 self._start_log_dump,
             ),
         ]
+        if os.name == "nt":  # no Wine prefix on Windows
+            tools = [t for t in tools if t[2] not in (self._repair_prefix, self._reset_prefix)]
         for index, (title, description, slot) in enumerate(tools):
             if index:
                 # A line between tools, so a row's button is easy to match
@@ -1232,7 +1268,9 @@ class UtilitiesPage(QWidget):
         full_panel, self.full_uninstall_button = self._destructive_panel(
             tr("Full uninstall"),
             tr(
-                "Removes the Anomaly, GAMMA, and cache folders, leaving your "
+                "Removes the Anomaly, GAMMA, and cache folders."
+                if os.name == "nt"
+                else "Removes the Anomaly, GAMMA, and cache folders, leaving your "
                 "Wine/Proton prefix intact."
             ),
             [
@@ -1240,10 +1278,10 @@ class UtilitiesPage(QWidget):
                     "Deletes ALL saves, MO2 settings, MCM settings, added mods "
                     "and the download cache"
                 ),
-                tr(
+                *([] if os.name == "nt" else [tr(
                     "The configured Wine/Proton prefix and its Winetricks "
                     "configuration are kept"
-                ),
+                )]),
             ],
             tr("Full Uninstall"),
             self._start_full_uninstall,
@@ -2145,7 +2183,7 @@ class UtilitiesPage(QWidget):
                 (tr("The download cache"),),
             ),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            info=tr("Your Wine/Proton prefix and its Winetricks setup are kept.") + "\n\n" + tr(_BACKUP_NOTE),
+            info=("" if os.name == "nt" else tr("Your Wine/Proton prefix and its Winetricks setup are kept.") + "\n\n") + tr(_BACKUP_NOTE),
             note=tr("This can't be undone."),
             labels={QMessageBox.StandardButton.Yes: tr("Uninstall"), QMessageBox.StandardButton.No: tr("Cancel")},
         )

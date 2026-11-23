@@ -78,9 +78,11 @@ def cli_binary_path() -> Path:
     if env:
         return Path(env).expanduser()
 
-    candidates = [
-        project_root() / "cli" / "usr" / "bin" / "stalker-gamma",
-    ]
+    if os.name == "nt":
+        # Fetched at build time by scripts/fetch_windows_cli.py.
+        candidates = [project_root() / "cli" / "win-x64" / "stalker-gamma.exe"]
+    else:
+        candidates = [project_root() / "cli" / "usr" / "bin" / "stalker-gamma"]
     for candidate in candidates:
         if candidate.is_file() and os.access(candidate, os.X_OK):
             return candidate
@@ -94,12 +96,57 @@ def cli_binary_path() -> Path:
     return candidates[0]
 
 
+def git_binary() -> str | None:
+    """The ``git`` to run, or None when there is none.
+
+    On Windows a bundled MinGit (scripts/fetch_windows_cli.py puts it in
+    ``cli/win-x64/git``) comes first: a fresh Windows has no git, and the
+    integrity repair, ROMEO and overlay restore all need one. Otherwise, or
+    on Linux, the one on PATH.
+    """
+    if os.name == "nt":
+        bundled = project_root() / "cli" / "win-x64" / "git" / "cmd" / "git.exe"
+        if bundled.is_file():
+            return str(bundled)
+    from shutil import which
+
+    return which("git")
+
+
 def settings_dir() -> Path:
-    """Directory where the CLI stores its settings (~/.config/stalker-gamma)."""
+    """Directory where the CLI stores its settings.
+
+    The CLI uses .NET's ApplicationData folder: ~/.config on Linux,
+    %APPDATA% on Windows - COMMANDER must read the same file.
+    """
+    if os.name == "nt":
+        base = os.environ.get("APPDATA") or os.path.join(Path.home(), "AppData", "Roaming")
+        return Path(base) / "stalker-gamma"
     base = os.environ.get("XDG_CONFIG_HOME")
     if not base:
         base = os.path.join(Path.home(), ".config")
     return Path(base) / "stalker-gamma"
+
+
+def data_home() -> Path:
+    """Where COMMANDER keeps its own data (backups, plugins):
+    ``<this>/stalker-gamma-commander``.
+
+    ~/.local/share (or $XDG_DATA_HOME) on Linux. On Windows %LOCALAPPDATA%:
+    the Linux folder there was a stray ``C:\\Users\\<name>\\.local``, and its
+    longer paths ran into Windows' 260-character limit. A Windows install
+    that already has data in the old place keeps using it, so earlier test
+    builds' backups don't seem to vanish.
+    """
+    xdg = os.environ.get("XDG_DATA_HOME")
+    linux_style = Path(xdg) if xdg else Path.home() / ".local" / "share"
+    if os.name != "nt" or xdg:
+        return linux_style
+    local = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
+    legacy = linux_style / "stalker-gamma-commander"
+    if legacy.is_dir() and not (local / "stalker-gamma-commander").exists():
+        return linux_style
+    return local
 
 
 def settings_path() -> Path:
@@ -147,6 +194,10 @@ def child_environment(base: Mapping[str, str] | None = None) -> dict[str, str]:
     Outside an AppImage this returns ``base`` unchanged.
     """
     environ = dict(os.environ if base is None else base)
+    # Windows build: the CA bundle entry.py gave COMMANDER's own Python.
+    bundled_ca = environ.pop("COMMANDER_BUNDLED_CA", "")
+    if bundled_ca and environ.get("SSL_CERT_FILE") == bundled_ca:
+        environ.pop("SSL_CERT_FILE", None)
     appdir = environ.get("APPDIR", "")
     if not appdir or not environ.get("APPIMAGE"):
         return environ

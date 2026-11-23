@@ -18,7 +18,7 @@ from pathlib import Path
 from .atomic import write_text
 from .config import gui_settings_path
 from .i18n import LANGUAGE_INFO
-from .themes import LIVE_TIMES, THEME_INFO
+from .themes import FONT_FAMILIES, LIVE_TIMES, THEME_INFO, migrate_font_family
 
 try:
     import fcntl
@@ -52,8 +52,10 @@ _DEFAULTS = {
     "tray_close_to_tray": True,  # the window's close button hides COMMANDER to the tray instead of quitting
     "tray_hide_while_playing": True,  # hide to the tray while the game runs, back when it closes
     "tray_hint_shown": False,  # the one-time "still running in the tray" notification was sent
+    "smart_app_control_notice_shown": False,  # Windows: the one-time Smart App Control notice was shown
     "custom_launch_options": "",  # extra tokens prepended to the launch command
     "lossless_dll": "",  # Lossless Scaling DLL picked by hand for frame generation
+    "lossless_exe": "",  # LosslessScaling.exe picked by hand for frame generation on Windows
     "mo2_display_dpi": 120,  # Wine display DPI for Mod Organizer 2 (125%)
     "tool_overrides": {},  # manually selected Linux tools and runner locations
     "move_dest": "",  # in-progress Move Game destination (cleared on completion)
@@ -68,6 +70,10 @@ _DEFAULTS = {
     "hidden_nav_tabs": [],  # top-bar tabs the user hid (keys into main_window.NAV_ITEMS)
     "window_width": 1080,
     "window_height": 950,
+    # Top-left corner of the window, restored on Windows (None: let the
+    # system place it, as before).
+    "window_x": None,
+    "window_y": None,
     "window_maximized": False,  # reopen maximized when it was closed maximized
     "last_update_check_ts": 0.0,  # time.time() of the last scheduled background update check
     "update_notifications": True,  # desktop notification when a GAMMA or COMMANDER update comes out
@@ -104,12 +110,28 @@ _DEFAULTS = {
     "offline_archive": "",  # offline cache archive for --offline-archive-path (desktop and Deck)
     "verify_repair_prompt": False,  # Install page Verify step: open the repair list when a check finds problems
     "verify_after_gamma": False,  # Install page Verify step: run Verify Integrity after a GAMMA install
+    "defender_excluded": [],  # Windows: install folders COMMANDER added to Defender's exclusions (winprep.py)
+    "high_performance_gpu": True,  # Windows: run the game on a laptop's fast graphics card (wingpu.py)
+    "gpu_preferences_set": [],  # Windows: game exes COMMANDER set to the fast graphics card (wingpu.py)
+    "page_file_warned": "",  # Windows: the page file setup the "too small" warning was last answered for (winpagefile.py)
 }
 
 _cache: dict | None = None
 _SAVE_LOCK = threading.RLock()
 _cache_path_str: str = ""
-_cache_file_mtime: float = 0.0
+_cache_file_mtime: object = 0.0
+
+
+def _stamp(path: Path) -> object:
+    """What says the file changed: its mtime in ns *and* its size. The mtime
+    alone (a float) missed a second write within the same clock tick, which
+    Windows' coarse file times make common - the cache then kept serving
+    the old settings."""
+    try:
+        info = path.stat()
+    except OSError:
+        return 0.0
+    return (info.st_mtime_ns, info.st_size)
 
 
 def animations_enabled() -> bool:
@@ -128,10 +150,7 @@ def click_sounds_enabled() -> bool:
 
 def _cached_flag(key: str) -> bool:
     path = gui_settings_path()
-    try:
-        mtime = path.stat().st_mtime
-    except OSError:
-        mtime = 0.0
+    mtime = _stamp(path)
     if _cache is not None and str(path) == _cache_path_str and mtime == _cache_file_mtime:
         return bool(_cache.get(key, True))
     return bool(load_gui_settings().get(key, True))
@@ -140,10 +159,7 @@ def _cached_flag(key: str) -> bool:
 def load_gui_settings() -> dict:
     global _cache, _cache_path_str, _cache_file_mtime
     path = gui_settings_path()
-    try:
-        current_mtime = path.stat().st_mtime
-    except OSError:
-        current_mtime = 0.0
+    current_mtime = _stamp(path)
     if (
         _cache is not None
         and str(path) == _cache_path_str
@@ -170,9 +186,15 @@ def load_gui_settings() -> dict:
             data.update(stored)
     if not isinstance(data.get("runner"), str):
         data["runner"] = "auto"
-    for key in ("wine_prefix", "target", "custom_launch_options", "offline_archive"):
+    for key in ("wine_prefix", "target", "custom_launch_options", "offline_archive", "page_file_warned"):
         if not isinstance(data.get(key), str):
             data[key] = _DEFAULTS[key]
+    excluded = data.get("defender_excluded")
+    data["defender_excluded"] = [p for p in excluded if isinstance(p, str)] if isinstance(excluded, list) else []
+    gpu_set = data.get("gpu_preferences_set")
+    data["gpu_preferences_set"] = [p for p in gpu_set if isinstance(p, str)] if isinstance(gpu_set, list) else []
+    if not isinstance(data.get("high_performance_gpu"), bool):
+        data["high_performance_gpu"] = True
     if not isinstance(data.get("theme"), str) or data["theme"] not in _allowed_themes:
         data["theme"] = "black"
     if not isinstance(data.get("language"), str) or data["language"] not in _allowed_languages:
@@ -245,15 +267,12 @@ def load_gui_settings() -> dict:
         except (TypeError, ValueError, OverflowError):
             size = _DEFAULTS[key]
         data[key] = min(3840, max(640, size))
-    _allowed_fonts = {
-        "Exo 2",
-        "Noto Sans",
-        "DejaVu Sans",
-        "Liberation Sans",
-        "Inter",
-    }
-    font_family = data.get("font_family")
-    if not isinstance(font_family, str) or font_family not in _allowed_fonts:
+    for key in ("window_x", "window_y"):
+        value = data.get(key)
+        if isinstance(value, bool) or not isinstance(value, int) or abs(value) > 100_000:
+            data[key] = None
+    font_family = migrate_font_family(data.get("font_family"))
+    if not isinstance(font_family, str) or font_family not in FONT_FAMILIES:
         data["font_family"] = "Exo 2"
     if not isinstance(data.get("welcome_seen_version"), str):
         data["welcome_seen_version"] = ""
@@ -293,6 +312,7 @@ def load_gui_settings() -> dict:
         "always_gamemoderun",
         "autostart",
         "tray_hint_shown",
+        "smart_app_control_notice_shown",
         "discord_rpc_enabled",
         "discord_show_mods",
         "discord_show_playtime",
@@ -392,10 +412,7 @@ def load_gui_settings() -> dict:
     data["mo2_display_dpi"] = dpi if dpi in {96, 120, 144, 168, 192} else 120
     _cache = copy.deepcopy(data)
     _cache_path_str = str(path)
-    try:
-        _cache_file_mtime = path.stat().st_mtime
-    except OSError:
-        _cache_file_mtime = 0.0
+    _cache_file_mtime = _stamp(path)
     return data
 
 

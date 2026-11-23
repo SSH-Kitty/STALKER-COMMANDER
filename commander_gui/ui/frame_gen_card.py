@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .. import gui_settings, launch_options
+from .. import gui_settings, launch_options, lossless_win
 from .common import exe_pids, info_label, make_card, open_url, section_label, tr
 from .file_dialog import FileDialog as QFileDialog
 
@@ -179,6 +179,57 @@ class FrameGenCard(QWidget):
                 button.setChecked(value == current and (on or key is None))
                 # Left on (typed in, or set before an uninstall): Off stays
                 # clickable so it can still be switched off.
+                button.setEnabled(on and not steps if key else not steps or (on and value is False))
+        return not steps
+
+
+class WindowsFrameGenCard(FrameGenCard):
+    """The same card for Windows, where frame generation is the Lossless
+    Scaling app: COMMANDER writes a profile for the game into its settings
+    and starts it with the game (see lossless_win). Needs the app, not a DLL;
+    changes apply from the next launch."""
+
+    def __init__(self, get_text, set_text) -> None:
+        super().__init__(get_text, set_text)
+        self._get_lossless_button.setText(tr("Get Lossless Scaling"))
+        self._choose_dll_button.setText(tr("Choose app"))
+        self._choose_dll_button.setToolTip(tr("Pick LosslessScaling.exe yourself."))
+
+    def _choose_dll(self) -> None:
+        exe = lossless_win.lossless_exe()
+        start = str(exe.parent if exe else Path.home())
+        path, _ = QFileDialog.getOpenFileName(
+            self, tr("Select Lossless Scaling"), start, "LosslessScaling.exe (LosslessScaling.exe);;EXE (*.exe)"
+        )
+        if path:
+            gui_settings.save_gui_settings(lossless_exe=path)
+            self.sync()
+            self.dll_changed.emit()
+
+    def sync(self) -> bool:
+        text = self._get_text()
+        on = launch_options.is_on(text, launch_options.FRAME_GEN)
+        exe = lossless_win.lossless_exe()
+        steps = []
+        if exe is None:
+            steps.append(tr("Frame generation needs the Lossless Scaling app (paid, on Steam). Install it and COMMANDER finds it there. Have it already somewhere else? Use Choose app."))
+        elif not lossless_win.settings_path().is_file():
+            steps.append(tr(lossless_win.MESSAGES["no-file"]))
+        self._dll_label.setText(f"{exe.parent.name}/{exe.name}" if exe else tr("Lossless Scaling not found"))
+        self._dll_label.setToolTip(str(exe or ""))
+        lines = list(steps)
+        if not steps and on:
+            lines.append(tr("COMMANDER starts Lossless Scaling with the game. Changes apply from the next launch."))
+        self._running.setVisible(False)
+        self._missing.setText("\n".join(lines))
+        self._missing.setVisible(bool(lines))
+        self._get_lossless_button.setVisible(exe is None)
+        for buttons, key in self._rows:
+            current = on if key is None else launch_options.var(text, key)
+            if key == launch_options.FG_MULTIPLIER:
+                current = current or "2"
+            for button, value in buttons:
+                button.setChecked(value == current and (on or key is None))
                 button.setEnabled(on and not steps if key else not steps or (on and value is False))
         return not steps
 

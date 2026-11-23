@@ -311,15 +311,19 @@ def _terminate_process_group(
     """Terminate a detached process group, falling back to its process."""
     try:
         if os.name == "nt":
+            # By full path: a bare name is looked up in the working
+            # directory before System32. Bounded: this runs on quit.
+            system32 = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32"
             subprocess.run(
-                ["taskkill", "/PID", str(pid), "/T", "/F"],
+                [str(system32 / "taskkill.exe"), "/PID", str(pid), "/T", "/F"],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 check=False,
+                timeout=10,
             )
         else:
             os.killpg(pid, signal.SIGTERM)
-    except OSError:
+    except (OSError, subprocess.TimeoutExpired):
         pass
     if os.name == "nt":
         if process is not None and process.poll() is None:
@@ -644,7 +648,13 @@ def build_runner_tool_command(
 
 
 def mo2_path_to_host(value: str) -> str:
-    """Translate an MO2 ini path (``Z:/...``) to a host path."""
+    """Translate an MO2 ini path (``Z:/...``) to a host path.
+
+    ``Z:`` is Wine's view of the Linux root. On Windows it is a real drive
+    letter (a NAS or second disk), so the path is already the host's.
+    """
+    if os.name == "nt":
+        return value
     if value[:2].upper() == "Z:":
         rest = value[2:].replace("\\", "/")
         if not rest.startswith("/"):
@@ -950,6 +960,30 @@ def _steam_client_root() -> Path | None:
     return None
 
 
+def _windows_steam_roots() -> list[Path]:
+    """Where Steam is installed on Windows: the registry, then the default."""
+    found: list[Path] = []
+    try:
+        import winreg
+    except ImportError:
+        return found
+    for hive, key, value in (
+        (winreg.HKEY_CURRENT_USER, r"Software\Valve\Steam", "SteamPath"),
+        (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Valve\Steam", "InstallPath"),
+        (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Valve\Steam", "InstallPath"),
+    ):
+        try:
+            with winreg.OpenKey(hive, key) as handle:
+                path = winreg.QueryValueEx(handle, value)[0]
+        except OSError:
+            continue
+        if isinstance(path, str) and path:
+            found.append(Path(path))
+    program_files = os.environ.get("ProgramFiles(x86)") or r"C:\Program Files (x86)"
+    found.append(Path(program_files) / "Steam")
+    return found
+
+
 def _steam_library_paths() -> list[Path]:
     """Steam library folders: the main install plus any custom libraries."""
     roots: list[Path] = []
@@ -962,7 +996,8 @@ def _steam_library_paths() -> list[Path]:
                 roots.append(resolved)
         except (OSError, RuntimeError):
             pass
-    for candidate in STEAM_ROOT_CANDIDATES:
+    candidates = _windows_steam_roots() if os.name == "nt" else list(STEAM_ROOT_CANDIDATES)
+    for candidate in candidates:
         try:
             resolved = candidate.resolve()
         except (OSError, RuntimeError):
@@ -979,7 +1014,8 @@ def _steam_library_paths() -> list[Path]:
             continue
         for match in re.finditer(r'"path"\s+"([^"]+)"', text):
             try:
-                library = Path(match.group(1)).resolve()
+                # VDF escapes backslashes: "D:\\SteamLibrary" on Windows.
+                library = Path(match.group(1).replace("\\\\", "\\")).resolve()
             except (OSError, RuntimeError):
                 continue
             if library.is_dir() and library not in roots:
@@ -1313,6 +1349,15 @@ def build_direct_command(
 
 def desktop_dir() -> Path:
     """Return the user's desktop directory, honoring XDG user dirs."""
+    if os.name == "nt":
+        # The shell's own answer: OneDrive and a moved Desktop folder both
+        # put it somewhere other than ~/Desktop.
+        from .winshortcut import desktop_dir as windows_desktop
+
+        path = windows_desktop() or Path.home() / "Desktop"
+        if not path.is_dir():
+            raise LaunchError(f"Desktop directory not found: {path}")
+        return path
     try:
         out = subprocess.run(
             ["xdg-user-dir", "DESKTOP"],
@@ -1391,6 +1436,8 @@ def write_desktop_shortcut(
     for value in (name, cwd, icon or ""):
         _reject_control_chars(value)
     directory = directory or desktop_dir()
+    if os.name == "nt":
+        return _write_windows_shortcut(name, command, cwd, icon, directory)
     argv = [_desktop_quote(arg) for arg in command]
     if env:
         pairs = [f"{key}={value}" for key, value in sorted(env.items())]
@@ -1413,6 +1460,35 @@ def write_desktop_shortcut(
     return path
 
 
+def _write_windows_shortcut(
+    name: str, command: list[str], cwd: str, icon: str | None, directory: Path
+) -> Path:
+    """The Windows side of write_desktop_shortcut: a .lnk.
+
+    No environment: a .lnk has no place for one, and the native runner sets
+    none (frame generation's variables are read by COMMANDER itself, so a
+    shortcut starts the game without Lossless Scaling).
+
+    Named like the installer's own shortcut, not slugged as on Linux (where
+    the Desktop shows the file's Name= instead): Windows shows the file name.
+    """
+    from .winshortcut import shortcut_name, write_lnk
+
+    path = directory / f"{shortcut_name(name)}.lnk"
+    try:
+        write_lnk(
+            path,
+            command[0],
+            subprocess.list2cmdline(command[1:]),
+            working_dir=cwd,
+            icon=icon or "",
+            description=f"Starts {name} through Mod Organizer.",
+        )
+    except OSError as exc:
+        raise LaunchError(f"Couldn't write {path}: {exc}") from exc
+    return path
+
+
 def _rotate_log(path: Path) -> None:
     """Roll ``path`` to ``path.1`` unconditionally, at the start of a launch.
 
@@ -1432,7 +1508,14 @@ def _rotate_log(path: Path) -> None:
         if path.is_file():
             path.replace(path.with_name(path.name + ".1"))
     except OSError:
-        pass
+        # Windows won't rename a file another process still has open (an
+        # MO2 left running from the last launch): empty it instead, so this
+        # launch's log still starts empty.
+        try:
+            with open(path, "r+b") as stream:
+                stream.truncate(0)
+        except OSError:
+            pass
 
 
 #: Variables shown in commander.log for every launch: the runner's, the
@@ -1552,7 +1635,12 @@ def launch_detached(
                 threading.Thread(target=process.wait, daemon=True).start()
             return process
         except OSError as exc:
-            raise LaunchError(f"Failed to start {command[0]!r}: {exc}") from exc
+            from .winsecurity import start_blocked_hint
+
+            message = f"Failed to start {command[0]!r}: {exc}"
+            if hint := start_blocked_hint(exc):
+                message += "\n\n" + hint
+            raise LaunchError(message) from exc
 
 
 def prefix_debugger_pids(runner_env: dict[str, str] | None) -> list[int]:

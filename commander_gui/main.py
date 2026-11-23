@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -54,7 +56,7 @@ from .desktop_integration import ensure_menu_entry, join_app_scope, set_process_
 from .fonts import load_bundled_font
 from .i18n import set_active_language, tr
 from .themes import build_palette, build_stylesheet, set_active_theme
-from .ui.common import begin_shutdown, shutdown_active_runners
+from .ui.common import background_work_left, begin_shutdown, shutdown_active_runners
 from .ui.dialogs import MessageBox as QMessageBox
 from .ui.main_window import MainWindow
 
@@ -128,7 +130,9 @@ def _quiet_qt_message_handler(mode: QtMsgType, context, message: str) -> None:
         get_logger().warning("qt: %s", message)
     if _PREVIOUS_QT_HANDLER is not None:
         _PREVIOUS_QT_HANDLER(mode, context, message)
-    else:
+    elif sys.stderr is not None:
+        # None in the windowed Windows build (no console): writing to it
+        # raised inside Qt's callback for every message.
         sys.stderr.write(message + "\n")
 
 
@@ -176,6 +180,11 @@ def _listen_for_wake(window: MainWindow) -> None:
 
     server.newConnection.connect(_wake)
     server.listen(_wake_socket())
+    global _WAKE_SERVER
+    _WAKE_SERVER = server
+
+
+_WAKE_SERVER: QLocalServer | None = None
 
 
 def release_instance_lock() -> None:
@@ -190,6 +199,10 @@ def release_instance_lock() -> None:
     """
     global _INSTANCE_LOCK
 
+    # Windows: also the mutex Setup's AppMutex waits on. The self-update
+    # starts Setup just before this process quits; with the mutex still held
+    # it would stop at "COMMANDER is running, close it" instead of updating.
+    _release_running_mutex()
     lock = _INSTANCE_LOCK
     _INSTANCE_LOCK = None
     if lock is None:
@@ -218,7 +231,7 @@ def _cli_binary_problem() -> tuple[str, str] | None:
                 path=binary,
             ),
         )
-    if not os.access(binary, os.X_OK):
+    if os.name != "nt" and not os.access(binary, os.X_OK):
         return (
             tr("COMMANDER can't run one of its files"),
             tr(
@@ -392,19 +405,107 @@ def _ensure_local_bin_on_path() -> None:
     desktop Install page, and a Steam (Game Mode) launch has no
     ``~/.local/bin`` on PATH, so tools installed there were never found.
     """
+    if os.name == "nt":
+        return
     local_bin = os.path.expanduser("~/.local/bin")
     entries = os.environ.get("PATH", "").split(os.pathsep)
     if local_bin not in entries:
         os.environ["PATH"] = os.pathsep.join([local_bin, *filter(None, entries)])
 
 
+def _hide_child_consoles() -> None:
+    """Stop every console child (the CLI, taskkill, git) flashing a black window.
+
+    The Windows build has no console of its own, so each console program it
+    starts would otherwise open one. Patched once here rather than at ~30
+    call sites; ``subprocess.run`` and friends look ``Popen`` up at call time.
+    CREATE_NO_WINDOW is ignored by GUI programs, so MO2 and the game are
+    unaffected.
+    """
+    base = subprocess.Popen
+
+    class _NoWindowPopen(base):  # type: ignore[misc, valid-type]
+        def __init__(self, *args, creationflags: int = 0, **kwargs):
+            super().__init__(
+                *args, creationflags=creationflags | subprocess.CREATE_NO_WINDOW, **kwargs
+            )
+
+    subprocess.Popen = _NoWindowPopen  # type: ignore[misc]
+
+
+_RUNNING_MUTEX = None
+
+
+def _announce_running() -> None:
+    """Windows: hold the named mutex Setup's ``AppMutex`` looks for, so an
+    upgrade asks the user to quit COMMANDER (closing the window only sends
+    it to the tray) instead of failing on files in use."""
+    global _RUNNING_MUTEX
+    try:
+        import ctypes
+
+        _RUNNING_MUTEX = ctypes.windll.kernel32.CreateMutexW(None, False, "STALKER-COMMANDER-running")
+    except (AttributeError, OSError):
+        _RUNNING_MUTEX = None
+
+
+def _release_running_mutex() -> None:
+    """Close the handle :func:`_announce_running` opened (Windows; else a no-op)."""
+    global _RUNNING_MUTEX
+
+    handle, _RUNNING_MUTEX = _RUNNING_MUTEX, None
+    if not handle:
+        return
+    try:
+        import ctypes
+
+        ctypes.windll.kernel32.CloseHandle(handle)
+    except (AttributeError, OSError):
+        pass
+
+
+def _stable_working_directory() -> None:
+    """Windows: start from COMMANDER's own data folder, whoever started it.
+
+    The CLI's default profile folders are relative ("gamma/anomaly"). Started
+    at login (HKCU Run) the working directory is System32, from the Start menu
+    the install folder, from a terminal anywhere - so those defaults pointed
+    somewhere different each time, and COMMANDER wrote its state files there.
+    Installs that already exist relative to where it was started are pinned
+    to absolute paths first (load_settings does that), so none is lost.
+    """
+    from .settings import load_settings
+
+    try:
+        load_settings()
+    except Exception:  # noqa: BLE001, S110 - the settings page reports problems later
+        pass
+    base = settings_dir()
+    try:
+        base.mkdir(parents=True, exist_ok=True)
+        os.chdir(base)
+    except OSError:
+        pass
+
+
 def main(argv: list[str] | None = None) -> int:
     global _INSTANCE_LOCK, _PREVIOUS_QT_HANDLER
     install_excepthook()
     install_crash_handler()
-    _ensure_local_bin_on_path()
+    if os.name == "nt":
+        _hide_child_consoles()
+        from .atomic import install_windows_rmtree
+        from .winjob import allow_ctrl_c_for_children
+
+        install_windows_rmtree()
+        allow_ctrl_c_for_children()  # the CLI's cancel is a Ctrl+C
+        _announce_running()
+        _stable_working_directory()
+    if os.name != "nt":  # ~/.local/bin is where Linux installs user programs
+        _ensure_local_bin_on_path()
     argv = list(sys.argv if argv is None else argv)
-    deck = deck_requested(argv)
+    # Deck Mode is SteamOS-only; never offered on Windows.
+    deck = os.name != "nt" and deck_requested(argv)
     from_autostart = AUTOSTART_FLAG in argv
     argv = [arg for arg in argv if arg != AUTOSTART_FLAG]
     _PREVIOUS_QT_HANDLER = qInstallMessageHandler(_quiet_qt_message_handler)
@@ -474,7 +575,7 @@ def main(argv: list[str] | None = None) -> int:
     # hardware if it is still unsettled. Nothing has been built yet, so a
     # "yes" just changes which window class gets constructed below - no
     # re-exec is involved on this path.
-    if not deck:
+    if not deck and os.name != "nt":
         deck = startup_wants_deck(
             _gui.get("deck_mode_preference", "ask"),
             on_deck=steam_deck_model() is not None,
@@ -494,13 +595,29 @@ def main(argv: list[str] | None = None) -> int:
     if not deck:
         _cleanup_interrupted_move(saved)
 
-    # Background network checks have bounded timeouts but may outlive the
-    # window-close event. Wait long enough for them to finish before Qt tears
-    # down their QThreads.
+    # Background work may outlive the window: give a CLI run time to cancel
+    # cleanly, a plain task (network check, folder scan) a moment. Waiting
+    # 30 s for those kept the process alive with no window, and a relaunch
+    # meanwhile was told COMMANDER was already open.
     def _shutdown() -> None:
+        from .ui import moddb_plugin
+
+        moddb_plugin.shutdown()  # first: the os._exit() below would orphan it
         begin_shutdown()
-        shutdown_active_runners(timeout_ms=30000)
+        if _WAKE_SERVER is not None:
+            _WAKE_SERVER.close()  # a relaunch now starts fresh
+        shutdown_active_runners(timeout_ms=10000, task_timeout_ms=2000)
         log_shutdown()
+        if background_work_left():
+            # Qt answers destroying a still-running QThread with qFatal - a
+            # crash report on every quit during a long check. Nothing is
+            # left to save (settings are written as they change), so end
+            # the process here instead of tearing those threads down.
+            get_logger().info("quit: background work still running, exiting without teardown")
+            if _INSTANCE_LOCK is not None:
+                _INSTANCE_LOCK.unlock()
+            logging.shutdown()
+            os._exit(0)
 
     app.aboutToQuit.connect(_shutdown)
     log_startup({

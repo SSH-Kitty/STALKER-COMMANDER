@@ -12,6 +12,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import tempfile
 import time
 import unittest
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -70,6 +71,18 @@ def _sample_bytes() -> bytes:
     )
     return b"\x00shortcuts\x00" + shortcuts_body + b"\x08" + b"\x08"
 
+
+
+
+@contextmanager
+def _steam_roots(*roots):
+    """Steam lives at *roots*: the Linux candidates and, on Windows, the
+    registry lookup (and no AutoLoginUser from the real registry)."""
+    with ExitStack() as stack:
+        stack.enter_context(patch("commander_gui.launcher.STEAM_ROOT_CANDIDATES", tuple(roots)))
+        stack.enter_context(patch("commander_gui.launcher._windows_steam_roots", return_value=list(roots)))
+        stack.enter_context(patch("commander_gui.steam_shortcuts._windows_autologin_user", return_value=None))
+        yield
 
 class SteamShortcutsRoundTripTests(unittest.TestCase):
     def test_round_trip_is_byte_identical(self):
@@ -171,7 +184,7 @@ class FindShortcutsVdfTests(unittest.TestCase):
             root = Path(tmp) / "Steam"
             config = root / "userdata" / "12345" / "config"
             config.mkdir(parents=True)
-            with patch("commander_gui.launcher.STEAM_ROOT_CANDIDATES", (root,)):
+            with _steam_roots(root):
                 self.assertEqual(find_userdata_config_dirs(), [config])
                 self.assertEqual(find_shortcuts_vdf(), config / "shortcuts.vdf")
 
@@ -179,7 +192,7 @@ class FindShortcutsVdfTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "Steam"
             root.mkdir()
-            with patch("commander_gui.launcher.STEAM_ROOT_CANDIDATES", (root,)):
+            with _steam_roots(root):
                 self.assertIsNone(find_shortcuts_vdf())
 
     def test_symlinked_root_candidates_are_not_listed_twice(self):
@@ -195,10 +208,7 @@ class FindShortcutsVdfTests(unittest.TestCase):
             (real_root / "userdata" / "12345" / "config").mkdir(parents=True)
             symlink_root = Path(tmp) / "steam-symlink"
             symlink_root.symlink_to(real_root)
-            with patch(
-                "commander_gui.launcher.STEAM_ROOT_CANDIDATES",
-                (real_root, symlink_root),
-            ):
+            with _steam_roots(real_root, symlink_root):
                 dirs = find_userdata_config_dirs()
         self.assertEqual(len(dirs), 1)
 
@@ -207,7 +217,7 @@ class FindShortcutsVdfTests(unittest.TestCase):
             root = Path(tmp) / "Steam"
             (root / "userdata" / "0" / "config").mkdir(parents=True)
             (root / "userdata" / "12345" / "config").mkdir(parents=True)
-            with patch("commander_gui.launcher.STEAM_ROOT_CANDIDATES", (root,)):
+            with _steam_roots(root):
                 dirs = find_userdata_config_dirs()
         self.assertEqual(len(dirs), 1)
         self.assertNotIn("0", [d.parent.name for d in dirs])
@@ -225,7 +235,7 @@ class FindShortcutsVdfTests(unittest.TestCase):
             (root / "userdata" / "111" / "config").mkdir(parents=True)
             time.sleep(0.01)
             (root / "userdata" / "222" / "config").mkdir(parents=True)
-            with patch("commander_gui.launcher.STEAM_ROOT_CANDIDATES", (root,)):
+            with _steam_roots(root):
                 self.assertIsNone(find_shortcuts_vdf())
 
 
@@ -237,7 +247,7 @@ class ListSteamAccountsTests(unittest.TestCase):
             root = Path(tmp) / "Steam"
             config = root / "userdata" / "111" / "config"
             config.mkdir(parents=True)
-            with patch("commander_gui.launcher.STEAM_ROOT_CANDIDATES", (root,)):
+            with _steam_roots(root):
                 accounts = list_steam_accounts()
             self.assertEqual(len(accounts), 1)
             label, vdf_path = accounts[0]
@@ -258,7 +268,7 @@ class ListSteamAccountsTests(unittest.TestCase):
                 "}\n",
                 encoding="utf-8",
             )
-            with patch("commander_gui.launcher.STEAM_ROOT_CANDIDATES", (root,)):
+            with _steam_roots(root):
                 accounts = list_steam_accounts()
             self.assertEqual(len(accounts), 1)
             label, _vdf_path = accounts[0]
@@ -276,7 +286,7 @@ class ListSteamAccountsTests(unittest.TestCase):
             (root / "config" / "loginusers.vdf").write_text('"users"\n{\n' + users + "}\n")
             registry = Path(tmp) / "registry.vdf"
             registry.write_text('"Registry"\n{\n\t"AutoLoginUser"\t\t"second"\n}\n')
-            with patch("commander_gui.launcher.STEAM_ROOT_CANDIDATES", (root,)):
+            with _steam_roots(root):
                 self.assertEqual(
                     autologin_shortcuts_vdf((registry,)),
                     (root / "userdata" / "222" / "config" / "shortcuts.vdf").resolve(),
@@ -288,7 +298,7 @@ class ListSteamAccountsTests(unittest.TestCase):
             root = Path(tmp) / "Steam"
             (root / "userdata" / "111" / "config").mkdir(parents=True)
             (root / "userdata" / "222" / "config").mkdir(parents=True)
-            with patch("commander_gui.launcher.STEAM_ROOT_CANDIDATES", (root,)):
+            with _steam_roots(root):
                 accounts = list_steam_accounts()
             labels = [label for label, _path in accounts]
             self.assertEqual(len(labels), len(set(labels)))
@@ -314,16 +324,18 @@ class ListSteamAccountsTests(unittest.TestCase):
             (root / "config" / "loginusers.vdf").write_text(
                 f'"users"\n{{\n{entries}\n}}\n', encoding="utf-8"
             )
-            with patch("commander_gui.launcher.STEAM_ROOT_CANDIDATES", (root,)):
+            with _steam_roots(root):
                 accounts = list_steam_accounts()
             labels = sorted(label for label, _path in accounts)
             self.assertEqual(labels, ["Same Name (111)", "Same Name (222)"])
 
 
 class RestartSteamTests(unittest.TestCase):
+    @unittest.skipIf(os.name == "nt", 'Linux Steam: see the Windows tests')
     def test_native_launch_command(self):
         self.assertEqual(steam_launch_command(Path("/home/user/.steam/steam")), ["steam"])
 
+    @unittest.skipIf(os.name == "nt", 'Flatpak is Linux only')
     def test_flatpak_launch_command(self):
         flatpak_root = Path(
             "/home/user/.var/app/com.valvesoftware.Steam/.local/share/Steam"
@@ -333,6 +345,7 @@ class RestartSteamTests(unittest.TestCase):
             ["flatpak", "run", "com.valvesoftware.Steam"],
         )
 
+    @unittest.skipIf(os.name == "nt", 'Linux Steam: see the Windows tests')
     def test_shuts_down_waits_then_relaunches_in_order(self):
         order = []
         with (
@@ -384,6 +397,7 @@ class RestartSteamTests(unittest.TestCase):
             restart_steam(Path("/home/user/.steam/steam"), while_stopped=failing_write)
         popen.assert_called_once()
 
+    @unittest.skipIf(os.name == "nt", 'Linux Steam: see the Windows tests')
     def test_relaunch_args_only_follow_a_successful_write(self):
         """A co-op launch relaunches Steam with its steam:// link - one
         start, since a second racing ``steam`` leaves both stuck. A failed
@@ -409,6 +423,7 @@ class RestartSteamTests(unittest.TestCase):
             popen.assert_called_once()
             self.assertEqual(popen.call_args.args[0], expected)
 
+    @unittest.skipIf(os.name == "nt", 'Linux Steam: see the Windows tests')
     def test_a_hung_steam_is_stopped_then_the_write_goes_ahead(self):
         """A Steam that ignores -shutdown (hung, often windowless) is
         terminated - it swallows every steam:// link otherwise."""
@@ -462,6 +477,7 @@ class AddToSteamTests(unittest.TestCase):
         self.assertEqual(dest.read_bytes(), b"png")
         self.assertEqual(install_icon(self.tmp / "missing.png", dest), "")
 
+    @unittest.skipIf(os.name == "nt", 'Linux Steam: see the Windows tests')
     def test_launch_target_prefers_appimage_then_wrapper_then_run_sh(self):
         appimage = self.tmp / "COMMANDER.AppImage"
         self.assertEqual(
@@ -486,6 +502,7 @@ class AddToSteamTests(unittest.TestCase):
         self.assertEqual(vdf.read_bytes(), broken)
         self.assertFalse(vdf.with_name("shortcuts.vdf.gammagui.bak").exists())
 
+    @unittest.skipIf(os.name == "nt", 'Linux Steam: see the Windows tests')
     def test_add_to_steam_without_restart_writes_directly(self):
         vdf = self.tmp / "userdata" / "1" / "config" / "shortcuts.vdf"
         with (
@@ -779,3 +796,96 @@ class CoopShortcutRollbackTests(unittest.TestCase):
             with patch.object(steam_shortcuts, "_write_compat_config", side_effect=OSError("full")), self.assertRaises(OSError):
                 steam_shortcuts.write_coop_shortcut(vdf, **fields)
             self.assertEqual(vdf.read_bytes(), before)
+
+
+@unittest.skipUnless(os.name == "nt", "Windows Steam")
+class WindowsSteamTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(__import__("shutil").rmtree, self.tmp, ignore_errors=True)
+
+    def test_steam_is_started_through_steam_exe(self):
+        root = Path(r"C:\Program Files (x86)\Steam")
+        self.assertEqual(steam_launch_command(root), [str(root / "steam.exe")])
+
+    def test_restart_shuts_down_and_relaunches_detached(self):
+        root = Path(r"C:\Steam")
+        order = []
+        with (
+            patch(
+                "commander_gui.steam_shortcuts.subprocess.run",
+                side_effect=lambda *a, **k: order.append(("run", a[0])),
+            ),
+            patch(
+                "commander_gui.steam_shortcuts.subprocess.Popen",
+                side_effect=lambda *a, **k: order.append(("popen", a[0], k)) or Mock(),
+            ),
+            patch("commander_gui.steam_shortcuts._wait_for_steam_to_exit", return_value=True),
+        ):
+            restart_steam(root, while_stopped=lambda: order.append(("write",)))
+        steam = str(root / "steam.exe")
+        self.assertEqual(order[0], ("run", [steam, "-shutdown"]))
+        self.assertEqual(order[1], ("write",))
+        _popen, argv, kwargs = order[2]
+        self.assertEqual(argv, [steam])
+        # Steam must outlive COMMANDER, and start_new_session is POSIX only.
+        self.assertTrue(kwargs["creationflags"] & __import__("subprocess").DETACHED_PROCESS)
+        self.assertNotIn("start_new_session", kwargs)
+
+    def test_a_hung_steam_is_ended_with_taskkill(self):
+        written = []
+        with (
+            patch("commander_gui.steam_shortcuts.subprocess.run") as run,
+            patch("commander_gui.steam_shortcuts.subprocess.Popen"),
+            patch("commander_gui.steam_shortcuts._wait_for_steam_to_exit", side_effect=[False, False, True]),
+        ):
+            restart_steam(Path(r"C:\Steam"), while_stopped=lambda: written.append(True))
+        self.assertEqual(written, [True])
+        calls = [c.args[0] for c in run.call_args_list]
+        self.assertTrue(calls[1][0].lower().endswith("taskkill.exe"))
+        self.assertEqual(calls[1][1:], ["/IM", "steam.exe"])
+        self.assertEqual(calls[2][1:], ["/IM", "steam.exe", "/F"])
+
+    def test_the_frozen_build_launches_itself(self):
+        exe = self.tmp / "COMMANDER.exe"
+        with (
+            patch("commander_gui.steam_shortcuts.sys.frozen", True, create=True),
+            patch("commander_gui.steam_shortcuts.sys.executable", str(exe)),
+        ):
+            self.assertEqual(commander_launch_target(), (str(exe), str(self.tmp), ""))
+
+    def test_a_source_checkout_runs_the_package_without_run_sh(self):
+        (self.tmp / "run.sh").write_text("#!/bin/sh\n")
+        exe, start, options = commander_launch_target(repo_root=self.tmp)
+        self.assertEqual((start, options), (str(self.tmp), "-m commander_gui"))
+        self.assertTrue(exe.lower().endswith(".exe"))
+
+    def test_only_the_normal_shortcut_is_added(self):
+        vdf = self.tmp / "userdata" / "1" / "config" / "shortcuts.vdf"
+        with patch(
+            "commander_gui.steam_shortcuts.commander_launch_target",
+            return_value=(r"C:\COMMANDER\COMMANDER.exe", r"C:\COMMANDER", ""),
+        ):
+            add_to_steam(vdf, restart=False)
+        shortcuts = get_shortcuts_map(read_shortcuts(vdf))
+        names = [{k: v for k, _t, v in entry}["appname"] for _key, _t, entry in shortcuts]
+        self.assertEqual(names, ["STALKER COMMANDER"])
+
+    def test_the_registry_auto_login_account_is_picked(self):
+        root = self.tmp / "Steam"
+        users = ""
+        for account_id, login in (("111", "alice"), ("222", "bob")):
+            (root / "userdata" / account_id / "config").mkdir(parents=True)
+            users += f'"{int(account_id) + 76561197960265728}" {{ "AccountName" "{login}" }}\n'
+        (root / "config").mkdir()
+        (root / "config" / "loginusers.vdf").write_text(f'"users" {{ {users} }}', encoding="utf-8")
+        with (
+            patch("commander_gui.launcher._windows_steam_roots", return_value=[root]),
+            patch("commander_gui.steam_shortcuts._windows_autologin_user", return_value="bob"),
+        ):
+            found = autologin_shortcuts_vdf(registries=())
+        self.assertEqual(found, (root / "userdata" / "222" / "config" / "shortcuts.vdf").resolve())
+
+
+if __name__ == "__main__":
+    unittest.main()

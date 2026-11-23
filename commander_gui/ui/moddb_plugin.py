@@ -226,6 +226,27 @@ class ModDBPlugin(QObject):
                 tr("Remove the plugin in Settings > Plugins and install it again."),
             )
 
+    def shutdown(self) -> None:
+        """Close the browser with COMMANDER (see the module's shutdown()).
+
+        Left running, it outlived COMMANDER: a download it finished then
+        reached nobody and was never installed, and the next COMMANDER, not
+        knowing it was open, let the player start a second one on the same
+        cookie and cache folder. terminate() is a normal close (WM_CLOSE on
+        Windows, SIGTERM on Linux), so Chromium saves its cookies first.
+        """
+        process = self._process
+        if process is None:
+            return
+        # A quit is no crash: no "closed unexpectedly" box on the way out.
+        process.finished.disconnect(self._finished)
+        process.errorOccurred.disconnect(self._failed)
+        process.terminate()
+        if not process.waitForFinished(5000):
+            process.kill()
+            process.waitForFinished(2000)
+        self._process = None
+
     def _finished(self, code: int, status) -> None:
         self._read_stderr()
         stderr = self._stderr.decode("utf-8", "replace").strip()
@@ -248,3 +269,11 @@ def controller(window) -> ModDBPlugin:
     if _CONTROLLER is None:
         _CONTROLLER = ModDBPlugin(window)
     return _CONTROLLER
+
+
+def shutdown() -> None:
+    """Close the browser, if it is open: called first on quit (main.py),
+    ahead of the os._exit() a quit with background work still running ends
+    in - a handler of its own on aboutToQuit would come after it."""
+    if _CONTROLLER is not None:
+        _CONTROLLER.shutdown()

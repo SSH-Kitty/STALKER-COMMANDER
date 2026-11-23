@@ -38,7 +38,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .. import gui_settings
+from .. import gui_settings, winprep, winruntimes
 from ..cli_runner import cli_command, cli_resume_args
 from ..config import logs_dir
 from ..dependencies import check_all_dependencies
@@ -145,6 +145,7 @@ from .common import (
     normalize_path,
     notify_desktop,
     open_in_file_manager,
+    open_url,
     paused_dependency_status,
     save_profile_dirs,
     section_label,
@@ -228,8 +229,25 @@ _OFFLINE_DISABLES = ("minimal", "redownload_github", "auto_retry_large_files")
 #: session.
 _DEFAULT_CHECKED_OPTIONS = {
     "auto_retry_large_files", "auto_continue_gamma", "anomaly_mirror",
-    "check_mods", "check_anomaly", "check_cache",
+    "check_mods", "check_anomaly", "check_cache", "win_prep",
 }
+
+#: Windows only, on the Anomaly and GAMMA steps alike (the two boxes follow
+#: each other): see winprep.py.
+_WIN_PREP_OPTION = (
+    "win_prep",
+    "Defender exclusion and long paths",
+    "Add the install folders to Windows Defender's exclusions and turn on long paths, so no download is blocked. Windows asks for admin rights once.",
+)
+
+
+def _with_win_prep(columns):
+    """*columns* of option groups, with the Windows-only option last in the
+    first group (Install) on Windows."""
+    if os.name != "nt":
+        return columns
+    (title, keys), *rest = columns[0]
+    return (((title, (*keys, _WIN_PREP_OPTION[0])), *rest), *columns[1:])
 
 _ANOMALY_CHECKBOXES = [
     (
@@ -426,6 +444,46 @@ def offline_install_problem(archive: str, cache: str = "") -> str | None:
             return tr("Your cache is already unpacked. Untick Offline: a normal install reuses it and downloads only what's missing.")
         return tr("Pick the offline cache archive. It holds the cache folder and both list files.")
     return None
+
+
+#: The guide page's Markdown source, read for its current download link.
+OFFLINE_GUIDE_SOURCE_URL = "https://raw.githubusercontent.com/wiki/FaithBeam/stalker-gamma-cli/Offline-Install.md"
+
+_GOFILE_LINK = re.compile(r"https://gofile\.io/d/[A-Za-z0-9]+")
+
+
+def offline_cache_download_url() -> str:
+    """The offline cache archive's download link from the CLI's guide, or
+    the guide itself when it can't be read or names no link. Read each time,
+    not pinned: the CLI author replaces the upload with newer snapshots."""
+    from ..network import read_response_bytes, urlopen_with_retry
+
+    try:
+        with urlopen_with_retry(OFFLINE_GUIDE_SOURCE_URL, timeout=10) as response:
+            text = read_response_bytes(response, 512 * 1024).decode("utf-8", "replace")
+    except (OSError, ValueError):
+        return OFFLINE_GUIDE_URL
+    match = _GOFILE_LINK.search(text)
+    return match.group(0) if match else OFFLINE_GUIDE_URL
+
+
+#: Where a fresh Windows install goes unless the player picks elsewhere. The
+#: CLI's own default is relative to the folder it runs from, so a player
+#: starting COMMANDER from, say, C:\Stalker got C:\Stalker\gamma\... A short
+#: path also keeps MO2's deep mod paths clear of Windows' 260-character limit.
+DEFAULT_WINDOWS_ROOT = "C:\\GAMMA"
+
+
+def install_base(root: str | Path) -> Path:
+    """The folder anomaly, gamma and cache go in for a picked *root*.
+
+    On Windows that is a GAMMA folder inside it, so picking a drive or a
+    Games folder doesn't spill three folders into it. A root already named
+    GAMMA is used as it is, rather than nested again."""
+    base = Path(root).expanduser()
+    if os.name != "nt" or base.name.lower() == "gamma":
+        return base
+    return base / "GAMMA"
 
 
 def _verify_phase_value(start: int, end: int, fraction: float) -> int:
@@ -957,7 +1015,8 @@ class _DependencyRow(QWidget):
         layout.setSpacing(10)
         self.icon = _StateIcon()
         layout.addWidget(self.icon)
-        layout.addWidget(QLabel(name), 1)
+        self.label = QLabel(name)
+        layout.addWidget(self.label, 1)
 
     def set_state(self, state: str) -> None:
         self.icon.set_state(state)
@@ -1396,6 +1455,10 @@ class InstallPage(QWidget):
         self._resume_state: dict[str, str] | None = None
         self._auto_cancelled = False
         self._auto_retry_count = 0
+        # Windows: folder sets the Defender/long paths step already ran (or
+        # was declined) for since COMMANDER started, so it asks once only.
+        self._win_prep_asked: set[tuple[str, ...]] = set()
+        self._win_prep_task = None
         # Broken archives already replaced during this run of retries; a
         # second failure on the same one stops and asks the user instead.
         self._replaced_archives: set[str] = set()
@@ -1537,8 +1600,9 @@ class InstallPage(QWidget):
         installs_divider = QFrame()
         installs_divider.setObjectName("vDivider")
         installs_divider.setFixedWidth(1)
-        installs_row.addWidget(self._windows_choice, 1)
-        installs_row.addWidget(installs_divider)
+        if os.name != "nt":  # converts a Windows install for Linux
+            installs_row.addWidget(self._windows_choice, 1)
+            installs_row.addWidget(installs_divider)
         installs_row.addWidget(self._switch_choice, 1)
         installs_layout.addLayout(installs_row)
 
@@ -1561,9 +1625,11 @@ class InstallPage(QWidget):
         setup_layout.setSpacing(14)
         auto_layout.addWidget(self._auto_setup)
         setup_layout.addLayout(auto_root_row)
-        auto_folder_hint = info_label(tr(
-            "Pick an empty folder on a drive with about 150 GB free. COMMANDER makes anomaly, gamma and cache folders inside it."
-        ))
+        auto_folder_hint = info_label(
+            tr("Pick a drive or folder with about 150 GB free. COMMANDER makes a GAMMA folder in it, with anomaly, gamma and cache inside.")
+            if os.name == "nt"
+            else tr("Pick an empty folder on a drive with about 150 GB free. COMMANDER makes anomaly, gamma and cache folders inside it.")
+        )
         # Offline: the same install from an extracted cache archive. Above
         # the hints it swaps, so it stays put when clicked.
         self.auto_offline = QCheckBox(tr("Offline install (cache only)"))
@@ -1728,9 +1794,11 @@ class InstallPage(QWidget):
             )
         )
         body.addLayout(self.root_card_row)
-        body.addWidget(info_label(tr(
-            "Pick an empty folder on a drive with about 150 GB free. Create folders makes anomaly, gamma and cache folders inside it and saves them to your profile."
-        )))
+        body.addWidget(info_label(
+            tr("Pick a drive or folder with about 150 GB free. Create folders makes a GAMMA folder in it, with anomaly, gamma and cache inside, and saves them to your profile.")
+            if os.name == "nt"
+            else tr("Pick an empty folder on a drive with about 150 GB free. Create folders makes anomaly, gamma and cache folders inside it and saves them to your profile.")
+        ))
         self.storage_group = QGroupBox(tr("Storage usage"))
         storage_layout = QVBoxLayout(self.storage_group)
         storage_layout.setContentsMargins(0, 0, 0, 0)  # borderless, like the option groups
@@ -1774,7 +1842,23 @@ class InstallPage(QWidget):
         self.winetricks_button.setToolTip(
             tr("Installs Windows runtimes (VC++, DirectX) into the Wine prefix.")
         )
-        self.winetricks_button.clicked.connect(self._start_winetricks)
+        if os.name == "nt":
+            # Windows has no Wine prefix: the one dependency is Microsoft's
+            # Visual C++ runtime, and the button installs just that.
+            self.winetricks_button.clicked.connect(lambda _checked=False: self._start_win_runtimes())
+            self.winetricks_button.setToolTip(
+                tr("Downloads and installs the Windows runtimes the game needs (Visual C++ and DirectX).")
+            )
+            runtime_keys = {rt.key for rt in winruntimes.RUNTIMES}
+            for key, row in self.deps_rows.items():
+                if key not in runtime_keys:
+                    row.hide()
+                    if key in ("umu", "wine"):  # a group of its own
+                        row.parentWidget().hide()
+            for rt in winruntimes.RUNTIMES:
+                self.deps_rows[rt.key].label.setText(tr(rt.label))
+        else:
+            self.winetricks_button.clicked.connect(self._start_winetricks)
         step_action(self.winetricks_button)
         self.wt_progress = ProgressArea(show_table=False, show_log=True, log_max_height=180)
         # No Idle/percent bar for Dependencies - the status label and log
@@ -1802,12 +1886,12 @@ class InstallPage(QWidget):
         )
         body.addLayout(self.anomaly_folder_row)
         self.anomaly_checkboxes = {}
-        for key, label, tooltip in _ANOMALY_CHECKBOXES:
+        for key, label, tooltip in [*_ANOMALY_CHECKBOXES, *([_WIN_PREP_OPTION] if os.name == "nt" else [])]:
             cb = QCheckBox(tr(label))
             cb.setToolTip(tr(tooltip))
             cb.setChecked(key in _DEFAULT_CHECKED_OPTIONS)
             self.anomaly_checkboxes[key] = cb
-        option_groups(body, _ANOMALY_OPTION_GROUPS, self.anomaly_checkboxes)
+        option_groups(body, _with_win_prep(_ANOMALY_OPTION_GROUPS), self.anomaly_checkboxes)
         # Says why Install Anomaly is greyed out while Offline is ticked.
         self.anomaly_offline_note = info_label(tr(_ANOMALY_OFFLINE_NOTE))
         self.anomaly_offline_note.hide()
@@ -1846,12 +1930,17 @@ class InstallPage(QWidget):
         folders.addLayout(self.cache_folder_row, 1)
         body.addLayout(folders)
         self.checkboxes = {}
-        for key, label, tooltip in _CHECKBOXES:
+        for key, label, tooltip in [*_CHECKBOXES, *([_WIN_PREP_OPTION] if os.name == "nt" else [])]:
             cb = QCheckBox(tr(label))
             cb.setToolTip(tr(tooltip))
             cb.setChecked(key in _DEFAULT_CHECKED_OPTIONS)
             self.checkboxes[key] = cb
-        option_groups(body, _GAMMA_OPTION_GROUPS, self.checkboxes)
+        option_groups(body, _with_win_prep(_GAMMA_OPTION_GROUPS), self.checkboxes)
+        if os.name == "nt":
+            # One option shown on both steps: ticking either ticks both.
+            pair = (self.anomaly_checkboxes["win_prep"], self.checkboxes["win_prep"])
+            pair[0].toggled.connect(pair[1].setChecked)
+            pair[1].toggled.connect(pair[0].setChecked)
 
         # Offline install: the archive, shown only while ticked.
         # Checkbox states to put back when Offline is unticked again.
@@ -1878,7 +1967,9 @@ class InstallPage(QWidget):
             tr("Install or update GAMMA. Anomaly is installed first if it is missing.")
         )
         # Wrapped: clicked() passes a bool that would land in skip_confirm.
-        self.install_button.clicked.connect(lambda: self._start_full_install())
+        self.install_button.clicked.connect(
+            lambda: None if self._win_runtimes_block() else self._start_full_install()
+        )
         step_action(self.install_button)
 
         # -- Step 5: verify integrity --
@@ -2704,7 +2795,7 @@ class InstallPage(QWidget):
                 return
         offline = self.auto_offline.isChecked()
         if offline:
-            problem = offline_install_problem(offline_archive(), str(Path(root).expanduser() / "cache"))
+            problem = offline_install_problem(offline_archive(), str(self._install_base(root) / "cache"))
             if problem:
                 QMessageBox.warning(self, tr("Offline install"), problem)
                 return
@@ -2723,7 +2814,7 @@ class InstallPage(QWidget):
         answer = QMessageBox.question(
             self,
             tr("Install GAMMA automatically?"),
-            tr("COMMANDER installs the Windows runtimes, then Anomaly, then GAMMA, into:\n{path}\n\nThis can take a few hours. You can keep using your computer meanwhile.", path=root),
+            tr("COMMANDER installs the Windows runtimes, then Anomaly, then GAMMA, into:\n{path}\n\nThis can take a few hours. You can keep using your computer meanwhile.", path=str(self._install_base(root))),
             (QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No),
             note=note,
             labels={QMessageBox.StandardButton.Yes: tr("Install now"), QMessageBox.StandardButton.No: tr("Cancel")},
@@ -2750,7 +2841,12 @@ class InstallPage(QWidget):
         # and fills in the archive.
         self.checkboxes["offline"].setChecked(offline)
         self._auto_active = True
-        if self._wt_installed is True:
+        if os.name == "nt":  # no Wine runtimes: the Visual C++ and DirectX ones
+            if winruntimes.missing():
+                self._start_win_runtimes(then_install=True)
+            else:
+                self._start_auto_gamma()
+        elif self._wt_installed is True:
             self._start_auto_gamma()
         else:
             self._start_winetricks(then_install=True)
@@ -2827,7 +2923,8 @@ class InstallPage(QWidget):
 
     def _update_chain_note(self) -> None:
         """Step 3's line naming the step 4 options the chained GAMMA install uses."""
-        picked = [cb.text() for cb in self.checkboxes.values() if cb.isChecked()]
+        # Not the Defender option: step 3 shows its own box for it.
+        picked = [cb.text() for key, cb in self.checkboxes.items() if cb.isChecked() and key != "win_prep"]
         self.gamma_chain_note.setText(
             tr("GAMMA installs right after, with these options from step 4: {options}.", options=", ".join(picked))
             if picked
@@ -2848,20 +2945,39 @@ class InstallPage(QWidget):
             parents = {str(Path(p).expanduser().parent) for p in paths.values() if p}
             if len(parents) == 1 and all(paths.values()):
                 parent = parents.pop()
+            suggested = parent
+            if (
+                os.name == "nt"
+                and not gamma_installed(profile.gamma, profile.mo2_profile)
+                and not anomaly_installed(profile.anomaly)
+                and (
+                    not Path(profile.gamma).expanduser().is_absolute()
+                    or not any(p and Path(p).expanduser().is_dir() for p in paths.values())
+                )
+            ):
+                # Nothing installed yet: a fresh install defaults to the fixed
+                # root, not the CLI's relative default (which depends on where
+                # COMMANDER was started) or folders an uninstall removed. The
+                # player can still pick another folder. Folders that exist
+                # were picked on purpose (Create folders, Settings > Game, an
+                # interrupted install), and a half-done install (Anomaly in
+                # place) keeps its folders so GAMMA lands beside it.
+                suggested = DEFAULT_WINDOWS_ROOT
             folders = (profile.anomaly, profile.gamma, profile.cache)
             if getattr(self, "_seen_folders", None) != folders:
                 # The folders changed elsewhere (Switch install, Settings >
                 # Game): a root picked for the old ones would quietly point
                 # the profile back there on Create folders or Automatic.
                 self._seen_folders = folders
-                self.root_card_edit.setText(parent or "")
-                self.auto_root_edit.setText(parent or "")
-            elif parent and not self.root_card_edit.text():
-                self.root_card_edit.setText(parent)
+                self.root_card_edit.setText(suggested or "")
+                self.auto_root_edit.setText(suggested or "")
+            elif suggested and not self.root_card_edit.text():
+                self.root_card_edit.setText(suggested)
         root = self.root_card_edit.text().strip()
-        preview = bool(root) and str(Path(root).expanduser()) != parent
+        base = self._install_base(root) if root else None
+        preview = base is not None and str(base) != parent
         if preview:
-            paths = {key: str(Path(root).expanduser() / key) for key in ("anomaly", "gamma", "cache")}
+            paths = {key: str(base / key) for key in ("anomaly", "gamma", "cache")}
         for key in ("anomaly", "gamma", "cache"):
             path = paths.get(key, "")
             if not path:
@@ -2970,6 +3086,19 @@ class InstallPage(QWidget):
 
     def _refresh_deps_tiles(self) -> None:
         """Step 2's tiles and verb chips, from the last dependency check."""
+        if os.name == "nt":
+            lacking = {rt.key for rt in winruntimes.missing()}
+            for rt in winruntimes.RUNTIMES:
+                self.deps_rows[rt.key].set_state("problem" if rt.key in lacking else "ok")
+            done = len(winruntimes.RUNTIMES) - len(lacking)
+            self.deps_tiles["runtimes"].set_state(
+                "warn" if lacking else "ok", f"{done}/{len(winruntimes.RUNTIMES)}", tr("Windows runtimes")
+            )
+            profile = self.window.settings.active_profile
+            _space_tile(self.deps_tiles["space"], profile.gamma if profile else "")
+            for key in ("prefix", "runner"):
+                self.deps_tiles[key].set_state("idle", "-", tr("Not used on Windows"))
+            return
         verbs = self._wt_verbs
         if self._wt_installed is True and verbs is None:
             verbs = dict.fromkeys((*WINETRICKS_VERBS, "umu"), True)  # paused while the game runs
@@ -3079,6 +3208,10 @@ class InstallPage(QWidget):
         self.winetricks_button.setEnabled(
             self._wt_installed is not None and not game_running()
         )
+        if os.name == "nt":
+            self.winetricks_button.setText(tr("Install Dependencies"))
+            self.winetricks_button.setVisible(bool(winruntimes.missing()))
+            self.winetricks_button.setEnabled(self._vc_task is None and not busy)
         self.anomaly_edit.setEnabled(True)
         self.gamma_edit.setEnabled(True)
         self.cache_edit.setEnabled(True)
@@ -3137,6 +3270,18 @@ class InstallPage(QWidget):
             if self._step == 1:
                 self._refresh_winetricks_status()
 
+    def _install_base(self, root: str) -> Path:
+        """Where Create folders and Automatic put anomaly, gamma and cache
+        for *root*: the folder the profile already uses as it is (an install
+        in D:\\Games\\anomaly etc. must not move), else ``install_base``."""
+        base = Path(root).expanduser()
+        profile = self.window.settings.active_profile
+        if profile is not None:
+            parents = {str(Path(p).expanduser().parent) for p in (profile.anomaly, profile.gamma, profile.cache)}
+            if parents == {str(base)}:
+                return base
+        return install_base(base)
+
     def _create_install_folders(self, quiet: bool = False) -> bool:
         """Create the anomaly/gamma/cache folders under the chosen install root.
 
@@ -3155,8 +3300,8 @@ class InstallPage(QWidget):
             if not root:
                 return False
             self.root_card_edit.setText(root)
-        base = Path(root).expanduser()
-        if bad := wine_unsafe_folder(str(base)):
+        base = self._install_base(root)
+        if os.name != "nt" and (bad := wine_unsafe_folder(str(base))):  # a Wine-only problem
             warn_wine_unsafe_folder(self, bad)
             return False
         if not windows_drive_ok(self, str(base)):
@@ -3234,13 +3379,39 @@ class InstallPage(QWidget):
         layout.addWidget(edit, 1, 1)
         guide = QLabel(
             f'<a href="{OFFLINE_GUIDE_URL}" style="color: {ACCENT.name()};">'
-            + html.escape(tr("Where to download the offline cache"))
+            + html.escape(tr("Offline install guide"))
             + " ↗</a>"
         )
         guide.setOpenExternalLinks(True)
-        layout.addWidget(guide, 2, 0, 1, 2)
+        # The guide explains it; the button goes straight to the download.
+        download = QPushButton(tr("Download offline cache"))
+        # The theme's accent button, like Install GAMMA: easy to spot.
+        download.setObjectName("primary")
+        download.setToolTip(tr("Opens the current download page for the offline cache archive, about 45 GB."))
+        download.clicked.connect(lambda: self._open_offline_download(download))
+        links = QHBoxLayout()
+        links.setSpacing(12)
+        links.addWidget(download)
+        links.addWidget(guide)
+        links.addStretch(1)
+        layout.addLayout(links, 2, 0, 1, 2)
         layout.setColumnStretch(1, 1)
         return box, edit
+
+    def _open_offline_download(self, button: QPushButton) -> None:
+        """Open the archive's current download link, looked up off the UI
+        thread; the guide opens instead if the link can't be found."""
+        button.setEnabled(False)
+        task = BackgroundTask(offline_cache_download_url, parent=self)
+
+        def done(url) -> None:
+            button.setEnabled(True)
+            open_url(url if isinstance(url, str) else OFFLINE_GUIDE_URL)
+
+        task.result.connect(done)
+        task.error.connect(lambda _msg: done(None))
+        self._offline_download_task = task
+        task.start()
 
     def _browse_offline_archive(self, edit) -> None:
         start = edit.text() or str(Path.home())
@@ -3350,7 +3521,7 @@ class InstallPage(QWidget):
             self.refresh()
             return False
         # Not the cache: only the CLI reads it, never Wine.
-        if bad := wine_unsafe_folder(anomaly, gamma):
+        if os.name != "nt" and (bad := wine_unsafe_folder(anomaly, gamma)):  # a Wine-only problem
             warn_wine_unsafe_folder(self, bad)
             self.refresh()
             return False
@@ -3514,6 +3685,17 @@ class InstallPage(QWidget):
                 self.window.set_install_busy(False)
                 self._update_button_states()
                 return
+        if self._windows_prep_first(
+            profile,
+            lambda: self._start_full_install(
+                skip_confirm=True,
+                preserve_user=preserve_user,
+                preserve_mcm=preserve_mcm,
+                _is_auto_retry=_is_auto_retry,
+            ),
+            gamma_step=True,
+        ):
+            return
         use_stock_mo2_profile_if_missing(self.window.settings, profile)
         backup_error = None
         if not _is_auto_retry and gamma_installed(profile.gamma, profile.mo2_profile):
@@ -3884,7 +4066,126 @@ class InstallPage(QWidget):
         self.full_progress.status_message(tr("Cancelling installation"))
         runner.cancel()
 
+    def _win_runtimes_block(self) -> bool:
+        """Windows: the game does not start without the Visual C++ and DirectX
+        runtimes, so offer them before a manual install. True = stop here."""
+        if os.name != "nt" or not winruntimes.missing():
+            return False
+        answer = QMessageBox.question(
+            self,
+            tr("Install the Windows runtimes first?"),
+            tr("The game needs the Visual C++ and DirectX runtimes and they are not installed yet."),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            labels={
+                QMessageBox.StandardButton.Yes: tr("Install them"),
+                QMessageBox.StandardButton.No: tr("Not now"),
+            },
+        )
+        if answer == QMessageBox.StandardButton.Yes:
+            self._start_win_runtimes()
+        return answer == QMessageBox.StandardButton.Yes
+
+    def _windows_prep_first(self, profile, then, *, gamma_step: bool) -> bool:
+        """Windows: get the install folders ready before the CLI runs (see
+        winprep.py). True = wait: *then* starts the install once it is done.
+
+        GAMMA's ``downloads`` link to the cache is made here as a junction,
+        no admin rights needed; without it the CLI tries to make it itself
+        and stops. The Defender exclusion and long paths then run elevated
+        (one UAC prompt), when the option is on and not done yet - asked
+        once per folder set while COMMANDER runs, so a declined prompt
+        doesn't come back on every retry."""
+        if os.name != "nt":
+            return False
+        link = None
+        if gamma_step and not winprep.make_downloads_link(profile.gamma, profile.cache):
+            # A cache on a network drive: only a symlink reaches it.
+            link = (
+                os.path.abspath(Path(profile.gamma).expanduser() / winprep.DOWNLOADS),
+                os.path.abspath(Path(profile.cache).expanduser()),
+            )
+        folders = [profile.anomaly, profile.gamma, profile.cache]
+        key = tuple(winprep.norm(folder) for folder in folders)
+        if not hasattr(self, "_win_prep_asked"):
+            self._win_prep_asked = set()
+        option = getattr(self, "checkboxes", {}).get("win_prep")
+        wanted = option is not None and option.isChecked() and key not in self._win_prep_asked
+        step = winprep.plan(
+            folders,
+            gui_settings.load_gui_settings()["defender_excluded"],
+            wanted=wanted,
+            long_paths_on=winprep.long_paths_enabled(),
+            link=link,
+        )
+        if not step:
+            return False
+        self._win_prep_asked.add(key)
+        self.window.set_install_busy(True, "gamma" if gamma_step else "anomaly")
+        self.install_button.setEnabled(False)
+        self.anomaly_button.setEnabled(False)
+        self.window.statusBar().showMessage(tr("Waiting for Windows to allow the Defender exclusion and long paths"))
+        task = BackgroundTask(winprep.apply, step, parent=self)
+        task.result.connect(lambda result: self._on_windows_prep_done(step, result, then))
+        task.error.connect(
+            lambda _error: self._on_windows_prep_done(
+                step,
+                winprep.Result(
+                    exclusion_failed=bool(step.exclude),
+                    long_paths_failed=step.long_paths,
+                    link_failed=bool(step.link),
+                ),
+                then,
+            )
+        )
+        self._win_prep_task = task
+        task.start()
+        return True
+
+    def _on_windows_prep_done(self, step, result, then) -> None:
+        self._win_prep_task = None
+        self.window.statusBar().clearMessage()
+        if step.exclude and not result.declined and not result.exclusion_failed:
+            # Saved, since only an administrator can read the list back.
+            # Also when another antivirus is active: nothing to ask again.
+            excluded = gui_settings.load_gui_settings()["defender_excluded"]
+            known = {winprep.norm(p) for p in excluded}
+            gui_settings.save_gui_settings(
+                defender_excluded=[*excluded, *(p for p in step.exclude if winprep.norm(p) not in known)]
+            )
+        notes = []
+        if result.declined and (step.exclude or step.long_paths):
+            notes.append(tr("Windows didn't give admin rights, so the install folders weren't added to Defender's exclusions. Defender may block or remove some downloads."))
+        if result.exclusion_failed:
+            notes.append(tr("COMMANDER couldn't add the install folders to Defender's exclusions. Defender may block or remove some downloads."))
+        if result.no_defender:
+            notes.append(tr(
+                "Windows Defender isn't your active antivirus. Add these folders to your antivirus' exclusions yourself:\n{folders}",
+                folders="\n".join(step.exclude),
+            ))
+        if result.long_paths_failed:
+            notes.append(tr("COMMANDER couldn't turn on long paths. Keep the install folder short, like C:\\GAMMA."))
+        if step.link and (result.declined or result.link_failed):
+            self.window.set_install_busy(False)
+            self._update_button_states()
+            QMessageBox.warning(
+                self,
+                tr("GAMMA can't be installed yet"),
+                "\n\n".join([
+                    tr(
+                        "COMMANDER couldn't link GAMMA's downloads folder to the cache folder:\n{folder}\n\nPick a cache folder on a local drive, or allow admin rights when Windows asks.",
+                        folder=step.link[1],
+                    ),
+                    *notes,
+                ]),
+            )
+            return
+        if notes:
+            QMessageBox.warning(self, tr("Defender exclusion and long paths"), "\n\n".join(notes))
+        then()
+
     def _on_anomaly_button_clicked(self) -> None:
+        if self._win_runtimes_block():
+            return
         profile = self.window.settings.active_profile
         if profile is not None and not self._anomaly_failed and anomaly_installed(profile.anomaly):
             self._start_anomaly_reinstall()
@@ -4045,6 +4346,12 @@ class InstallPage(QWidget):
                     tr("Couldn't create a folder"),
                     tr("COMMANDER couldn't create this folder:\n{folder}\n\n{exc}", folder=profile.anomaly, exc=exc),
                 )
+                return
+            if self._windows_prep_first(
+                profile,
+                lambda: self._start_anomaly_install(skip_confirm=True, respect_options=respect_options),
+                gamma_step=False,
+            ):
                 return
         if respect_options:
             # A direct "Install Anomaly" click (not an internal auto-chain
@@ -5327,6 +5634,21 @@ class InstallPage(QWidget):
         args = _repair_install_args()
         if self._repair_resume_written:
             args.append("--resume")
+        profile = self.window.settings.active_profile
+        if (
+            os.name == "nt"
+            and profile is not None
+            and profile.gamma
+            and profile.cache
+            and Path(profile.gamma).expanduser().is_dir()
+        ):
+            # The repair is a full-install too: without gamma\downloads it
+            # makes a symlink, which needs admin rights (see winprep.py).
+            try:
+                Path(profile.cache).expanduser().mkdir(parents=True, exist_ok=True)
+                winprep.make_downloads_link(profile.gamma, profile.cache)
+            except OSError:
+                pass  # the CLI says what went wrong
         runner = CommandRunner(
             cli_command(args, progress_interval_ms=200),
             parent=self,
@@ -5891,6 +6213,15 @@ class InstallPage(QWidget):
     def _refresh_winetricks_status(self):
         if not self._winetricks_status_enabled:
             return
+        if os.name == "nt":  # native Windows: only the Visual C++ runtime
+            self._wt_installed = True  # nothing else waits on a Wine prefix
+            if winruntimes.missing():
+                self.wt_status.set_state(False, tr("Windows runtimes are missing"))
+            else:
+                self.wt_status.set_state(True)
+            self._refresh_deps_tiles()
+            self._update_button_states()
+            return
         if self._wt_checking:
             return
         if getattr(self.window, "install_operation", None) == "dependencies":
@@ -5948,6 +6279,52 @@ class InstallPage(QWidget):
         self.wt_status.set_state(None, tr("status unavailable"), pending_text=tr("Unknown"))
         self.wt_status.set_status_tooltip(tr("Could not query dependencies: {error}", error=message))
         self._update_button_states()
+
+    _vc_task: BackgroundTask | None = None
+    _vc_then_install = False
+
+    def _start_win_runtimes(self, then_install: bool = False) -> None:
+        """Windows: download and install the Visual C++ and DirectX runtimes.
+        ``then_install``: Automatic - Anomaly and GAMMA start once they are in."""
+        self._winetricks_status_enabled = True
+        if self._vc_task is not None:
+            return
+        if self.window.install_busy:
+            QMessageBox.information(self, tr("Please wait"), tr("Another install is still running. Wait for it to finish, then try again."))
+            self._auto_active = False
+            return
+        self._vc_then_install = then_install
+        self.wt_progress.status_label.setText(tr("Installing the Windows runtimes"))
+        self._refresh_wt_extra()
+        task = BackgroundTask(winruntimes.install, parent=self)
+        task.result.connect(self._on_win_runtimes_done)
+        task.error.connect(self._on_win_runtimes_error)
+        self._vc_task = task
+        # Locks the other installs, the language switch and quitting without
+        # a warning, like every other install: the elevated installers run on.
+        self.window.set_install_busy(True, "dependencies")
+        self._update_button_states()
+        task.start()
+
+    def _on_win_runtimes_done(self, message: str) -> None:
+        self._vc_task = None
+        self.window.set_install_busy(False)
+        self.wt_progress.status_label.setText(message)
+        self._refresh_wt_extra()
+        self._refresh_winetricks_status()
+        if self._vc_then_install:
+            self._vc_then_install = False
+            self._start_auto_gamma()
+
+    def _on_win_runtimes_error(self, message: str) -> None:
+        self._vc_task = None
+        self.window.set_install_busy(False)
+        self._auto_active = False  # an Automatic run stops here
+        self._vc_then_install = False
+        self.wt_progress.status_label.setText("")
+        self._refresh_wt_extra()
+        self._refresh_winetricks_status()
+        QMessageBox.warning(self, tr("Couldn't install the Windows runtimes"), message)
 
     def _start_winetricks(self, then_install: bool = False):
         """``then_install``: Automatic - no confirm pop-up, and Anomaly and

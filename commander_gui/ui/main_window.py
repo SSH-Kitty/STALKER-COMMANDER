@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import itertools
+import os
 import time
 from pathlib import Path
 from typing import ClassVar
@@ -53,13 +54,16 @@ from .. import __version__, __version_label__, gui_settings
 from ..diagnostics import debug_summary
 from ..i18n import LANGUAGE_INFO, active_language, set_active_language
 from ..self_update import (
+    check_commander_update_for_this_build,
     commander_appimage_path,
+    commander_windows_install_dir,
     download_and_install_commander_update,
     relaunch_commander,
     switch_commander_build,
 )
 from ..settings import load_settings
 from ..themes import (
+    FONT_FAMILIES,
     THEME_INFO,
     active_theme,
     active_theme_tokens,
@@ -69,7 +73,6 @@ from ..themes import (
     set_active_theme,
 )
 from ..updates import (
-    check_commander_update,
     check_updates,
     effective_update_channel,
 )
@@ -85,6 +88,7 @@ from .common import (
     activate_profile,
     count_active_mods,
     game_running,
+    gamma_installed,
     human_size,
     instance_window_title,
     notice,
@@ -135,6 +139,10 @@ NAV_ITEMS = [
     ("about", "Help"),
     ("credits", "About"),
 ]
+if os.name == "nt":
+    # System Check inspects Wine/Proton/Vulkan tooling; nothing to check
+    # when the game runs natively.
+    NAV_ITEMS = [item for item in NAV_ITEMS if item[0] != "systemcheck"]
 
 #: Tab-bar position for each nav key, fixed by NAV_ITEMS order. Separate from
 #: page construction (see _ensure_page()): pages are built lazily on first
@@ -143,8 +151,13 @@ NAV_ITEMS = [
 _TAB_INDEX: dict[str, int] = {key: i for i, (key, _title) in enumerate(NAV_ITEMS)}
 
 # Indices after which a thin vertical separator is drawn in the tab bar.
-_SEPARATOR_AFTER = {2, 5, 8}
+_SEPARATOR_AFTER = {1, 4, 7} if os.name == "nt" else {2, 5, 8}
 _RELEASES_URL = "https://github.com/SSH-Kitty/STALKER-GAMMA-COMMANDER/releases"
+
+
+def _can_self_update() -> bool:
+    """The AppImage, or the Windows build Setup installed (see self_update)."""
+    return commander_appimage_path() is not None or commander_windows_install_dir() is not None
 
 
 #: Text grows to this fraction of its normal size while a tab is hovered.
@@ -379,6 +392,7 @@ class MainWindow(QMainWindow):
         self.setStatusBar(_NoticeStatusBar(self))
         gui_state = gui_settings.load_gui_settings()
         self.resize(gui_state["window_width"], gui_state["window_height"])
+        self._restore_position(gui_state)
         self.settings = load_settings()
         self.custom_title_bar = False
         self._drag_filter = WindowDragFilter(self)
@@ -423,8 +437,15 @@ class MainWindow(QMainWindow):
         # The Welcome screen (latest patch notes, links), unless "Don't show
         # again" was ticked - here or in Deck Mode, which shares the setting.
         QTimer.singleShot(0, self._maybe_show_welcome)
+        if os.name == "nt":
+            # After the Welcome screen is up, so the notice sits on top of it.
+            QTimer.singleShot(1500, self._maybe_warn_smart_app_control)
 
         start_page = gui_settings.load_gui_settings().get("start_page")
+        if os.name == "nt" and not self._gamma_is_installed():
+            # Nothing to play or manage yet: a new player starts where the
+            # install is. Once GAMMA is in, the saved start page applies.
+            start_page = "install"
         if start_page and start_page in _TAB_INDEX:
             self.tabs.setCurrentIndex(_TAB_INDEX[start_page])
         # tabs.setCurrentIndex() above is a no-op (fires no currentChanged,
@@ -432,6 +453,27 @@ class MainWindow(QMainWindow):
         # default current index (0, Dashboard) - called explicitly here so
         # the initial page is always built, lazy pages notwithstanding.
         self._on_nav(self.tabs.currentIndex())
+
+    def _gamma_is_installed(self) -> bool:
+        """True when the active profile's GAMMA folder holds an install."""
+        profile = self.settings.active_profile
+        return profile is not None and gamma_installed(profile.gamma, profile.mo2_profile)
+
+    def _maybe_warn_smart_app_control(self) -> None:
+        """Once: Smart App Control can stop the CLI, MO2 or the game (all
+        unsigned) from starting, with no "Run anyway" (winsecurity.py)."""
+        from ..winsecurity import SAC_ON, smart_app_control_state
+
+        if gui_settings.load_gui_settings().get("smart_app_control_notice_shown"):
+            return
+        if smart_app_control_state() != SAC_ON:
+            return
+        gui_settings.save_gui_settings(smart_app_control_notice_shown=True)
+        QMessageBox.warning(
+            self,
+            tr("Smart App Control is on"),
+            tr("Windows' Smart App Control blocks programs that aren't code-signed. That can include the GAMMA installer, Mod Organizer 2 and the game itself, and Windows then offers no way to run them anyway.\n\nIf something won't start, turn Smart App Control off in Windows Security > App & browser control > Smart App Control settings."),
+        )
 
     def _maybe_show_welcome(self) -> None:
         from .welcome_overlay import maybe_show_welcome
@@ -659,8 +701,13 @@ class MainWindow(QMainWindow):
         self.mod_counter_label.setObjectName("modCounter")
         right_layout.addWidget(self.mod_counter_label)
 
-        self._cog = QPushButton(tr("⚙"))
+        self._cog = QPushButton()
         self._cog.setObjectName("cogButton")
+        self._cog.setIconSize(QSize(20, 20))
+        # A focused button draws its icon in Active (highlight) mode, which
+        # left the cog lit after clicking it until focus moved elsewhere.
+        self._cog.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._refresh_cog_icon()
         self._cog.setToolTip(tr("Settings"))
         self._cog.setCursor(Qt.CursorShape.PointingHandCursor)
         self._cog.setFixedHeight(28)
@@ -684,7 +731,11 @@ class MainWindow(QMainWindow):
             previous_timer.deleteLater()
         self._mod_counter_timer = QTimer(self)
         self._mod_counter_timer.setInterval(5000)
-        self._mod_counter_timer.timeout.connect(self.update_mod_counter)
+        # Not while hidden in the tray: nobody sees the counter then, and
+        # show_from_tray() brings it up to date.
+        self._mod_counter_timer.timeout.connect(
+            lambda: None if getattr(self, "_in_tray", False) or self.isMinimized() else self.update_mod_counter()
+        )
         self._mod_counter_timer.start()
 
         # Pages are built lazily (see _ensure_page()), not here: constructing
@@ -954,13 +1005,7 @@ class MainWindow(QMainWindow):
         self._status_font_combo = NoWheelComboBox()
         self._status_font_combo.setStyleSheet(_STATUS_COMBO_STYLE)
         self._status_font_combo.setFixedHeight(21)
-        for family in (
-            "Exo 2",
-            "Noto Sans",
-            "DejaVu Sans",
-            "Liberation Sans",
-            "Inter",
-        ):
+        for family in FONT_FAMILIES:
             self._status_font_combo.addItem(family, family)
         self._status_font_combo.currentIndexChanged.connect(
             self._on_status_font_family
@@ -1068,8 +1113,9 @@ class MainWindow(QMainWindow):
             gui_settings.load_gui_settings().get("update_channel"), __version__
         )
         self._commander_checked_at = time.monotonic()
+        # The installed Windows build skips a release until its Setup is up.
         task = BackgroundTask(
-            check_commander_update, __version__, channel=channel, parent=self
+            check_commander_update_for_this_build, __version__, channel=channel, parent=self
         )
         task.result.connect(self._on_commander_update_status_checked)
         task.error.connect(self._on_commander_update_check_failed)
@@ -1127,7 +1173,7 @@ class MainWindow(QMainWindow):
             button.setStyleSheet(f"color: {WARN.name()}; border: none;")
             button.setCursor(Qt.CursorShape.PointingHandCursor)
             button.setEnabled(True)
-            if commander_appimage_path() is not None:
+            if _can_self_update():
                 button.setToolTip(tr("Download and install {tag} now", tag=tag))
             else:
                 button.setToolTip(tr("Open the Releases page for {tag}", tag=tag))
@@ -1148,12 +1194,13 @@ class MainWindow(QMainWindow):
 
     def _start_commander_update(self, tag: str) -> None:
         """The status bar's and the banner's Update button."""
-        if commander_appimage_path() is not None:
-            # Running as an AppImage - offer to download and swap it in
-            # place instead of just sending the user to the browser. A
-            # source checkout or the AUR package (pacman-tracked, see
-            # packaging/aur/PKGBUILD) never sets APPIMAGE, so they fall
-            # through to the plain "open the releases page" behavior.
+        if _can_self_update():
+            # Running as an AppImage, or the Windows build Setup installed -
+            # offer to download and install the update instead of just
+            # sending the user to the browser. A source checkout, the AUR
+            # package (pacman-tracked, see packaging/aur/PKGBUILD) and the
+            # portable Windows zip fall through to the plain "open the
+            # releases page" behavior.
             self._offer_commander_self_update(tag)
         else:
             open_url(_RELEASES_URL)
@@ -1233,7 +1280,8 @@ class MainWindow(QMainWindow):
 
     def _offer_commander_self_update(self, tag: str) -> None:
         """Show the patch notes (the Welcome screen's layout), then download
-        and install over the running AppImage."""
+        and install over the running AppImage (on Windows: download Setup,
+        which installs on restart)."""
         from .welcome_overlay import show_welcome
 
         show_welcome(
@@ -1362,6 +1410,10 @@ class MainWindow(QMainWindow):
 
         def on_result(path: object) -> None:
             close_progress()
+            # A child of the window: one more was left behind with every
+            # attempt. Freed once the worker is done (after a cancel it
+            # still reports progress until its download read times out).
+            bridge.deleteLater()
             if on_installed is not None:
                 on_installed()
             restart = QMessageBox.question(
@@ -1382,6 +1434,7 @@ class MainWindow(QMainWindow):
 
         def on_error(message: str) -> None:
             close_progress()
+            bridge.deleteLater()  # see on_result
             # Cancel ends the download with an error; the user asked for it.
             if not task.cancel_event.is_set():
                 self._show_commander_self_update_error(message)
@@ -1669,8 +1722,20 @@ class MainWindow(QMainWindow):
             return
         self.tabs.setCurrentIndex(_TAB_INDEX[key])
 
+    def _refresh_cog_icon(self) -> None:
+        from PySide6.QtGui import QColor
+
+        from .gear_icon import gear_icon
+
+        tokens = active_theme_tokens()
+        highlight = QColor(tokens.get("accent_strong", "#9fe96f"))
+        idle = QColor(tokens.get("text_disabled", "#7f8f78"))
+        active = bool(self._cog.property("active"))
+        self._cog.setIcon(gear_icon(highlight if active else idle, highlight, 20))
+
     def _set_cog_active(self, active: bool) -> None:
         self._cog.setProperty("active", active)
+        self._refresh_cog_icon()
         self._cog.style().unpolish(self._cog)
         self._cog.style().polish(self._cog)
 
@@ -1884,6 +1949,7 @@ class MainWindow(QMainWindow):
                 for event_filter in filters:
                     app.installEventFilter(event_filter)
         self.tabs.update()
+        self._refresh_cog_icon()
         QTimer.singleShot(0, self._update_overflow)
         self.backdrop.update()
         self.update()
@@ -1927,7 +1993,14 @@ class MainWindow(QMainWindow):
         # two are kept, so switching back to a theme (Winter's photo is slow
         # to decode and scale) is a blit too.
         dpr = self.devicePixelRatioF()
-        key = (self.width(), self.height(), dpr, tuple(active_theme_tokens().items()))
+        screen = self.screen().size()
+        if screen != self.__dict__.get("_backdrop_screen", screen):
+            # Moved to a monitor of another size: the scene is placed by the
+            # screen's size, so all of it - not only this region - is redrawn.
+            self.update()
+        self._backdrop_screen = screen
+        # The screen size is in the key: paint_backdrop places the scene by it.
+        key = (self.width(), self.height(), dpr, screen.width(), screen.height(), tuple(active_theme_tokens().items()))
         cache = self.__dict__.setdefault("_backdrop_cache", {})
         pixmap = cache.pop(key, None)
         if pixmap is None:
@@ -1936,7 +2009,7 @@ class MainWindow(QMainWindow):
             pixmap.fill(QColor(0, 0, 0))
             cache_painter = QPainter(pixmap)
             try:
-                paint_backdrop(cache_painter, self.rect(), self.screen().size())
+                paint_backdrop(cache_painter, self.rect(), screen)
             finally:
                 cache_painter.end()
         cache[key] = pixmap
@@ -1945,7 +2018,9 @@ class MainWindow(QMainWindow):
         painter = QPainter(self)
         try:
             painter.drawPixmap(0, 0, pixmap)
-            self.redforest.paint(painter)
+            # A full repaint (resize, theme, screen) draws all of it.
+            full = event.region().boundingRect().contains(self.rect())
+            self.redforest.paint(painter, None if full else event.region())
             self.snowfall.paint(painter)
         finally:
             painter.end()
@@ -2061,7 +2136,10 @@ class MainWindow(QMainWindow):
         if play is not None and play.is_launching:
             menu.addAction(tr("Quit game"), play._confirm_quit_game)
             # The in-game panel: it toggles, and closes with the game (stop_key).
-            menu.addAction(tr("Graphics"), graphics_window.toggle)
+            # Linux only: its pipe IPC can't work on Windows, where it was
+            # left running as an orphan.
+            if os.name != "nt":
+                menu.addAction(tr("Graphics"), graphics_window.toggle)
         else:
             launch = menu.addAction(tr("Launch Game"), self._launch_from_tray)
             launch.setEnabled(not self.install_busy)
@@ -2115,7 +2193,11 @@ class MainWindow(QMainWindow):
     def _on_tray_activated(self, reason) -> None:
         if reason != QSystemTrayIcon.ActivationReason.Trigger:
             return
-        if self.isVisible() and not self.isMinimized() and self.isActiveWindow():
+        # On Windows the click itself takes focus from the window (the
+        # taskbar gets it), so "active" was always False there and a click
+        # could only ever show it: shown and not minimised is enough.
+        active = os.name == "nt" or self.isActiveWindow()
+        if self.isVisible() and not self.isMinimized() and active:
             self._hide_to_tray()
         else:
             self.show_from_tray()
@@ -2131,6 +2213,7 @@ class MainWindow(QMainWindow):
         # not count as closing the last one and quit COMMANDER.
         QApplication.setQuitOnLastWindowClosed(False)
         self.hide()
+        self._in_tray = True
         if hint and not gui_settings.load_gui_settings().get("tray_hint_shown"):
             gui_settings.save_gui_settings(tray_hint_shown=True)
             notify_desktop(tr("COMMANDER is still running"), tr("Click its tray icon to open it again."))
@@ -2150,11 +2233,13 @@ class MainWindow(QMainWindow):
     def show_from_tray(self) -> None:
         """Bring the window back - from the tray, or from a second launch."""
         self._hidden_for_game = False
+        self._in_tray = False
         QApplication.setQuitOnLastWindowClosed(True)
         self.setWindowState(self.windowState() & ~Qt.WindowState.WindowMinimized)
         self.show()
         self.raise_()
         self.activateWindow()
+        self.update_mod_counter()  # paused while hidden
 
     def _on_game_running_changed(self, running: bool) -> None:
         """Out of the way while playing, back once the game closes."""
@@ -2222,11 +2307,28 @@ class MainWindow(QMainWindow):
         event.accept()
 
     def _save_geometry(self) -> None:
+        geometry = self.normalGeometry()
+        position = {"window_x": geometry.x(), "window_y": geometry.y()} if os.name == "nt" else {}
         gui_settings.save_gui_settings(
-            window_width=self.normalGeometry().width(),
-            window_height=self.normalGeometry().height(),
+            window_width=geometry.width(),
+            window_height=geometry.height(),
             window_maximized=self.isMaximized(),
+            **position,
         )
+
+    def _restore_position(self, gui_state: dict) -> None:
+        """Windows: reopen where the window was, on the screen it was on -
+        unless that screen is gone, then Windows places it as usual.
+        (Linux leaves placement to the window manager; Wayland ignores it.)"""
+        x, y = gui_state.get("window_x"), gui_state.get("window_y")
+        if os.name != "nt" or x is None or y is None:
+            return
+        from PySide6.QtCore import QPoint
+        from PySide6.QtGui import QGuiApplication
+
+        # Part of the title area must be on a screen to drag it back.
+        if QGuiApplication.screenAt(QPoint(x + 60, y + 15)) is not None:
+            self.move(x, y)
 
     def update_mod_counter(self) -> None:
         """Refresh the topbar's always-visible active/total mod count.

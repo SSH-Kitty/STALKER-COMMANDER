@@ -10,6 +10,7 @@ import subprocess
 import sys
 import threading
 import time
+import zlib
 from collections import OrderedDict
 from collections.abc import Callable, Sequence
 from datetime import datetime
@@ -49,7 +50,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .. import gui_settings
+from .. import gui_settings, winpower, wintaskbar
 from ..config import child_environment, is_secondary_instance, spawn_reaped
 from ..desktop_integration import DESKTOP_ID
 from ..i18n import tr
@@ -168,8 +169,11 @@ def warn_wine_unsafe_folder(parent, folder: str) -> None:
 
 
 def windows_drive_ok(parent, *paths: str) -> bool:
-    """True unless one of *paths* is on a Windows drive and the user picks
-    another folder instead of using it anyway."""
+    """True unless one of *paths* is on a drive that breaks GAMMA (a Windows
+    drive on Linux, a OneDrive folder on Windows) and the user picks another
+    folder instead of using it anyway."""
+    if os.name == "nt":
+        return _onedrive_ok(parent, *paths)
     from ..game_installs import windows_drive_folder
 
     folder = windows_drive_folder(*paths)
@@ -185,6 +189,64 @@ def windows_drive_ok(parent, *paths: str) -> bool:
         labels={QMessageBox.StandardButton.Yes: tr("Use it anyway"), QMessageBox.StandardButton.No: tr("Pick another folder")},
     )
     return answer == QMessageBox.StandardButton.Yes
+
+
+def _onedrive_ok(parent, *paths: str) -> bool:
+    from ..winsecurity import onedrive_folder
+
+    folder = onedrive_folder(*paths)
+    if folder is None:
+        return True
+    answer = QMessageBox.warning(
+        parent,
+        tr("This folder is in OneDrive"),
+        tr("OneDrive uploads this folder and can leave GAMMA's files online only, so installs break and the game fails to start. Pick a folder outside OneDrive, such as C:\\GAMMA."),
+        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        QMessageBox.StandardButton.No,
+        info=folder,
+        labels={QMessageBox.StandardButton.Yes: tr("Use it anyway"), QMessageBox.StandardButton.No: tr("Pick another folder")},
+    )
+    return answer == QMessageBox.StandardButton.Yes
+
+
+def _gigabytes(mb: int) -> str:
+    """4096 -> "4", 1536 -> "1.5"."""
+    return f"{mb / 1024:.1f}".removesuffix(".0")
+
+
+def page_file_ok(parent) -> bool:
+    """False when the user goes to fix a page file too small for GAMMA
+    instead of playing (winpagefile.py). Asked once per page file setup:
+    "Play anyway" is remembered until the setting or the RAM changes."""
+    if os.name != "nt":
+        return True
+    from .. import winpagefile
+
+    setting = winpagefile.page_file()
+    ram = winpagefile.ram_mb()
+    if setting is None or not winpagefile.too_small(setting, ram):
+        return True
+    signature = winpagefile.signature(setting, ram)
+    if gui_settings.load_gui_settings().get("page_file_warned") == signature:
+        return True
+    if setting.off:
+        text = tr("Windows has no page file on this PC. GAMMA can need more memory than its {ram} GB of RAM, and then crashes with out-of-memory errors.", ram=_gigabytes(ram))
+    else:
+        text = tr("This PC's page file can't grow past {pagefile} GB. With {ram} GB of RAM, GAMMA can run out of memory and crash.", pagefile=_gigabytes(setting.max_mb), ram=_gigabytes(ram))
+    text += "\n\n" + tr("To fix it, open the page file settings, click Change under Virtual memory, tick \"Automatically manage paging file size for all drives\", then restart the PC.")
+    answer = QMessageBox.warning(
+        parent,
+        tr("The page file is too small for GAMMA"),
+        text,
+        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        QMessageBox.StandardButton.Yes,
+        labels={QMessageBox.StandardButton.Yes: tr("Open page file settings"), QMessageBox.StandardButton.No: tr("Play anyway")},
+    )
+    if answer == QMessageBox.StandardButton.Yes:
+        winpagefile.open_settings()
+        return False
+    gui_settings.save_gui_settings(page_file_warned=signature)
+    return True
 
 
 def count_cached_archives(cache_path: str) -> int:
@@ -247,6 +309,9 @@ def process_running(pattern: str) -> bool:
     path in a different case than the real filename (e.g. fully lowercased).
     """
     regex = re.compile(pattern.encode(), re.IGNORECASE)
+    if os.name == "nt":
+        # No /proc: match the image names of a Toolhelp32 snapshot instead.
+        return any(regex.search(name) for name in _proc_cmdlines().values())
     own = str(os.getpid())
     try:
         pids = [name for name in os.listdir("/proc") if name.isdigit() and name != own]
@@ -326,6 +391,10 @@ def steam_running() -> bool:
     to restart Steam to see a shortcut just added, not a guard that blocks
     the write.
     """
+    if os.name == "nt":
+        from ..winproc import running
+
+        return running("steam.exe")
     exe = shutil.which("pgrep")
     if not exe:
         return False
@@ -393,6 +462,18 @@ def _proc_cmdlines() -> dict[int, bytes]:
         return _CMDLINES[1]
     own = os.getpid()
     found: dict[int, bytes] = {}
+    if os.name == "nt":
+        # Windows: image names only (see winproc), which is what every
+        # caller matches on - "ModOrganizer.exe", "AnomalyDX11AVX.exe".
+        from ..winproc import processes
+
+        found = {
+            pid: name.lower().encode("utf-8", "replace")
+            for pid, name in processes().items()
+            if pid != own
+        }
+        _CMDLINES = (now, found)
+        return found
     try:
         entries = os.listdir("/proc")
     except OSError:
@@ -432,7 +513,7 @@ def exe_pids(exe_name: str) -> set[int]:
     command line.
     """
     proc_root = Path("/proc")
-    if proc_root.is_dir():
+    if os.name == "nt" or proc_root.is_dir():
         # Read directly: this runs on the GUI thread up to four times a
         # second while a launch is watched, and spawning pgrep each time
         # cost a fork+exec per tick (and up to a 2s stall on a busy system).
@@ -610,9 +691,13 @@ def count_active_mods(
     try:
         list_stat = modlist.stat()
         dir_mtime = mods_dir.stat().st_mtime_ns
+        # Plus a checksum: enabling or disabling a mod (+ to -) keeps the
+        # size, and Windows file times often move in ~16 ms steps, so two
+        # quick toggles looked like no change. The file is a few KB.
+        checksum = zlib.crc32(modlist.read_bytes())
     except OSError:
         return None
-    key = (list_stat.st_mtime_ns, list_stat.st_size, dir_mtime)
+    key = (list_stat.st_mtime_ns, list_stat.st_size, dir_mtime, checksum)
     cached = _mod_count_cache.get(str(modlist))
     if cached is not None and cached[0] == key:
         return cached[1]
@@ -626,7 +711,7 @@ def count_active_mods(
 
 
 #: modlist.txt path -> (its stamp, counts); one entry per profile.
-_mod_count_cache: dict[str, tuple[tuple[int, int, int], tuple[int, int]]] = {}
+_mod_count_cache: dict[str, tuple[tuple[int, int, int, int], tuple[int, int]]] = {}
 
 
 class NoWheelComboBox(QComboBox):
@@ -853,7 +938,7 @@ def resume_after_shutdown() -> None:
     _SHUTTING_DOWN = False
 
 
-def shutdown_active_runners(timeout_ms: int = 5000) -> None:
+def shutdown_active_runners(timeout_ms: int = 5000, task_timeout_ms: int | None = None) -> None:
     """Cancel and wait for all active command threads (called on app quit).
 
     ``timeout_ms`` is a budget shared across every active runner/task, not
@@ -865,6 +950,10 @@ def shutdown_active_runners(timeout_ms: int = 5000) -> None:
     (app quit) could take minutes. A single deadline, with each
     remaining-time slice shrinking as it goes, keeps the real wait
     bounded by what the caller actually asked for.
+
+    ``task_timeout_ms`` caps the plain Python tasks' share separately: a CLI
+    run deserves time to cancel cleanly (its resume bookkeeping), a network
+    probe or folder scan does not, and nothing can stop it early anyway.
     """
     begin_shutdown()
     deadline = time.monotonic() + max(0, timeout_ms) / 1000
@@ -874,6 +963,8 @@ def shutdown_active_runners(timeout_ms: int = 5000) -> None:
             runner.shutdown(timeout_ms=remaining_ms)
         except Exception:  # noqa: BLE001, S110
             pass
+    if task_timeout_ms is not None:
+        deadline = min(deadline, time.monotonic() + max(0, task_timeout_ms) / 1000)
     for task in list(_ACTIVE_TASKS):
         remaining_ms = max(0, round((deadline - time.monotonic()) * 1000))
         shutdown = getattr(task, "shutdown", None)
@@ -882,6 +973,25 @@ def shutdown_active_runners(timeout_ms: int = 5000) -> None:
                 shutdown(timeout_ms=remaining_ms)
             except Exception:  # noqa: BLE001, S110
                 pass
+
+
+def background_work_left() -> bool:
+    """True while a command or task thread is still running (after
+    ``shutdown_active_runners`` gave up waiting on it)."""
+    for runner in list(_ACTIVE_RUNNERS):
+        try:
+            if runner.is_running():
+                return True
+        except RuntimeError:
+            continue
+    for task in list(_ACTIVE_TASKS):
+        thread = getattr(task, "_thread", None)
+        try:
+            if thread is not None and thread.isRunning():
+                return True
+        except RuntimeError:
+            continue
+    return False
 
 
 def instance_window_title(title: str) -> str:
@@ -1006,6 +1116,13 @@ class CommandRunner(QObject):
         self._thread: QThread | None = None
         self._worker = None
         self._cancel_requested = False
+        # Output lines are handed to the UI in ~100 ms batches; see _on_line.
+        self._pending_lines: list[str] = []
+        self._keeping_awake = False
+        self._flush_timer = QTimer(self)
+        self._flush_timer.setSingleShot(True)
+        self._flush_timer.setInterval(100)
+        self._flush_timer.timeout.connect(self._flush_lines)
 
     @property
     def was_cancelled(self) -> bool:
@@ -1036,6 +1153,10 @@ class CommandRunner(QObject):
         self._thread = thread
         self._worker = worker
         _ACTIVE_RUNNERS.add(self)
+        # Windows: no sleeping halfway through an hours-long download.
+        if not self._keeping_awake:
+            self._keeping_awake = True
+            winpower.hold()
         thread.start()
 
     def cancel(self) -> None:
@@ -1082,12 +1203,31 @@ class CommandRunner(QObject):
         thread = self._thread
         if thread is not None:
             thread.quit()
+        self._flush_lines()  # every line must arrive before finished
         if not _SHUTTING_DOWN:
             self.finished.emit(rc, output)
 
     def _on_line(self, line: str) -> None:
-        if not _SHUTTING_DOWN:
-            self.line.emit(line)
+        # A download prints progress lines many times a second; handling each
+        # one on the GUI thread (table, bar, log) starved clicks and tab
+        # switches. Batch them, and of several progress lines for the same
+        # item and step in one batch only the newest matters.
+        if _SHUTTING_DOWN:
+            return
+        self._pending_lines.append(line)
+        if not self._flush_timer.isActive():
+            self._flush_timer.start()
+
+    def _flush_lines(self) -> None:
+        lines, self._pending_lines = self._pending_lines, []
+        if not lines or _SHUTTING_DOWN:
+            return
+        events = [parse_progress_line(strip_ansi(ln)) for ln in lines]
+        newest = {(e.name, e.operation): i for i, e in enumerate(events) if e}
+        for i, ln in enumerate(lines):
+            e = events[i]
+            if e is None or newest[(e.name, e.operation)] == i:
+                self.line.emit(ln)
 
     def _on_thread_finished(self, thread: QThread | None = None) -> None:
         # The worker thread has fully stopped; it is now safe to release the
@@ -1099,6 +1239,9 @@ class CommandRunner(QObject):
         if thread is not None and self._thread is not thread:
             return
         _ACTIVE_RUNNERS.discard(self)
+        if self._keeping_awake:
+            self._keeping_awake = False
+            winpower.release()
         self._worker = None
         self._thread = None
 
@@ -1794,7 +1937,9 @@ def dir_size(path: str | Path, *, max_entries: int | None = 200_000) -> int:
     ``os.scandir``: the entry type comes with the directory listing, so each
     file costs one ``lstat`` instead of ``Path.rglob``'s two stat calls and
     its per-path object overhead - over twice as fast on a real GAMMA tree.
-    Symlinks are neither followed nor counted.
+    Symlinks and junctions are neither followed nor counted: on Windows
+    ``gamma\\downloads`` is a junction to the download cache, which
+    ``is_dir(follow_symlinks=False)`` would otherwise walk into.
     """
     total = 0
     count = 0
@@ -1804,6 +1949,8 @@ def dir_size(path: str | Path, *, max_entries: int | None = 200_000) -> int:
             with os.scandir(stack.pop()) as entries:
                 for entry in entries:
                     try:
+                        if entry.is_junction():
+                            continue
                         if entry.is_dir(follow_symlinks=False):
                             stack.append(entry.path)
                         elif entry.is_file(follow_symlinks=False):
@@ -1925,6 +2072,18 @@ def open_in_file_manager(path: str | Path) -> bool:
     ``--new-window`` to avoid being absorbed into a running instance).
     """
     path = str(path)
+    if os.name == "nt":
+        # Explorer directly. The Linux openers below could be picked up from
+        # an MSYS2/Git Bash PATH, and Explorer shows Documents (and reports
+        # success) for a folder that doesn't exist.
+        target = Path(path)
+        if not target.exists():
+            return False
+        try:
+            os.startfile(str(target))
+            return True
+        except OSError:
+            return False
     desktop = (os.environ.get("XDG_CURRENT_DESKTOP") or "").lower()
     command: list[str] | None = None
 
@@ -2016,6 +2175,42 @@ def _raise_main_window() -> None:
             return
 
 
+def _notify_windows(title: str, message: str) -> None:
+    """A Windows notification (toast), through the tray icon.
+
+    notify-send doesn't exist on Windows, so update notices, the crash
+    notice and the "still running in the tray" hint never appeared. A
+    message needs a tray icon to come from: COMMANDER's own when it shows
+    one, else a temporary one, gone again once the message has had its
+    time. Clicking it brings COMMANDER to the front; the buttons the Linux
+    card can carry are on the window that opens.
+    """
+    from PySide6.QtWidgets import QSystemTrayIcon
+
+    app = QApplication.instance()
+    if app is None or not QSystemTrayIcon.isSystemTrayAvailable():
+        return
+    tray = None
+    for widget in QApplication.topLevelWidgets():
+        own = getattr(widget, "_tray", None)
+        if isinstance(own, QSystemTrayIcon) and own.isVisible():
+            tray = own
+            break
+    temporary = tray is None
+    if temporary:
+        tray = QSystemTrayIcon(QApplication.windowIcon(), app)
+        tray.setToolTip("STALKER COMMANDER")
+        tray.show()
+    try:
+        tray.messageClicked.disconnect(_raise_main_window)
+    except (RuntimeError, TypeError):
+        pass  # not connected yet
+    tray.messageClicked.connect(_raise_main_window)
+    tray.showMessage(title, message, QApplication.windowIcon(), 10000)
+    if temporary:
+        QTimer.singleShot(15000, tray, tray.deleteLater)
+
+
 def notify_desktop(
     title: str,
     message: str,
@@ -2035,6 +2230,9 @@ def notify_desktop(
     ``actions`` is a (label, callback) button that does the same first.
     The desktop draws the card itself - its colours follow the system theme.
     """
+    if os.name == "nt":
+        _notify_windows(title, message)
+        return
     exe = shutil.which("notify-send")
     if exe is None:
         return
@@ -2398,7 +2596,9 @@ class ProgressArea(QWidget):
 
         self.table = ProgressTable(self) if show_table else None
 
-        self.status_label = QLabel(self._status_idle)
+        # Parented now: setVisible() on a parentless label makes it a top-level window
+        # that flashes on screen until a layout adopts it.
+        self.status_label = QLabel(self._status_idle, self)
         self.status_label.setObjectName("info")
         self.status_label.setVisible(show_status)
 
@@ -2553,6 +2753,7 @@ class ProgressArea(QWidget):
         self._paused = False
         if self.table is not None:
             self.table.reset()
+        wintaskbar.end(self, None)
         self.status_label.setText(self._status_idle)
         if not self._bar_follows_log and self._show_status:
             self.status_label.show()
@@ -2724,6 +2925,7 @@ class ProgressArea(QWidget):
         self.bar.setValue(0)
         # The console stays collapsed until the user opens it.
         self.bar.setFormat(tr("Starting"))
+        wintaskbar.begin(self)
 
     def on_finished(self, rc: int, output: str) -> None:
         self.cancel_button.hide()
@@ -2731,7 +2933,9 @@ class ProgressArea(QWidget):
         self._paused = False
         from ..settings import cli_ok
 
-        if cli_ok(rc, output, ""):
+        ok = cli_ok(rc, output, "")
+        wintaskbar.end(self, ok)
+        if ok:
             self.bar.setRange(0, 1)
             self.bar.setValue(1)
             self.bar.setFormat(tr("Finished"))
@@ -2756,6 +2960,7 @@ class ProgressArea(QWidget):
         self._paused = False
         if self.table is not None:
             self.table.mark_interrupted()
+        wintaskbar.end(self, None)
         self.bar.setRange(0, 1)
         self.bar.setValue(0)
         self.bar.setFormat(tr("Cancelled"))

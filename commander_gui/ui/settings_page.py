@@ -8,6 +8,7 @@ control. Themes and the UI scale apply live.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer
@@ -47,12 +48,13 @@ from ..launcher import (
     find_extra_protons,
     launch_detached,
 )
-from ..self_update import commander_appimage_path
+from ..self_update import commander_appimage_path, commander_windows_install_dir
 from ..steam_shortcuts import (
     ShortcutsFileError,
     add_to_steam,
 )
 from ..themes import (
+    FONT_FAMILIES,
     LIVE_THEMES,
     LIVE_TIME_CHOICES,
     THEME_INFO,
@@ -609,6 +611,9 @@ class SettingsPage(QWidget):
             button = _tab(tr(name), "subTab")
             self.tab_group.addButton(button, index)
             halves[index >= 4].addWidget(button)
+            # Graphics is MangoHud/vkBasalt (Vulkan layers on Linux).
+            if os.name == "nt" and key == "graphics":
+                button.hide()  # hide(), never setVisible(True): unparented, that flashes a window
             page = getattr(self, f"_{key}_tab")()
             body.addWidget(page)
             self._tab_pages.append(page)
@@ -670,11 +675,11 @@ class SettingsPage(QWidget):
                 tr("Choose the page COMMANDER opens when it starts."),
                 self._start_page_combo,
             ),
-            _setting_row(
+            *(() if os.name == "nt" else (_setting_row(  # Deck Mode: SteamOS-only
                 tr("When COMMANDER starts"),
                 tr("Open the desktop interface or Steam Deck Mode."),
                 self._deck_mode_combo,
-            ),
+            ),)),
         )
         layout.addWidget(startup)
 
@@ -795,6 +800,8 @@ class SettingsPage(QWidget):
             ),
         )
         layout.addWidget(runner)
+        # Runner, Winecfg and the Wine DPI scale are Linux-only.
+        runner.setVisible(os.name != "nt")
 
         display, box = _card(tr("MO2 display"))
         self._display_scale_combo = _combo(200)
@@ -818,6 +825,20 @@ class SettingsPage(QWidget):
             ),
         )
         layout.addWidget(display)
+        display.setVisible(os.name != "nt")
+
+        gpu, box = _card(tr("Graphics card"))
+        self._gpu_check = QCheckBox(tr("Use the high-performance graphics card"))
+        self._gpu_check.toggled.connect(self._on_gpu_toggled)
+        _rows(
+            box,
+            _check_row(
+                self._gpu_check,
+                tr("On laptops with two graphics cards, the game runs on the faster one. A choice you made in Windows' graphics settings stays as it is."),
+            ),
+        )
+        layout.addWidget(gpu)
+        gpu.setVisible(os.name == "nt")  # Windows' per-app GPU preference
 
         folders, box = _card(
             tr("Folders"),
@@ -835,6 +856,13 @@ class SettingsPage(QWidget):
         )
         layout.addWidget(folders)
         return page
+
+    def _on_gpu_toggled(self, on: bool) -> None:
+        from .. import wingpu
+
+        gui_settings.save_gui_settings(high_performance_gpu=on)
+        profile = self.window.settings.active_profile
+        wingpu.sync(profile.anomaly if profile is not None else "")
 
     # ---------------------------------------------------------------- folders
     def _load_folders(self) -> None:
@@ -884,7 +912,7 @@ class SettingsPage(QWidget):
             self.anomaly_edit.setText(anomaly)
             self.gamma_edit.setText(gamma)
             self.cache_edit.setText(cache)
-            if bad := wine_unsafe_folder(anomaly, gamma):
+            if os.name != "nt" and (bad := wine_unsafe_folder(anomaly, gamma)):  # a Wine-only problem
                 warn_wine_unsafe_folder(self, bad)
                 self._load_folders()
                 return
@@ -958,13 +986,7 @@ class SettingsPage(QWidget):
             tr("Applies immediately, unless a background task is running."),
         )
         self._font_family_combo = _combo()
-        for family in (
-            "Exo 2",
-            "Noto Sans",
-            "DejaVu Sans",
-            "Liberation Sans",
-            "Inter",
-        ):
+        for family in FONT_FAMILIES:
             self._font_family_combo.addItem(family, family)
         self._font_family_combo.currentIndexChanged.connect(self._on_font_family)
         self._font_size_combo = _combo()
@@ -988,7 +1010,8 @@ class SettingsPage(QWidget):
             tr("A short click when you press a button, a tab or a tray menu item."),
         )
         # No switch for a sound that isn't shipped (yet).
-        click_sounds_row.setVisible((project_root() / "commander_gui" / "assets" / "click.wav").is_file())
+        if not (project_root() / "commander_gui" / "assets" / "click.wav").is_file():
+            click_sounds_row.hide()
         self._live_animation_check = QCheckBox(tr("Live theme animation"))
         self._live_animation_check.toggled.connect(self._on_live_animation_toggled)
         self._lights_check = QCheckBox(tr("Christmas lights"))
@@ -1184,6 +1207,10 @@ class SettingsPage(QWidget):
                 "Add COMMANDER and its Deck Mode to your Steam library, "
                 "so you can launch either one straight from Steam "
                 "(including Big Picture and Game Mode) without using "
+                "Steam's own \"Add a Non-Steam Game\" dialog."
+            ) if os.name != "nt" else tr(
+                "Add COMMANDER to your Steam library, so you can launch it "
+                "straight from Steam (including Big Picture) without using "
                 "Steam's own \"Add a Non-Steam Game\" dialog."
             ),
             add_btn,
@@ -1394,7 +1421,17 @@ class SettingsPage(QWidget):
         kind = tr("Unstable") if unstable else tr("Stable")
         self._build_label.setText(kind)
         tint(self._build_label, WARN if unstable else OK_GREEN)
-        appimage = commander_appimage_path() is not None
+        windows_installed = os.name == "nt" and commander_windows_install_dir() is not None
+        if os.name == "nt" and not windows_installed:
+            # The portable zip or a source checkout: nothing to switch with
+            # (and the note below talks about git and the AUR); those
+            # Windows builds come from the Releases page.
+            box = getattr(self, "_build_box", None)
+            if box is not None:
+                box.setVisible(False)
+            return
+        # The installed Windows build switches through Setup, as it updates.
+        appimage = windows_installed or commander_appimage_path() is not None
         if unstable:
             self._switch_build_button.setText(tr("Go back to the stable build"))
             self._switch_build_button.setEnabled(appimage)
@@ -1497,7 +1534,7 @@ class SettingsPage(QWidget):
         added = tr(
             "\"STALKER COMMANDER\" and \"STALKER COMMANDER DECK\" are now in "
             "your Steam library."
-        )
+        ) if os.name != "nt" else tr("\"STALKER COMMANDER\" is now in your Steam library.")
         if not steam_running():
             try:
                 add_to_steam(vdf_path, restart=False)
@@ -1951,6 +1988,9 @@ class SettingsPage(QWidget):
         self._update_notify_check.blockSignals(True)
         self._update_notify_check.setChecked(bool(state.get("update_notifications", True)))
         self._update_notify_check.blockSignals(False)
+        self._gpu_check.blockSignals(True)
+        self._gpu_check.setChecked(bool(state.get("high_performance_gpu", True)))
+        self._gpu_check.blockSignals(False)
         self._developer_check.blockSignals(True)
         self._developer_check.setChecked(state["developer_mode"])
         self._developer_check.blockSignals(False)

@@ -123,6 +123,7 @@ class DiscordIpcTest(unittest.TestCase):
         with self.assertRaises(ConnectionError):
             _IpcClient(ours)._recv()
 
+    @unittest.skipIf(os.name == "nt", 'Unix sockets')
     def test_sockets_of_other_users_are_skipped(self):
         from commander_gui import discord_rpc
 
@@ -165,7 +166,11 @@ def test_raw_repo_url_quotes_branch_and_z_drive_is_case_insensitive():
     )
     url = updates._raw_repo_url(profile, "version.txt")
     assert "#" not in url and "?" not in url
-    assert launcher.mo2_path_to_host("z:\\home\\x") == "/home/x"
+    if os.name == "nt":
+        # A real Z: drive on Windows, not Wine's view of the Linux root.
+        assert launcher.mo2_path_to_host("z:\\home\\x") == "z:\\home\\x"
+    else:
+        assert launcher.mo2_path_to_host("z:\\home\\x") == "/home/x"
 
 
 def test_proton_release_tag_and_host_checked():

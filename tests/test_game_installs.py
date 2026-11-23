@@ -1,3 +1,4 @@
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -29,6 +30,7 @@ WINDOWS_INI = (
 )
 
 
+@unittest.skipIf(os.name == "nt", "converts a Windows install for Linux")
 class GameInstallsTest(unittest.TestCase):
     def test_find_and_fix_windows_copy(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -108,6 +110,7 @@ MOUNTINFO = (
 )
 
 
+@unittest.skipIf(os.name == "nt", "converts a Windows install for Linux")
 class WindowsDriveTest(unittest.TestCase):
     def test_finds_folders_on_a_windows_drive(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -121,6 +124,7 @@ class WindowsDriveTest(unittest.TestCase):
             self.assertIsNone(windows_drive_folder(on_ntfs, mountinfo=str(Path(tmp) / "missing")))
 
 
+@unittest.skipIf(os.name == "nt", "converts a Windows install for Linux")
 class CopyInstallTest(unittest.TestCase):
     def _install(self, root: Path) -> tuple[str, str, str]:
         (root / "Anomaly" / "bin").mkdir(parents=True)
@@ -162,3 +166,27 @@ class CopyInstallTest(unittest.TestCase):
             with self.assertRaises(FileExistsError):
                 copy_install(install, target, 30, lambda d, t: None, lambda: False)
             self.assertEqual(list((target / "GAMMA").iterdir()), [])
+
+
+@unittest.skipUnless(os.name == "nt", "Windows only")
+class NativeWindowsInstallTest(unittest.TestCase):
+    def test_a_native_install_is_never_rewritten_for_linux(self):
+        from commander_gui.game_installs import (
+            fix_windows_paths,
+            needs_fix,
+            split_cache,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            anomaly, gamma = Path(tmp) / "Anomaly", Path(tmp) / "GAMMA"
+            (anomaly / "bin").mkdir(parents=True)
+            (gamma / "downloads").mkdir(parents=True)
+            ini = gamma / "ModOrganizer.ini"
+            escaped = str(anomaly).replace("\\", "\\\\")
+            text = f"gamePath=@ByteArray({escaped})\nbase_directory={gamma.as_posix()}\n"
+            ini.write_text(text)
+            self.assertFalse(needs_fix(anomaly, gamma))
+            self.assertEqual(fix_windows_paths(anomaly, gamma), [])
+            self.assertEqual(ini.read_text(), text)
+            self.assertEqual(split_cache(gamma, gamma / "downloads"), str(gamma / "downloads"))
+            self.assertTrue((gamma / "downloads").is_dir())

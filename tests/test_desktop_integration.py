@@ -81,6 +81,7 @@ class MenuEntryTest(unittest.TestCase):
         icon.start()
         self.addCleanup(icon.stop)
 
+    @unittest.skipIf(os.name == "nt", '.desktop menu entries are Linux only')
     def test_writes_entry_with_name_icon_and_marker(self):
         path = di.ensure_menu_entry()
         self.assertEqual(path, self.home / "applications" / "stalker-gamma-commander.desktop")

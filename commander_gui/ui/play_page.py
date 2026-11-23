@@ -34,7 +34,15 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .. import applog, coop, gui_settings, launch_options, overlays
+from .. import (
+    applog,
+    coop,
+    gui_settings,
+    launch_options,
+    lossless_win,
+    overlays,
+    wingpu,
+)
 from ..assistant_launcher import AssistantLaunchError, launch_assistant
 from ..config import logs_dir
 from ..discord_rpc import (
@@ -123,6 +131,7 @@ from .common import (
     mo2_running,
     notice,
     notify_desktop,
+    page_file_ok,
     pick_shortcuts_vdf,
     play_click_sound,
     populate_runner_combo,
@@ -134,7 +143,7 @@ from .common import (
     wine_unsafe_folder,
 )
 from .dialogs import MessageBox as QMessageBox
-from .frame_gen_card import FrameGenCard
+from .frame_gen_card import FrameGenCard, WindowsFrameGenCard
 from .game_splash import is_launcher
 from .install_page import _resume_state_matches
 from .multiplayer_page import confirm_player_name, refuse_launch
@@ -202,8 +211,24 @@ def _kill_stray_debuggers(runner_env: dict[str, str] | None) -> None:
     kill_stray_debuggers(runner_env)
 
 
+def display_command(command: list[str]) -> str:
+    r"""A command as the player would type it: Windows quoting on Windows
+    ("C:\Program Files\..." in double quotes), shell quoting elsewhere."""
+    if os.name == "nt":
+        return subprocess.list2cmdline([os.path.normpath(part) if os.path.isabs(part) else part for part in command])
+    return shlex.join(command)
+
+
 def cpu_has_avx(cpuinfo: str = "/proc/cpuinfo") -> bool:
     """The CPU runs the AVX builds of the game; True when it can't be told."""
+    if os.name == "nt" and cpuinfo == "/proc/cpuinfo":
+        try:
+            import ctypes
+
+            # PF_AVX_INSTRUCTIONS_AVAILABLE; no /proc/cpuinfo to read here.
+            return bool(ctypes.windll.kernel32.IsProcessorFeaturePresent(39))
+        except (AttributeError, OSError):
+            return True
     try:
         return " avx " in f" {Path(cpuinfo).read_text(errors='replace').split('flags', 2)[1].splitlines()[0]} "
     except (OSError, IndexError):
@@ -424,6 +449,11 @@ class PlayPage(QWidget):
         #: had open (see mo2_pids() docstring).
         self._pre_launch_mo2_pids: set[int] = set()
         self._mo2_launch_pids: set[int] = set()
+        #: This launch's MO2 handed the game to an MO2 the user already had
+        #: open (MO2 is single-instance) and exited: the session follows the
+        #: game instead, until _handoff_deadline if the game never appears.
+        self._handed_off = False
+        self._handoff_deadline = 0.0
         #: The actual game executable's basename (not MO2's own exe) and
         #: its pre-launch pids, so playtime can be recorded when the game
         #: itself exits instead of waiting for MO2 (which stays open
@@ -511,6 +541,15 @@ class PlayPage(QWidget):
         )
         self.manage_proton_button.clicked.connect(self._manage_protons)
         grid.addWidget(self.manage_proton_button, 4, 0)
+        if os.name == "nt":
+            # Windows runs MO2 natively: no runner, GameMode or Proton-GE.
+            for widget in (
+                divider, self.runner_combo, self.runner_hint,
+                self.gamemode_check, self.manage_proton_button,
+            ):
+                widget.hide()
+            grid.itemAtPosition(0, 0).layout().itemAt(0).widget().hide()
+            grid.setColumnStretch(0, 0)
 
         grid.addLayout(make_header_row("Launch target"), 0, 2)
         self.target_combo = QComboBox()
@@ -530,7 +569,6 @@ class PlayPage(QWidget):
         self.shortcut_button.setToolTip(
             tr("Create a desktop shortcut for the selected target and runner.")
         )
-        self.shortcut_button.setVisible(os.name != "nt")
         self.shortcut_button.clicked.connect(self._add_desktop_shortcut)
         grid.addWidget(self.shortcut_button, 4, 2)
         root.addWidget(config_card)
@@ -652,7 +690,8 @@ class PlayPage(QWidget):
         cards_row = reflow.row(16)
         self._cards_row = cards_row
         cards_row.addWidget(options_card, 3)
-        self._frame_gen = FrameGenCard(self.custom_options_edit.text, self.custom_options_edit.setText)
+        card_class = WindowsFrameGenCard if os.name == "nt" else FrameGenCard
+        self._frame_gen = card_class(self.custom_options_edit.text, self.custom_options_edit.setText)
         self._frame_gen.dll_changed.connect(self._refresh_preview)
         # The overlay's Frame generation tab works on this text.
         graphics_window.connect_options(
@@ -663,6 +702,12 @@ class PlayPage(QWidget):
         )
         cards_row.addWidget(self._frame_gen, 2)
         root.addLayout(cards_row)
+        if os.name == "nt":
+            # The options are Linux wrappers/variables (MangoHud, gamescope,
+            # Wine), and no Windows ones are verified for Anomaly/GAMMA. The
+            # text field stays (hidden): Frame generation keeps its settings
+            # in it.
+            options_card.hide()
 
         # _refresh_preview_inner() still writes the resolved launch command
         # into this (setPlainText/setStyleSheet) as part of deciding
@@ -941,7 +986,7 @@ class PlayPage(QWidget):
             self.direct_button.setEnabled(False)
             self._build_chips(ok=False, runner=None)
             return
-        self.preview_label.setPlainText(shlex.join(command))
+        self.preview_label.setPlainText(display_command(command))
         self.preview_label.setStyleSheet("")
         # Anomaly-direct availability is independent of the MO2/target
         # pipeline: with only Anomaly installed, Launch Anomaly must work.
@@ -1017,7 +1062,8 @@ class PlayPage(QWidget):
         proton_text = (
             f"Proton-GE: {proton_version}" if proton_version else tr("Proton-GE: none")
         )
-        chips.append((proton_text, bool(proton_version)))
+        if os.name != "nt":
+            chips.append((proton_text, bool(proton_version)))
         # GameMode (only if installed AND enabled in Settings)
         if gui_settings.load_gui_settings().get("always_gamemoderun"):
             gamemoderun = available_commands().get("gamemoderun")
@@ -1102,6 +1148,11 @@ class PlayPage(QWidget):
         Wine leaves it unlocked, and the game runs borderless, so the overlay
         can take focus from it. Undone with the overlay key set to Off (the
         lock; the screen mode stays as picked)."""
+        if os.name == "nt":
+            # The overlay is a Wine/X11 panel; on Windows it never starts, so
+            # switching the game to borderless every launch only took the
+            # player's fullscreen away (with the setting hidden).
+            return
         on = gui_settings.load_gui_settings().get("graphics_overlay_key") != "off"
         # Nice to have: a read-only prefix or user.ltx never stops the launch.
         try:
@@ -1302,6 +1353,7 @@ class PlayPage(QWidget):
             if not no_mo2:
                 unblock_mo2_python(profile.gamma)
             coop.prepare_launch(profile.anomaly, profile.gamma, profile.mo2_profile)
+            wingpu.sync(profile.anomaly)
             base_fields = self._coop_shortcut_fields(profile, "")
             fields = with_coop_options(base_fields)
         except (LaunchError, coop.CoopError, OSError) as exc:
@@ -1587,12 +1639,16 @@ class PlayPage(QWidget):
                 self._set_launch_button_state(False)
                 warn_wine_unsafe_folder(self, bad)
                 return
+            if not open_mo2 and not page_file_ok(self):
+                self._set_launch_button_state(False)
+                return
             if not direct:
                 try:
                     unblock_mo2_python(profile.gamma)
                     coop.prepare_launch(profile.anomaly, profile.gamma, profile.mo2_profile)
                 except (OSError, coop.CoopError):
                     pass  # MO2 shows its own error then.
+            wingpu.sync(profile.anomaly)  # Windows: the laptop's fast graphics card
         self._launch_status_clear_timer.stop()
         # A crash-dump poll from the previous session must not fire a
         # warning attributed to this brand-new one (e.g. a quick retry
@@ -1616,10 +1672,15 @@ class PlayPage(QWidget):
                 if direct
                 else ("Mod Organizer 2" if open_mo2 else "GAMMA")
             )
-            monitoring_mo2 = not direct and os.name != "nt"
+            # Windows too, now that winproc gives exe_pids() a process list:
+            # without it the session "ended" when ModOrganizer.exe exited,
+            # which is at once when another MO2 was already open.
+            monitoring_mo2 = not direct
             snapshot = self._session_snapshot(monitoring_mo2, open_mo2)
             if not open_mo2:
                 self._show_splash(coop_launch)
+            if os.name == "nt" and not open_mo2 and profile is not None:
+                self._start_lossless_scaling(profile.anomaly)
             self._proc = launch_detached(
                 command, env, cwd, log_path=log_path, registry=self._registry
             )
@@ -1650,6 +1711,16 @@ class PlayPage(QWidget):
             return
         self._start_launch_timer(label, command, log_path)
         self._set_result(tr("Launching {name}", name=label))
+
+    def _start_lossless_scaling(self, anomaly) -> None:
+        """Windows frame generation: write the game's profile into Lossless
+        Scaling's settings and start it with the game. Never stops a launch."""
+        try:
+            text = self.custom_options_edit.text()
+            if lossless_win.write_profiles(text, Path(anomaly)) == "ok":
+                lossless_win.start()
+        except Exception as exc:  # noqa: BLE001 - frame generation must not block the game
+            applog.get_logger().warning("Lossless Scaling setup failed: %s", exc)
 
     def _start_launch_timer(self, label: str, command: list[str], log_path: Path | None) -> None:
         # Use a repeating timer to detect fast failures without delaying recovery,
@@ -1733,6 +1804,8 @@ class PlayPage(QWidget):
         self._steam_launch = False
         self._pre_launch_mo2_pids = pre_launch_mo2_pids
         self._mo2_launch_pids = set()
+        self._handed_off = False
+        self._handoff_deadline = 0.0
         self._game_exe_name = game_exe_name
         self._pre_launch_game_pids = pre_launch_game_pids
         self._game_seen = False
@@ -2120,6 +2193,19 @@ class PlayPage(QWidget):
                             error=True,
                         )
                         return
+                    adopted = self._host_pids() & self._pre_launch_mo2_pids
+                    if adopted and self._game_exe_name and not self._no_mo2_session:
+                        # It came and went between two ticks, handing the
+                        # launch to the MO2 already open (see below).
+                        self._mo2_seen = True
+                        self._handed_off = True
+                        self._handoff_deadline = time.monotonic() + 60
+                        self._mo2_launch_pids = set(adopted)
+                        self._launch_timer.setInterval(2000)
+                        applog.get_logger().info(
+                            "play: launch handed to the MO2 already open pids=%s", adopted
+                        )
+                        return
                     # On some runner setups (confirmed via commander.log on
                     # a real system: umu-run/GE-Proton here) the wrapper
                     # process does not detach after starting MO2 - it
@@ -2173,6 +2259,45 @@ class PlayPage(QWidget):
                 if self._no_mo2_session:
                     # The launcher exits once it has started the game.
                     self._mo2_launch_pids |= host_pids - self._pre_launch_mo2_pids
+                if getattr(self, "_handed_off", False):
+                    # Following the game in the user's own MO2: done once
+                    # the game has come and gone (playtime is recorded
+                    # above), or never came, or that MO2 closed.
+                    if (
+                        self._game_exe_name is None
+                        or not (host_pids & self._mo2_launch_pids)
+                        or (not self._game_seen and time.monotonic() > self._handoff_deadline)
+                    ):
+                        applog.get_logger().info(
+                            "play: handed-off session over (game_seen=%s)", self._game_seen
+                        )
+                        if self._game_exe_name is not None and self._game_seen:
+                            self._record_playtime()
+                        self._check_for_crash()
+                        self._finish_launch(tr("{name} closed normally.", name=label))
+                        return
+                    self._set_result(
+                        tr("Game is running") if self._game_seen else tr("Mod Organizer 2 is running")
+                    )
+                    return
+                adopted = host_pids & self._pre_launch_mo2_pids
+                if (
+                    not (host_pids & self._mo2_launch_pids)
+                    and adopted
+                    and self._game_exe_name
+                    and not self._game_seen
+                    and not self._no_mo2_session
+                ):
+                    # This launch's MO2 exited without the game appearing,
+                    # while the MO2 that was already open stays: it was
+                    # handed the launch. Follow the game from there.
+                    self._handed_off = True
+                    self._handoff_deadline = time.monotonic() + 60
+                    self._mo2_launch_pids = set(adopted)
+                    applog.get_logger().info(
+                        "play: launch handed to the MO2 already open pids=%s", adopted
+                    )
+                    return
                 if not (host_pids & self._mo2_launch_pids):
                     applog.get_logger().info(
                         "play: mo2 exited, finishing launch (game_seen=%s)",
@@ -2253,7 +2378,7 @@ class PlayPage(QWidget):
                     label, code, "\n  ".join(detail.splitlines()),
                 )
                 msg = tr("{name} closed with an error (code {code})", name=label, code=code)
-                details = tr("Command: {command}", command=shlex.join(command))
+                details = tr("Command: {command}", command=display_command(command))
                 if detail:
                     details += "\n\n" + tr("Last log lines:") + f"\n{detail}"
                 self._set_result(msg, error=True)
@@ -2467,11 +2592,12 @@ class PlayPage(QWidget):
             command, env, cwd = self._resolve_command(
                 open_mo2=False, direct=False, runner=runner
             )
-            # Copied somewhere permanent first: inside an AppImage the
-            # bundled PNG lives in a /tmp mount that vanishes on exit.
-            from ..steam_shortcuts import bundled_icon, install_icon
+            # Linux: copied somewhere permanent first, since inside an
+            # AppImage the bundled PNG lives in a /tmp mount that vanishes on
+            # exit. Windows: COMMANDER.exe's own icon.
+            from ..steam_shortcuts import shortcut_icon
 
-            icon = install_icon(bundled_icon())
+            icon = shortcut_icon()
             path = write_desktop_shortcut(target, command, env, cwd, icon=icon or None)
         except (LaunchError, OSError) as exc:
             QMessageBox.warning(self, tr("Couldn't create the shortcut"), str(exc))
@@ -2494,12 +2620,16 @@ class PlayPage(QWidget):
             return None
         if not (coop.is_active(profile.anomaly) if coop_launch is None else coop_launch):
             return None
+        if os.name == "nt":
+            return None  # no COMMANDER splash on Windows: keep the engine's
         return game_splash.splash_arguments(self._target_exe())
 
     def _show_splash(self, coop_launch: bool | None) -> None:
         """COMMANDER's splash in place of the engine's (co-op launches)."""
         profile = self.window.settings.active_profile
-        if profile is None:
+        if profile is None or os.name == "nt":
+            # The splash talks to COMMANDER through SIGUSR1/2 (POSIX only);
+            # Windows keeps the engine's own splash.
             return
         self._close_splash()
         exe = self._target_exe()

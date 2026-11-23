@@ -12,6 +12,7 @@ notes, the per-addon changes and the update options.
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import time
@@ -36,7 +37,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .. import gui_settings, modded_exes
+from .. import gui_settings, modded_exes, winprep
 from ..atomic import write_bytes
 from ..cli_runner import cli_command, cli_resume_args
 from ..game_backup import backup_settings_before
@@ -594,7 +595,10 @@ class UpdatePage(QWidget):
         except OSError:
             # An older snapshot left in place would make "Undo Last Update"
             # restore the wrong list, so it goes, and the user is told.
-            snapshot.unlink(missing_ok=True)
+            try:
+                snapshot.unlink(missing_ok=True)
+            except OSError:
+                pass  # locked on Windows (an editor, antivirus): told below all the same
             self.window.statusBar().showMessage(
                 tr("Couldn't save a copy of the mod list before updating, so Undo last update won't be available."),
                 10000,
@@ -996,6 +1000,32 @@ class UpdatePage(QWidget):
 
         if not confirm_singleplayer(self, profile, tr("updating GAMMA")):
             return
+        if (
+            os.name == "nt"
+            and profile is not None
+            and profile.gamma
+            and profile.cache
+            and Path(profile.gamma).expanduser().is_dir()  # else the CLI says what's wrong
+        ):
+            # update apply makes gamma\downloads a symlink to the cache when
+            # it is missing, which needs admin rights and stops the update.
+            # A junction needs none (see winprep.py). Installs from another
+            # PC or GOG are the ones without one.
+            try:
+                Path(profile.cache).expanduser().mkdir(parents=True, exist_ok=True)
+                linked = winprep.make_downloads_link(profile.gamma, profile.cache)
+            except OSError:
+                linked = False
+            if not linked:
+                QMessageBox.warning(
+                    self,
+                    tr("GAMMA can't be updated yet"),
+                    tr(
+                        "COMMANDER couldn't link GAMMA's downloads folder to the cache folder:\n{folder}\n\nPick a cache folder on a local drive in Settings > Game.",
+                        folder=profile.cache,
+                    ),
+                )
+                return
         # A resumed run keeps the snapshot and kept state from the run that
         # stopped: that run may already have replaced the modlist, so taking
         # them again would save GAMMA's list instead of the user's.

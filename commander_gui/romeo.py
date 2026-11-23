@@ -31,6 +31,7 @@ from pathlib import Path
 from threading import Event
 
 from . import atomic
+from .config import git_binary
 from .coop import _swap_dir
 from .mod_install import ModInstallError
 from .modlist import read_lines, save_lines
@@ -72,13 +73,17 @@ def unpacked_size(archiver: Path, archive: Path) -> int | None:
     """Total unpacked bytes from 7-Zip's listing summary, None if unknown."""
     try:
         out = subprocess.run(
-            [str(archiver), "l", "-p", "--", str(archive)],
+            [str(archiver), "l", "-p", "-sccUTF-8", "--", str(archive)],
             stdin=subprocess.DEVNULL, capture_output=True, text=True,
-            errors="replace", timeout=30, check=False,
+            encoding="utf-8", errors="replace", timeout=30, check=False,
         ).stdout
     except (OSError, subprocess.TimeoutExpired):
         return None
-    lines = [line for line in out.splitlines() if line.strip()]
+    # A 7z saved as .zip ends with a "Warnings: 1" count after the summary.
+    lines = [
+        line for line in out.splitlines()
+        if line.strip() and not re.match(r"^(?:Warnings|Errors): \d+$", line)
+    ]
     match = re.match(r"^(?:\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)?\s+(\d+)\s", lines[-1]) if lines else None
     return int(match.group(1)) if match else None
 
@@ -276,10 +281,10 @@ def _restore_atmos(appdata: Path, cache: Path) -> bool:
     from .config import child_environment
     from .integrity import _gamma_repo
 
-    git, repo = shutil.which("git"), _gamma_repo(cache)
+    git, repo = git_binary(), _gamma_repo(cache)
     if git is None or repo is None:
         return False
-    base = [git, "-c", f"safe.directory={repo}", "--git-dir", str(repo)]
+    base = [git, "-c", f"safe.directory={Path(repo).as_posix()}", "--git-dir", str(repo)]
     env = {**child_environment(), "GIT_TERMINAL_PROMPT": "0"}
     try:
         names = subprocess.run(

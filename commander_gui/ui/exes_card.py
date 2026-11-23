@@ -36,6 +36,7 @@ class ModdedExesCard:
         self.window = window
         self._on_installed = on_installed
         self._releases: list[dict] = []
+        self._releases_failed = False  # stops refresh() re-fetching in a loop after an error
         self._task: StreamTask | None = None
         self._list_task: BackgroundTask | None = None
 
@@ -116,7 +117,7 @@ class ModdedExesCard:
         self.install_button.setEnabled(idle and self.versions.currentData() is not None)
         self.versions.setEnabled(idle)
         self.cancel_button.setVisible(busy)
-        if not self._releases and self._list_task is None:
+        if not self._releases and self._list_task is None and not self._releases_failed:
             self._load_releases()
 
     def _load_releases(self) -> None:
@@ -143,6 +144,7 @@ class ModdedExesCard:
         self.versions.addItem(tr("Couldn't load releases. Check your connection."), None)
         self._list_task = None
         self._releases = []
+        self._releases_failed = True
         self.refresh()
 
     # ------------------------------------------------------------- actions

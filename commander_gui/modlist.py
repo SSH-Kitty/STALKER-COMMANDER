@@ -25,6 +25,17 @@ def _valid_name(name: str) -> bool:
     return bool(name) and name not in {".", ".."} and not _BAD_NAME_CHARS.search(name)
 
 
+def _same_name(a: str, b: str) -> bool:
+    """Whether two mod/separator names mean the same ``mods`` folder.
+
+    Windows folders ignore case, and so does MO2 there: "My Mod" and
+    "my mod" are one folder. Compared exactly, a mod typed in another case
+    looked like a leftover folder, and "Replace" then deleted the listed
+    mod's files.
+    """
+    return a.lower() == b.lower() if os.name == "nt" else a == b
+
+
 def _reject_status_prefix(name: str) -> None:
     """Reject names that would collide with MO2's +/- status prefix."""
     if name[:1] in "+-":
@@ -180,7 +191,7 @@ def count_mods(lines: list[str], mods_dir: str | Path | None = None) -> tuple[in
     for status, name in entries(lines):
         if separator_name(name) is not None:
             continue
-        if folders is not None and name not in folders:
+        if folders is not None and (name.lower() if os.name == "nt" else name) not in folders:
             continue
         if name in seen:
             continue
@@ -192,10 +203,12 @@ def count_mods(lines: list[str], mods_dir: str | Path | None = None) -> tuple[in
 
 
 def _mod_folders(mods_dir: str | Path) -> set[str]:
-    """Names of the folders (or links to folders) in ``mods_dir``."""
+    """Names of the folders (or links to folders) in ``mods_dir``,
+    lowercased on Windows, where a folder's case doesn't matter."""
     try:
         with os.scandir(mods_dir) as it:
-            return {entry.name for entry in it if entry.is_dir()}
+            names = {entry.name for entry in it if entry.is_dir()}
+            return {name.lower() for name in names} if os.name == "nt" else names
     except OSError:
         return set()
 
@@ -456,8 +469,43 @@ def save_lines(path: str | Path, lines: list[str]) -> None:
                 newline = "\r\n"
     except OSError:
         pass
+    old = _separator_names(path.read_text(encoding="utf-8", errors="replace").splitlines()) if path.is_file() else set()
     write_text(path, newline.join(lines) + newline)
     ensure_separator_folders(path, lines)
+    _remove_dropped_separator_folders(path, old - _separator_names(lines))
+
+
+def _separator_names(lines: list[str]) -> set[str]:
+    names: set[str] = set()
+    for line in lines:
+        try:
+            info = _line_info(line)
+        except ValueError:
+            continue
+        if info is not None and separator_name(info[1]) is not None:
+            names.add(info[1])
+    return names
+
+
+def _remove_dropped_separator_folders(modlist: Path, dropped: set[str]) -> None:
+    """Delete the folder of a category that was deleted or renamed.
+
+    MO2 adds any ``mods/`` folder missing from modlist.txt back to the list,
+    so a leftover ``<name>_separator`` folder made a deleted or renamed
+    category come back on the next launch. Only a folder holding nothing but
+    the ``meta.ini`` of a separator is removed.
+    """
+    mods = modlist.parent.parent.parent / "mods"
+    if modlist.parent.parent.name != "profiles" or not mods.is_dir():
+        return
+    for name in dropped:
+        folder = mods / name
+        try:
+            if folder.is_dir() and not folder.is_symlink() and [p.name for p in folder.iterdir()] == ["meta.ini"]:
+                (folder / "meta.ini").unlink()
+                folder.rmdir()
+        except OSError:
+            continue
 
 
 #: What MO2 itself writes into a separator's folder.
@@ -642,7 +690,7 @@ def add_mod(
     _reject_status_prefix(name)
     if name.endswith("_separator"):
         raise ValueError("A mod name cannot end in '_separator'")
-    if any(mod_name == name for _, mod_name in entries(lines)):
+    if any(_same_name(mod_name, name) for _, mod_name in entries(lines)):
         raise ValueError(f"Mod {name!r} is already in the modlist")
     line = ("+" if enabled else "-") + name
     out = list(lines)
@@ -709,7 +757,7 @@ def install_conflict(lines: list[str], mods_dir: str | Path, name: str) -> str |
     destination = Path(mods_dir) / name
     if not destination.exists() and not destination.is_symlink():
         return None
-    if any(mod_name == name for _, mod_name in entries(lines)):
+    if any(_same_name(mod_name, name) for _, mod_name in entries(lines)):
         return "listed"
     return "leftover"
 
@@ -725,7 +773,7 @@ def add_category(lines: list[str], name: str) -> list[str]:
     if not clean:
         raise ValueError("Category name cannot be empty")
     separator = f"{clean}_separator"
-    if any(mod_name == separator for _, mod_name in entries(lines)):
+    if any(_same_name(mod_name, separator) for _, mod_name in entries(lines)):
         raise ValueError(f"Category {clean!r} already exists")
     out = list(lines)
     out.append(f"-{separator}")
@@ -754,9 +802,13 @@ def rename_category(lines: list[str], old_category: str, new_category: str) -> l
     if clean == old_category:
         return list(lines)
     new_separator = f"{clean}_separator"
-    if any(mod_name == new_separator for _, mod_name in entries(lines)):
-        raise ValueError(f"Category {clean!r} already exists")
     old_separator = f"{old_category}_separator"
+    # A case-only rename ("mods" -> "Mods") is still allowed on Windows.
+    if any(
+        _same_name(mod_name, new_separator) and mod_name != old_separator
+        for _, mod_name in entries(lines)
+    ):
+        raise ValueError(f"Category {clean!r} already exists")
     out = list(lines)
     for index, line in enumerate(out):
         info = _line_info(line)
@@ -1275,7 +1327,7 @@ def add_custom_mod(lines: list[str], name: str, *, enabled: bool = False) -> lis
     _reject_status_prefix(name)
     if name.endswith("_separator"):
         raise ValueError("A mod name cannot end in '_separator'")
-    if any(mod_name == name for _, mod_name in entries(lines)):
+    if any(_same_name(mod_name, name) for _, mod_name in entries(lines)):
         raise ValueError(f"Mod {name!r} is already in the modlist")
     line = ("+" if enabled else "-") + name
 

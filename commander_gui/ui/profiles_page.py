@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import html
+import os
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer
@@ -1727,11 +1728,20 @@ class ProfilesPage(QWidget):
         # NewProfileDialog's "existing install" choice), so that
         # combination must not be blocked here.
         candidate = self._form_values()
+
+        def same_folder(a: str, b: str) -> bool:
+            # One folder, however it is spelled: on Windows "C:/Games/G",
+            # "C:\Games\G" and "c:\games\g" are all the same.
+            def norm(path: str) -> str:
+                return os.path.normcase(os.path.abspath(os.path.expanduser(path))) if path.strip() else ""
+
+            return norm(a) == norm(b)
+
         path_collision = any(
             p.profile_name != self._form_state
-            and p.anomaly == candidate.anomaly
-            and p.gamma == candidate.gamma
-            and p.cache == candidate.cache
+            and same_folder(p.anomaly, candidate.anomaly)
+            and same_folder(p.gamma, candidate.gamma)
+            and same_folder(p.cache, candidate.cache)
             and p.mo2_profile == candidate.mo2_profile
             for p in self.settings.profiles
         )

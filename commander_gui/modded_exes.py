@@ -262,14 +262,22 @@ def install(zip_path: Path, anomaly: str | Path, label: str, cancel_event: Event
                 "previous": state.get("version") if state else None,
                 "added": sorted(added),
             })
-        except BaseException:
+        except BaseException as exc:
             if first:
-                # Files the zip brought that had no original are deleted;
-                # the rest are overwritten again by _put_back().
-                for rel in placed:
-                    if not (original / rel).exists():
-                        (anomaly / rel).unlink(missing_ok=True)
-                _put_back(original, anomaly)
+                try:
+                    # Files the zip brought that had no original are deleted;
+                    # the rest are overwritten again by _put_back().
+                    for rel in placed:
+                        if not (original / rel).exists():
+                            (anomaly / rel).unlink(missing_ok=True)
+                    _put_back(original, anomaly)
+                except OSError as rollback:
+                    # Usually the lock that stopped the install (the game
+                    # still has an exe open): keep the first error visible.
+                    raise ExesError(
+                        f"Installing the modded exes failed ({exc}), and putting the original files back "
+                        f"failed too ({rollback}). Close the game and Mod Organizer 2, then try again."
+                    ) from exc
             raise
     finally:
         shutil.rmtree(staging, ignore_errors=True)

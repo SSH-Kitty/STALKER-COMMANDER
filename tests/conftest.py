@@ -19,8 +19,10 @@ simply becomes the "real" function those inner ``patch()`` calls save
 and restore around, so it changes nothing for them.
 """
 
+import atexit
 import logging
 import os
+import shutil
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -30,14 +32,50 @@ import pytest
 # No real windows: same as CI, and nothing pops up on the desktop mid-run.
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+import tempfile
+
+if os.name == "nt":
+    # GitHub's runner hands out %TEMP% as an 8.3 short path
+    # (C:\Users\RUNNER~1\...). The app resolves paths, which spells them out
+    # in full (runneradmin), so tests comparing against the short form failed
+    # on CI only. Use the long form everywhere, child processes included.
+    _long_temp = os.path.realpath(tempfile.gettempdir())
+    tempfile.tempdir = _long_temp
+    os.environ["TMP"] = os.environ["TEMP"] = _long_temp
+
+# On Windows COMMANDER keeps its settings in %APPDATA% (config.settings_dir),
+# which the XDG_* redirects below do not touch: without this, a run overwrote
+# the developer's real settings.json / gui-settings.json. Done here, at import
+# time, so setUpClass code and import-time reads are covered too, not only
+# the per-test fixture further down.
+_SESSION_HOME = Path(tempfile.mkdtemp(prefix="commander-tests-home-"))
+# Captured BEFORE the redirect below: the folder no test may ever write to.
+if os.name == "nt":
+    _REAL_SETTINGS_DIR = Path(os.environ.get("APPDATA") or Path.home() / "AppData" / "Roaming") / "stalker-gamma"
+else:
+    _REAL_SETTINGS_DIR = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "stalker-gamma"
+if os.name == "nt":
+    for _var, _sub in (
+        ("APPDATA", "AppData/Roaming"),
+        ("LOCALAPPDATA", "AppData/Local"),
+        ("XDG_DATA_HOME", "xdg-data"),
+        ("XDG_CACHE_HOME", "xdg-cache"),
+        ("XDG_CONFIG_HOME", "xdg-config"),
+    ):
+        os.environ[_var] = str(_SESSION_HOME / _sub)
+
 # Same for desktop notifications: a silent stand-in notify-send goes first
 # on PATH, so finished-task pop-ups never reach the real desktop.
-import tempfile
 
 _fake_bin = Path(tempfile.mkdtemp(prefix="commander-tests-bin-"))
 (_fake_bin / "notify-send").write_text("#!/bin/sh\nexit 0\n")
 (_fake_bin / "notify-send").chmod(0o755)
 os.environ["PATH"] = f"{_fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"
+
+# Both folders are per test process (every xdist worker makes its own): gone
+# when it exits, or each run left two more in the temp folder for good.
+for _folder in (_SESSION_HOME, _fake_bin):
+    atexit.register(shutil.rmtree, _folder, ignore_errors=True)
 
 # commander.log attaches its file once, at first use - often before any
 # fixture has pointed XDG_CONFIG_HOME away - so tests that launch, fail a
@@ -93,9 +131,45 @@ def _never_run_the_real_cli():
     still finds the bundled 7zz next to it. Tests that need CLI output patch
     ``run_sync``/``CommandRunner`` themselves, as before.
     """
-    with patch(
-        "commander_gui.cli_runner.cli_binary_path",
-        return_value=Path("/nonexistent/stalker-gamma-disabled-in-tests"),
+    # settings.run_config_command ("config create/use/delete") has its own
+    # binding of cli_binary_path. On Windows that left the real stalker-gamma.exe
+    # runnable from the Profiles-page tests, and a .NET process takes
+    # %APPDATA% from the OS rather than the environment, so it edited the
+    # developer's real settings.json whatever the redirects above say.
+    disabled = Path("/nonexistent/stalker-gamma-disabled-in-tests")
+    with (
+        patch("commander_gui.cli_runner.cli_binary_path", return_value=disabled),
+        patch("commander_gui.settings.cli_binary_path", return_value=disabled),
+    ):
+        yield
+
+
+def _elevation_disabled_in_tests(*_args, **_kwargs):
+    raise AssertionError("a test tried to run the elevated Defender/long paths step")
+
+
+@pytest.fixture(autouse=True)
+def _never_change_windows_security():
+    """No test may add Defender exclusions or turn on long paths for real.
+
+    Install pages built in tests have the Defender/long paths option ticked
+    (the default), and a developer VM or CI runner is often an administrator
+    with no UAC prompt: the suite once added a dozen exclusions for its own
+    temp folders. The elevated step fails loudly instead, and the Install
+    page skips the step altogether; tests/test_winprep.py tests it with the
+    real method, saved before this patch.
+
+    The same goes for the per-game graphics card choice (a launch writes it
+    to the real registry) and the Smart App Control notice, a modal box that
+    never closes offscreen on a PC that has it on, and the "page file too
+    small" box before a launch. tests/test_windows_extras.py tests them with
+    the real functions."""
+    with (
+        patch("commander_gui.winprep.apply", side_effect=_elevation_disabled_in_tests),
+        patch("commander_gui.ui.install_page.InstallPage._windows_prep_first", return_value=False),
+        patch("commander_gui.wingpu.sync"),
+        patch("commander_gui.winsecurity.smart_app_control_state", return_value=None),
+        patch("commander_gui.winpagefile.page_file", return_value=None),
     ):
         yield
 
@@ -174,6 +248,52 @@ def _private_data_home(tmp_path, monkeypatch):
     # (an install's resume point, window size...) otherwise wrote it into
     # the developer's real ~/.config/stalker-gamma.
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg-config"))
+    if os.name == "nt":
+        # Windows settings live in %APPDATA%, not under XDG_CONFIG_HOME.
+        monkeypatch.setenv("APPDATA", str(tmp_path / "AppData" / "Roaming"))
+        monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "AppData" / "Local"))
+    # Never let a test reach the real settings folder: fail loudly instead of
+    # silently overwriting the developer's configuration.
+    from commander_gui import config
+
+    real = Path.home() / "AppData" / "Roaming" if os.name == "nt" else Path.home() / ".config"
+    assert real not in config.settings_dir().parents and config.settings_dir() != real / "stalker-gamma", (
+        f"tests would write to the real settings folder: {config.settings_dir()}"
+    )
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _never_write_the_real_settings_folder():
+    """Last line of defence for the developer's real COMMANDER settings.
+
+    The redirects above should keep every test in its own folder, but a
+    background task finishing after its test's environment was restored, or a
+    test that clears ``os.environ``, can still land on the real path (it did
+    on Windows). Settings go through ``atomic.write_text``: refuse any write
+    under the real folder and fail the test instead of corrupting the file.
+    """
+    from commander_gui import atomic
+
+    _import_every_ui_module()
+    real_write = atomic.write_text
+    real_dir = _REAL_SETTINGS_DIR.resolve()
+
+    def guarded(path, *args, **kwargs):
+        target = Path(path).resolve()
+        if target == real_dir or real_dir in target.parents:
+            raise AssertionError(f"test tried to write the real settings folder: {target}")
+        return real_write(path, *args, **kwargs)
+
+    patches = [
+        patch.object(module, "write_text", guarded)
+        for name, module in list(sys.modules.items())
+        if name.startswith("commander_gui") and getattr(module, "write_text", None) is real_write
+    ]
+    for p in patches:
+        p.start()
+    yield
+    for p in reversed(patches):
+        p.stop()
 
 
 @pytest.fixture(autouse=True)
@@ -208,6 +328,14 @@ def pytest_collection_modifyitems(items):
     Nothing depends on the order, so the fix is to let the tests that need a
     healthy process have one.
     """
+    if os.name == "nt":
+        # Deck Mode is SteamOS-only: the Windows build leaves the Steamdeck
+        # package out (packaging/windows/commander.spec), so its tests have
+        # nothing to test here.
+        skip_deck = pytest.mark.skip(reason="Steam Deck Mode is SteamOS-only")
+        for item in items:
+            if item.path.name in ("test_steamdeck.py", "test_deck_mod_reorder.py"):
+                item.add_marker(skip_deck)
     early = ("test_steamdeck.py", "test_desktop_event_loop.py")
     # Single tests elsewhere that show a window and pump its events: run
     # late, this one segfaulted the suite intermittently.

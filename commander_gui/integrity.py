@@ -1148,7 +1148,6 @@ def restore_gamma_overlay(
     repository does not carry (``fsgame.ltx`` is written by the installer,
     not copied) are reported as failed, never guessed.
     """
-    import shutil
     import subprocess
 
     from .atomic import write_bytes
@@ -1157,7 +1156,9 @@ def restore_gamma_overlay(
     result = OverlayRestore()
     if not names:
         return result
-    git = shutil.which("git")
+    from .config import git_binary
+
+    git = git_binary()
     repo = _gamma_repo(cache_dir)
     if git is None or repo is None:
         result.failed = list(names)
@@ -1169,7 +1170,7 @@ def restore_gamma_overlay(
     env["GIT_TERMINAL_PROMPT"] = "0"
     try:
         listing = subprocess.run(
-            [git, "-c", f"safe.directory={repo}", "--git-dir", str(repo),
+            [git, "-c", f"safe.directory={Path(repo).as_posix()}", "--git-dir", str(repo),
              "ls-tree", "-r", "--name-only", "HEAD", "--", _GAMMA_PATCH_ROOT],
             capture_output=True, text=True, timeout=60, env=env, check=True,
         ).stdout.splitlines()
@@ -1192,7 +1193,7 @@ def restore_gamma_overlay(
             continue
         try:
             data = subprocess.run(
-                [git, "-c", f"safe.directory={repo}", "--git-dir", str(repo),
+                [git, "-c", f"safe.directory={Path(repo).as_posix()}", "--git-dir", str(repo),
                  "show", f"HEAD:{source}"],
                 capture_output=True, timeout=120, env=env, check=True,
             ).stdout
@@ -1265,7 +1266,7 @@ def repo_branches(profile) -> dict[str, str]:
 
 
 def _git_command(git: str, repo: Path, *args: str) -> list[str]:
-    return [git, "-c", f"safe.directory={repo}", "--git-dir", str(repo), *args]
+    return [git, "-c", f"safe.directory={Path(repo).as_posix()}", "--git-dir", str(repo), *args]
 
 
 def _git_env() -> dict[str, str]:
@@ -1319,10 +1320,11 @@ def gamma_repo_files(
     different contents is left out: which one is current depends on what an
     update touched last. So are MCM's saved settings.
     """
-    import shutil
     import subprocess
 
-    git = shutil.which("git")
+    from .config import git_binary
+
+    git = git_binary()
     downloads = Path(gamma_dir) / "downloads"
     claims: dict[str, list[RepoFile]] = {}
     unreadable: list[str] = []
@@ -1377,14 +1379,15 @@ def stray_anomaly_scripts(anomaly_dir: str, gamma_dir: str, branch: str = "main"
     be read (nothing to compare with) or COMMANDER installed the exes itself
     (their scripts belong there).
     """
-    import shutil
     import subprocess
 
     from . import coop, modded_exes
 
     anomaly = Path(anomaly_dir).expanduser()
     scripts = anomaly / _SCRIPTS_DIR
-    git = shutil.which("git")
+    from .config import git_binary
+
+    git = git_binary()
     repo = Path(gamma_dir).expanduser() / "downloads" / f"{_GAMMA_REPO}"
     if not scripts.is_dir() or git is None or modded_exes.load_state(anomaly):
         return []
@@ -1494,14 +1497,15 @@ def restore_repo_files(
     it is written (atomically), and the snapshot is told about it, so the
     next check doesn't report the repaired file as changed.
     """
-    import shutil
     import subprocess
 
     from .atomic import write_bytes
 
     result = RepoRepairResult()
     rels = [rel for rel in rels if rel in files]
-    git = shutil.which("git")
+    from .config import git_binary
+
+    git = git_binary()
     if git is None:
         result.failed, result.reason = rels, "git is not installed"
         return result

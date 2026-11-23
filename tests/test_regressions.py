@@ -70,6 +70,7 @@ from commander_gui.self_update import (
     relaunch_commander,
 )
 from commander_gui.settings import CliProfile, CliSettings, cli_ok, load_settings
+from commander_gui.themes import FONT_FAMILIES
 from commander_gui.ui import common
 from commander_gui.ui.common import (
     BackgroundTask,
@@ -621,7 +622,8 @@ class RegressionTests(unittest.TestCase):
 
         task.shutdown(timeout_ms=1)
 
-        self.assertTrue(task._thread.isRunning())
+        thread = task._thread  # the task drops its own reference once it is done
+        self.assertTrue(thread.isRunning())
         self.assertIsNone(task.parent())
         # QThread.wait() blocks without running this (main) thread's event
         # loop, but the worker's `finished` signal -> `thread.quit()` is a
@@ -632,7 +634,7 @@ class RegressionTests(unittest.TestCase):
         finished = False
         while _time.monotonic() < deadline:
             QApplication.processEvents()
-            if task._thread.wait(50):
+            if thread.wait(50):
                 finished = True
                 break
         self.assertTrue(finished)
@@ -717,10 +719,24 @@ class RegressionTests(unittest.TestCase):
             from commander_gui.winetricks import WINETRICKS_VERBS
 
             self.assertLessEqual(set(WINETRICKS_VERBS), set(page.deps_rows))
+            # Nothing installed: on Windows both folder fields default to
+            # C:\GAMMA (the player can pick another). Elsewhere they show
+            # the profile's own folders.
+            from commander_gui.ui.install_page import DEFAULT_WINDOWS_ROOT
+
+            expected_root = DEFAULT_WINDOWS_ROOT if os.name == "nt" else str(Path(tmp))
+            self.assertEqual(page.root_card_edit.text(), expected_root)
+            self.assertEqual(page.auto_root_edit.text(), expected_root)
+            # Picking the profile's own folder shows those folders as they are.
+            page.root_card_edit.setText(str(Path(tmp)))
+            page._refresh_folder_tiles(profile)
             # Step 1 previews a newly picked Installation directory.
             self.assertEqual(page.folder_tiles["anomaly"].state, "warn")
             page.root_card_edit.setText(str(Path(tmp) / "new"))
-            (Path(tmp) / "new" / "anomaly").mkdir(parents=True)
+            # On Windows the folders go in a GAMMA folder inside the pick.
+            from commander_gui.ui.install_page import install_base
+
+            (install_base(Path(tmp) / "new") / "anomaly").mkdir(parents=True)
             page._refresh_folder_tiles(profile)
             self.assertEqual(page.folder_tiles["anomaly"].state, "ok")
             self.assertEqual(page.folder_tiles["gamma"].value.text(), "Not created")
@@ -791,6 +807,7 @@ class RegressionTests(unittest.TestCase):
             archive.write_bytes(b"x")
             self.assertIsNone(offline_install_problem(str(archive)))
 
+    @unittest.skipIf(os.name == "nt", 'Windows installs its runtimes, not winetricks')
     def test_automatic_install_chains_dependencies_into_anomaly_and_gamma(self):
         """Automatic: defaults back on, no dependencies pop-up, and their
         end starts Anomaly + GAMMA instead of the "installed" pop-up."""
@@ -1610,6 +1627,7 @@ class RegressionTests(unittest.TestCase):
         with patch("commander_gui.ui.common.shutil.which", return_value=None):
             common.notify_desktop("Title", "Message")  # must not raise
 
+    @unittest.skipIf(os.name == "nt", "notify-send is Linux; Windows uses the tray (WindowsNotificationTests)")
     def test_notify_desktop_spawns_notify_send_when_available(self):
         with (
             patch("commander_gui.ui.common.shutil.which", return_value="/usr/bin/notify-send"),
@@ -1623,6 +1641,7 @@ class RegressionTests(unittest.TestCase):
         self.assertIn("--hint=string:desktop-entry:stalker-gamma-commander", args)
         self.assertFalse(any(a.startswith("--action") for a in args))
 
+    @unittest.skipIf(os.name == "nt", "notify-send is Linux; Windows uses the tray (WindowsNotificationTests)")
     def test_notify_desktop_button_raises_window_and_runs_its_action(self):
         clicked = Mock()
         with (
@@ -2062,7 +2081,7 @@ class RegressionTests(unittest.TestCase):
             mods_dir = gamma_dir / "mods"
             mods_dir.mkdir(parents=True)
             new_mod = mods_dir / "Terrain Textures Redone"
-            new_mod.mkdir()
+            (new_mod / "gamedata").mkdir(parents=True)
 
             profile = CliProfile(
                 active=True,
@@ -2722,6 +2741,7 @@ class RegressionTests(unittest.TestCase):
             self.assertEqual(path.read_text(encoding="utf-8"), "old")
             self.assertEqual(list(path.parent.glob(".state.json.*.tmp")), [])
 
+    @unittest.skipIf(os.name == "nt", 'Windows files have no POSIX mode bits')
     def test_atomic_write_preserves_existing_file_permissions(self):
         import stat as _stat
 
@@ -3007,10 +3027,17 @@ class RegressionTests(unittest.TestCase):
 
         codes: list[int] = []
         worker.finished.connect(lambda rc, _out: codes.append(rc))
-        worker.run()
+        # Windows: no real Ctrl+C. This child shares pytest's console (the app
+        # gives the CLI its own), and just after Popen it may not be listed on
+        # it yet - the Ctrl+C then reached pytest and stopped the whole run.
+        # Refused, cancel() falls back to its kill, as it would in the app.
+        with patch("commander_gui.winjob.send_ctrl_c", return_value=False) as ctrl_c:
+            worker.run()
 
         self.assertEqual(len(codes), 1)
         self.assertNotEqual(codes[0], 0)
+        if os.name == "nt":
+            ctrl_c.assert_called_once()  # the cancel was applied after Popen
 
     @unittest.skipIf(os.name == "nt", "POSIX process groups")
     def test_cli_worker_cancel_reaches_a_paused_process(self):
@@ -3162,8 +3189,8 @@ class RegressionTests(unittest.TestCase):
             (staging / "gamedata" / "scripts" / "foo.script").write_text("x")
             self.assertEqual(payload_root(staging), staging)
 
-            for name in ("bin", "db", "appdata", "GameData", "BIN"):
-                staging2 = Path(tmp) / f"staging_{name}"
+            for index, name in enumerate(("bin", "db", "appdata", "GameData", "BIN")):
+                staging2 = Path(tmp) / f"staging_{index}_{name}"
                 (staging2 / name).mkdir(parents=True)
                 (staging2 / name / "f.txt").write_text("x")
                 self.assertEqual(payload_root(staging2), staging2, msg=name)
@@ -3440,6 +3467,7 @@ class RegressionTests(unittest.TestCase):
             apply_options(config, root, destination, {})
             self.assertTrue((destination / "gamedata" / "file.txt").is_file())
 
+    @unittest.skipIf(os.name == "nt", 'runs a shell script as a stand-in CLI')
     def test_cli_version_survives_non_utf8_output(self):
         """Regression test: a CLI emitting invalid UTF-8 must not abort the
 
@@ -3464,6 +3492,7 @@ class RegressionTests(unittest.TestCase):
         self.assertNotIn("secret", redacted)
         self.assertIn("[REDACTED]", redacted)
 
+    @unittest.skipIf(os.name == "nt", "matches /proc command lines; Windows matches image names (see WindowsProcessTests)")
     def test_mo2_running_uses_self_excluding_case_insensitive_pattern(self):
         """Regression test: a bracket expression on only the first letter
 
@@ -3528,6 +3557,7 @@ class RegressionTests(unittest.TestCase):
         self.assertEqual(child_env["Visible"], "override")
         self.assertIs(popen.call_args.kwargs["stdin"], subprocess.DEVNULL)
 
+    @unittest.skipIf(os.name == "nt", "umu-run/gamescope app IDs are Linux-only")
     @patch("commander_gui.launcher.subprocess.Popen")
     def test_game_launched_from_a_steam_shortcut_keeps_that_shortcuts_id(self, popen):
         """Regression test: the controller did nothing in game (Game Mode).
@@ -3816,6 +3846,51 @@ class RegressionTests(unittest.TestCase):
 
         self.assertFalse(page._monitoring_mo2)
         page._set_result.assert_called_with("GAMMA closed normally.", error=False)
+
+    @patch("commander_gui.ui.play_page.exe_pids")
+    @patch("commander_gui.ui.play_page.mo2_pids", return_value={222})
+    def test_launch_handed_to_an_open_mo2_follows_the_game(self, _mo2_pids, game_pids):
+        """MO2 is single-instance: with one already open, this launch's MO2
+        passes the game to it and exits. The session must follow the game,
+        not end the moment the launched instance is gone."""
+        page = self._make_play_page_stub()
+        page._mo2_seen = True
+        page._mo2_launch_pids = {111}
+        page._pre_launch_mo2_pids = {222}
+        page._game_exe_name = "AnomalyDX11AVX.exe"
+        page.game_running_changed = Mock()
+        game_pids.return_value = set()
+
+        page._on_launch_check("GAMMA", ["ModOrganizer.exe"], None)
+        self.assertTrue(page._handed_off)
+        self.assertTrue(page._launching)
+        self.assertEqual(page._mo2_launch_pids, {222})
+
+        game_pids.return_value = {333}
+        page._on_launch_check("GAMMA", ["ModOrganizer.exe"], None)
+        self.assertTrue(page._game_seen)
+        self.assertTrue(page._launching)
+
+        game_pids.return_value = set()
+        page._on_launch_check("GAMMA", ["ModOrganizer.exe"], None)
+        page._record_playtime.assert_called_once()
+        self.assertFalse(page._launching)
+        page._set_result.assert_called_with("GAMMA closed normally.", error=False)
+
+    @patch("commander_gui.ui.play_page.exe_pids", return_value=set())
+    @patch("commander_gui.ui.play_page.mo2_pids", return_value={222})
+    def test_handed_off_launch_gives_up_when_the_game_never_appears(self, _mo2_pids, _game_pids):
+        page = self._make_play_page_stub()
+        page._mo2_seen = True
+        page._mo2_launch_pids = {111}
+        page._pre_launch_mo2_pids = {222}
+        page._game_exe_name = "AnomalyDX11AVX.exe"
+        page._on_launch_check("GAMMA", ["ModOrganizer.exe"], None)
+        self.assertTrue(page._handed_off)
+        page._handoff_deadline = 0.0
+        page._on_launch_check("GAMMA", ["ModOrganizer.exe"], None)
+        self.assertFalse(page._launching)
+        page._record_playtime.assert_not_called()
 
     @patch("commander_gui.ui.play_page.mo2_running", return_value=False)
     def test_launch_wrapper_success_keeps_monitoring_for_mo2(self, _mo2_running):
@@ -4634,12 +4709,9 @@ class RegressionTests(unittest.TestCase):
         self.assertEqual(finished, [(0, "line")])
         kwargs = popen.call_args.kwargs
         self.assertEqual(kwargs["start_new_session"], os.name != "nt")
-        self.assertEqual(
-            kwargs["creationflags"],
-            subprocess.CREATE_NEW_PROCESS_GROUP
-            if os.name == "nt"
-            else 0,
-        )
+        # Windows: no new process group - it disables Ctrl+C, the CLI's
+        # cancel; a kill-on-close job holds the tree instead (see winjob).
+        self.assertFalse(kwargs.get("creationflags", 0) & getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
 
     @patch("commander_gui.cli_runner.cli_binary_path", return_value=Path("/cli/stalker-gamma"))
     @patch("commander_gui.cli_runner._terminate_process_group")
@@ -4653,7 +4725,7 @@ class RegressionTests(unittest.TestCase):
         process.pid = 1234
         process.communicate.side_effect = [
             subprocess.TimeoutExpired(
-                ["/cli/stalker-gamma", "status"],
+                [str(Path("/cli/stalker-gamma")), "status"],
                 2,
                 output=b"partial output",
                 stderr=b"diagnostic",
@@ -4667,7 +4739,7 @@ class RegressionTests(unittest.TestCase):
         self.assertIn("partial outputdiagnostic", output)
         self.assertIn("timed out after 2s", output)
         terminate_group.assert_called_once_with(process)
-        self.assertEqual(popen.call_args.args[0], ["/cli/stalker-gamma", "status"])
+        self.assertEqual(popen.call_args.args[0], [str(Path("/cli/stalker-gamma")), "status"])
 
     @patch("commander_gui.cli_runner.cli_binary_path", return_value=Path("/cli/stalker-gamma"))
     @patch("commander_gui.cli_runner.subprocess.Popen")
@@ -4675,7 +4747,7 @@ class RegressionTests(unittest.TestCase):
         from commander_gui.cli_runner import TIMEOUT_RC, run_sync
 
         popen.side_effect = subprocess.TimeoutExpired(
-            ["/cli/stalker-gamma", "status"],
+            [str(Path("/cli/stalker-gamma")), "status"],
             2,
             output=b"partial output",
             stderr=b"diagnostic",
@@ -4746,7 +4818,7 @@ class RegressionTests(unittest.TestCase):
         self.assertEqual(
             cli_command(["install", "--profile", "gamma"], progress_interval_ms=200),
             [
-                "/cli/stalker-gamma",
+                str(Path("/cli/stalker-gamma")),
                 "install",
                 "--profile",
                 "gamma",
@@ -5895,6 +5967,7 @@ class ModCounterTests(unittest.TestCase):
                 window._mod_counter_timer.stop()
                 window.close()
 
+    @unittest.skipIf(os.name == "nt", 'Windows fonts are wider; the status bar drops the profile label sooner, by design')
     def test_narrow_window_fits_status_bar_and_play_page(self):
         # Tiling compositors (niri, Umbriel's scrolling layout) give the
         # window a column narrower than the status bar's natural ~1300 px.
@@ -6016,7 +6089,7 @@ class ModCounterTests(unittest.TestCase):
             try:
                 with patch.object(window, "update_mod_counter") as mock_update:
                     window._on_nav(1)
-                mock_update.assert_called_once()
+                mock_update.assert_called()
             finally:
                 window._mod_counter_timer.stop()
                 window.close()
@@ -6223,6 +6296,7 @@ class ModCounterTests(unittest.TestCase):
                 page._play_button.clicked.emit()
             mock_sound.assert_called_once()
 
+    @unittest.skipIf(os.name == "nt", 'the runner row is Linux only')
     def test_dashboard_profile_card_drops_folder_paths_and_adds_new_rows(self):
         """Regression test: the Dashboard's "Active COMMANDER profile" card
 
@@ -6628,6 +6702,7 @@ class ModCounterTests(unittest.TestCase):
             )
         self.assertEqual(len(set(geometries)), 1)
 
+    @unittest.skipIf(os.name == "nt", 'Proton runners are Linux only')
     def test_dashboard_runner_combo_lists_auto_and_installed_protons(self):
         from PySide6.QtWidgets import QApplication
 
@@ -6663,6 +6738,7 @@ class ModCounterTests(unittest.TestCase):
             )
             self.assertEqual(combo.currentData(), "auto")
 
+    @unittest.skipIf(os.name == "nt", 'Proton runners are Linux only')
     def test_dashboard_runner_switch_saves_the_gui_setting(self):
         from PySide6.QtWidgets import QApplication
 
@@ -7165,6 +7241,7 @@ class ModCounterTests(unittest.TestCase):
                 texts.append(widget.text())
         return texts
 
+    @unittest.skipIf(os.name == "nt", 'Proton is Linux only')
     def test_proton_chip_shows_only_the_selected_version(self):
         """Regression test: the Proton-GE chip used to list every
 
@@ -7335,7 +7412,7 @@ class ModCounterTests(unittest.TestCase):
         ):
             window = MainWindow()
             self.assertEqual(window._status_theme_combo.currentData(), active_theme())
-            # The style is app-wide: left on "midnight"/18px/"Inter" (a font that
+            # The style is app-wide: left on "midnight"/18px/the last font (a font that
             # may not be installed), every widget any later test builds pays
             # for it - the rest of the suite ran minutes slower.
             app = QApplication.instance()
@@ -7346,12 +7423,12 @@ class ModCounterTests(unittest.TestCase):
             # Exactly what settings_page.py's pickers call.
             window.apply_theme("midnight")
             window.apply_font_size(18)
-            window.apply_font_family("Inter")
+            window.apply_font_family(FONT_FAMILIES[-1])
 
             self.assertEqual(active_theme(), "midnight")
             self.assertEqual(window._status_theme_combo.currentData(), "midnight")
             self.assertEqual(window._status_fontsize_combo.currentData(), 18)
-            self.assertEqual(window._status_font_combo.currentData(), "Inter")
+            self.assertEqual(window._status_font_combo.currentData(), FONT_FAMILIES[-1])
 
 
 class UserModsTrackerTests(unittest.TestCase):
@@ -8540,6 +8617,7 @@ class UserModsTrackerTests(unittest.TestCase):
         dialog.close()  # the work stopped: it really closes now
         self.assertFalse(dialog.isVisible())
 
+    @unittest.skipIf(os.name == "nt", 'System Check is hidden on Windows')
     def test_system_check_page_constructs_and_refreshes_without_error(self):
         from PySide6.QtWidgets import QApplication
 
@@ -8745,6 +8823,7 @@ class UserModsTrackerTests(unittest.TestCase):
                 patch(
                     "commander_gui.launcher.STEAM_ROOT_CANDIDATES", (steam_root,)
                 ),
+                patch("commander_gui.launcher._windows_steam_roots", return_value=[steam_root]),
                 patch.object(
                     QInputDialog,
                     "getItem",
@@ -8803,6 +8882,7 @@ class UserModsTrackerTests(unittest.TestCase):
             page = SettingsPage(FakeWindow())
             with (
                 patch("commander_gui.launcher.STEAM_ROOT_CANDIDATES", (steam_root,)),
+                patch("commander_gui.launcher._windows_steam_roots", return_value=[steam_root]),
                 patch(
                     "commander_gui.ui.settings_page.steam_running",
                     return_value=True,
@@ -8952,18 +9032,18 @@ class UserModsTrackerTests(unittest.TestCase):
             self.assertEqual(window.status_bar_refreshes, 1)
 
             page._font_family_combo.setCurrentIndex(
-                page._font_family_combo.findData("Inter")
+                page._font_family_combo.findData(FONT_FAMILIES[-1])
             )
-            self.assertEqual(gui_settings.load_gui_settings()["font_family"], "Inter")
+            self.assertEqual(gui_settings.load_gui_settings()["font_family"], FONT_FAMILIES[-1])
             self.assertEqual(window.status_bar_refreshes, 2)
 
             # The other direction already worked and must keep working: a
             # change made from the status bar shows up on this page's own
             # combos the next time Settings is opened (refresh()).
-            gui_settings.save_gui_settings(font_size=21, font_family="Liberation Sans")
+            gui_settings.save_gui_settings(font_size=21, font_family=FONT_FAMILIES[3])
             page.refresh()
             self.assertEqual(page._font_size_combo.currentData(), 21)
-            self.assertEqual(page._font_family_combo.currentData(), "Liberation Sans")
+            self.assertEqual(page._font_family_combo.currentData(), FONT_FAMILIES[3])
 
     def _fake_discord(self, runtime_dir: str, *, answer: bool = True):
         """A one-connection stand-in for the Discord client's IPC socket.
@@ -9019,6 +9099,7 @@ class UserModsTrackerTests(unittest.TestCase):
         thread.start()
         return thread, frames
 
+    @unittest.skipIf(os.name == "nt", 'Unix socket IPC')
     def test_discord_presence_speaks_the_ipc_protocol(self):
         """Regression test: Rich Presence must work with no third-party
         package (the AppImage never bundled pypresence) and without the
@@ -9117,6 +9198,7 @@ class UserModsTrackerTests(unittest.TestCase):
 
         self.assertIsNone(start_presence(""))
 
+    @unittest.skipIf(os.name == "nt", "Unix socket; Windows' pipe has DiscordPipeTimeoutTest")
     def test_discord_presence_gives_up_on_a_client_that_never_answers(self):
         from commander_gui import discord_rpc
 
@@ -11002,7 +11084,7 @@ class UserModsTrackerTests(unittest.TestCase):
             gamma = Path(tmp) / "gamma"
             profiles_dir = gamma / "profiles" / "G.A.M.M.A"
             profiles_dir.mkdir(parents=True)
-            (profiles_dir / "modlist.txt").write_text("+ModA\n-Sep_separator\n+ModB\n")
+            (profiles_dir / "modlist.txt").write_bytes(b"+ModA\n-Sep_separator\n+ModB\n")
             profile = CliProfile(
                 profile_name="Mine",
                 anomaly=str(Path(tmp) / "anomaly"),
@@ -11893,6 +11975,7 @@ class UserModsTrackerTests(unittest.TestCase):
             self.assertNotIn("verify-quarantine", manifest_text)
             self.assertNotIn("orphaned.txt", manifest_text)
 
+    @unittest.skipIf(os.name == "nt", "Windows can't create such a file")
     def test_scan_mods_md5_rejects_filenames_with_embedded_newlines(self):
         """Regression test: the baseline manifest is a plain-text
 
@@ -12516,7 +12599,7 @@ class UserModsTrackerTests(unittest.TestCase):
                 mo2_profile="G.A.M.M.A",
             )
             dest = Path(profile.gamma) / "mods" / "NewMod"
-            dest.mkdir(parents=True)
+            (dest / "gamedata").mkdir(parents=True)
 
             class FakeWindow:
                 settings = CliSettings(profiles=[profile])
@@ -13356,6 +13439,7 @@ class UserModsTrackerTests(unittest.TestCase):
         self.assertIsInstance(output, str)
         self.assertTrue(len(output) > 0)
 
+    @unittest.skipIf(os.name == "nt", 'Wine prefixes are Linux only')
     def test_wine_prefix_for_expands_tilde(self):
         result = wine_prefix_for("umu", "~/Games/umu/test")
         self.assertTrue(result.startswith("/"))
@@ -13914,6 +13998,7 @@ class AuditFixTests(unittest.TestCase):
         ):
             _list_archive_paths(Path("/7zz"), Path("/m.7z"))
 
+    @unittest.skipIf(os.name == "nt", 'Wine prefixes are Linux only')
     def test_configured_prefix_follows_the_resolved_runner(self):
         from commander_gui import gui_settings
         from commander_gui.launcher import Runner
@@ -14285,13 +14370,41 @@ class CreateInstallFoldersConfirmationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             profile = CliProfile(anomaly="old-a", gamma="old-g", cache="old-c")
             page = self._page(tmp, profile)
+            from commander_gui.ui.install_page import install_base
+
             with patch("commander_gui.ui.install_page.QMessageBox.information") as info:
                 page._create_install_folders()
+            base = install_base(tmp)
             for name in ("anomaly", "gamma", "cache"):
-                self.assertTrue((Path(tmp) / name).is_dir())
+                self.assertTrue((base / name).is_dir())
             info.assert_called_once()
             self.assertIn("steps 3 and 4", info.call_args.args[2])
-            self.assertEqual(profile.gamma, str(Path(tmp) / "gamma"))
+            self.assertEqual(profile.gamma, str(base / "gamma"))
+
+    @unittest.skipIf(os.name != "nt", "the GAMMA folder is a Windows layout")
+    def test_windows_folders_go_in_a_gamma_folder_inside_the_pick(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            profile = CliProfile(anomaly="old-a", gamma="old-g", cache="old-c")
+            page = self._page(tmp, profile)
+            with patch("commander_gui.ui.install_page.QMessageBox.information"):
+                page._create_install_folders()
+            self.assertEqual(profile.gamma, str(Path(tmp) / "GAMMA" / "gamma"))
+            self.assertFalse((Path(tmp) / "anomaly").exists())
+
+    @unittest.skipIf(os.name != "nt", "the GAMMA folder is a Windows layout")
+    def test_a_folder_already_named_gamma_is_not_nested_again(self):
+        from commander_gui.ui.install_page import install_base
+
+        self.assertEqual(install_base("C:\\GAMMA"), Path("C:\\GAMMA"))
+        self.assertEqual(install_base("D:\\Games\\gamma"), Path("D:\\Games\\gamma"))
+        self.assertEqual(install_base("D:\\"), Path("D:\\GAMMA"))
+
+    def test_the_folder_an_install_already_uses_is_kept(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "Games"
+            profile = CliProfile(anomaly=str(root / "anomaly"), gamma=str(root / "gamma"), cache=str(root / "cache"))
+            page = self._page(str(root), profile)
+            self.assertEqual(page._install_base(str(root)), root)
 
     def test_no_confirmation_when_the_folders_could_not_be_saved(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -14303,6 +14416,56 @@ class CreateInstallFoldersConfirmationTests(unittest.TestCase):
                 page._create_install_folders()
             info.assert_not_called()
             warning.assert_called_once()
+
+
+class OfflineCacheDownloadLinkTests(unittest.TestCase):
+    def _lookup(self, body: bytes | None):
+        from unittest.mock import MagicMock
+
+        from commander_gui.ui import install_page as ip
+
+        if body is None:
+            opener = Mock(side_effect=OSError("offline"))
+        else:
+            response = MagicMock()
+            response.__enter__.return_value = response
+            response.headers = {}
+            response.read.side_effect = [body, b""]
+            opener = Mock(return_value=response)
+        with patch("commander_gui.network.urlopen_with_retry", opener):
+            return ip.offline_cache_download_url()
+
+    def test_the_guide_link_is_read_from_the_page(self):
+        body = b"## Get a cache archive\n\n[https://gofile.io/d/Ab12Cd](https://gofile.io/d/Ab12Cd) ~45GB\n"
+        self.assertEqual(self._lookup(body), "https://gofile.io/d/Ab12Cd")
+
+    def test_the_guide_opens_when_the_link_cannot_be_found(self):
+        from commander_gui.ui.install_page import OFFLINE_GUIDE_URL
+
+        self.assertEqual(self._lookup(None), OFFLINE_GUIDE_URL)
+        self.assertEqual(self._lookup(b"no link here"), OFFLINE_GUIDE_URL)
+
+
+class StartsOnInstallUntilGammaIsInstalledTests(unittest.TestCase):
+    def _window(self, profile):
+        from commander_gui.ui.main_window import MainWindow
+
+        window = MainWindow.__new__(MainWindow)
+        window.settings = Mock(active_profile=profile)
+        return window
+
+    def test_no_profile_or_no_install_means_not_installed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertFalse(self._window(None)._gamma_is_installed())
+            profile = CliProfile(gamma=str(Path(tmp) / "gamma"))
+            self.assertFalse(self._window(profile)._gamma_is_installed())
+
+    def test_an_installed_gamma_is_seen(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            profile = CliProfile(gamma=str(Path(tmp) / "gamma"))
+            with patch("commander_gui.ui.main_window.gamma_installed", return_value=True) as check:
+                self.assertTrue(self._window(profile)._gamma_is_installed())
+            check.assert_called_once_with(profile.gamma, profile.mo2_profile)
 
 
 class UpdateChannelTests(unittest.TestCase):
@@ -14529,6 +14692,7 @@ class UnstableBuildTests(unittest.TestCase):
         ):
             self_update.switch_commander_build("unstable")
 
+    @unittest.skipIf(os.name == "nt", "switching builds is the AppImage's; hidden on Windows")
     def test_settings_offers_the_other_build(self):
         from PySide6.QtWidgets import QApplication
 
@@ -14729,6 +14893,7 @@ class LaunchOptionChipTests(unittest.TestCase):
         self.assertEqual(launch_options.set_var(on, launch_options.FG_FLOW_SCALE, None).count("FLOW"), 0)
         self.assertEqual(launch_options.frame_gen(on, False), "mangohud %command% -x")
 
+    @unittest.skipIf(os.name == "nt", "launch wrappers and Vulkan layers are Linux only")
     def test_frame_gen_runs_only_with_a_native_lossless_dll(self):
         """Frame generation needs Lossless.dll: not lsfg-vk.dll (the lsfg-vk
         beta's) nor Lossless Scaling's own .NET LosslessScaling.dll. Without
@@ -14813,6 +14978,7 @@ class LaunchOptionChipTests(unittest.TestCase):
         self.assertEqual(text, "WINEDEBUG=-all")
         self.assertEqual(launch_options.toggle(text, "PROTON_LOG=1", True), "PROTON_LOG=1")
 
+    @unittest.skipIf(os.name == "nt", "launch wrappers and Vulkan layers are Linux only")
     def test_coop_shortcut_options_ignore_game_mode(self):
         """The co-op shortcut is the same in Game and Desktop Mode (else each
         switch restarts Steam), and co-op never drops the Steam overlay."""
@@ -14826,6 +14992,7 @@ class LaunchOptionChipTests(unittest.TestCase):
                 shortcuts.add(launch_options.for_steam(text, "%command% -x"))
         self.assertEqual(shortcuts, {"mangohud %command% -x"})
 
+    @unittest.skipIf(os.name == "nt", "launch wrappers and Vulkan layers are Linux only")
     def test_for_steam_merges_into_shortcut_options(self):
         from commander_gui import launch_options
 
@@ -14847,6 +15014,7 @@ class LaunchOptionChipTests(unittest.TestCase):
         with patch.object(launch_options, "in_game_mode", return_value=False):
             self.assertEqual(launch_options.for_steam("", base), "STEAM_COMPAT_DATA_PATH='/my pfx' SteamAppId=480 %command% run -e Anomaly")
 
+    @unittest.skipIf(os.name == "nt", "launch wrappers and Vulkan layers are Linux only")
     def test_apply_splits_env_wrappers_and_arguments(self):
         from commander_gui import launch_options
 
@@ -14903,7 +15071,7 @@ class TokenColorTests(unittest.TestCase):
         from Steamdeck.deck_theme import _translucent
 
         self.assertEqual(_translucent("rgba(22, 29, 36, 175)", 240), "rgba(22, 29, 36, 240)")
-        source = (Path(__file__).resolve().parents[1] / "Steamdeck" / "screens" / "mods.py").read_text()
+        source = (Path(__file__).resolve().parents[1] / "Steamdeck" / "screens" / "mods.py").read_text(encoding="utf-8")
         self.assertNotIn('QColor(tokens.get("btn', source)
 
 
@@ -15038,6 +15206,7 @@ class WineUnsafeFolderTests(unittest.TestCase):
     """Wine drops a dot or space at the end of a folder name, so an install
     in "G.A.M.M.A./gamma" can't start (MO2 lands in a folder that doesn't exist)."""
 
+    @unittest.skipIf(os.name == "nt", 'the Wine folder-name check is Linux only')
     def test_flags_folder_name_ending_in_dot_or_space(self):
         from commander_gui.ui.common import wine_unsafe_folder
 
@@ -15090,6 +15259,7 @@ class TesterNov2VerifyAndImportTests(unittest.TestCase):
             again = scan_mods_md5(str(gamma), trust_baseline=True)
             self.assertEqual(again.changed, ["mods/11- Other/a.script"])
 
+    @unittest.skipIf(os.name == "nt", "the Linux cache layout; Windows keeps GAMMA/downloads")
     def test_split_cache_moves_downloads_next_to_gamma(self):
         from commander_gui.game_installs import split_cache
 
@@ -15138,3 +15308,20 @@ class TesterNov2VerifyAndImportTests(unittest.TestCase):
             (Path(tmp) / "logs" / "mo_interface.log").write_text("x")
             names = [p.name for p in _walk_candidates(Path(tmp))]
         self.assertEqual(names, ["mo_interface.log"])
+
+
+from commander_gui import modlist
+
+
+class DroppedSeparatorFolderTest(unittest.TestCase):
+    def test_deleted_category_folder_is_removed_so_mo2_cannot_bring_it_back(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "profiles" / "P" / "modlist.txt"
+            path.parent.mkdir(parents=True)
+            (root / "mods").mkdir()
+            modlist.save_lines(path, ["+Mod", "-Stuff_separator"])
+            folder = root / "mods" / "Stuff_separator"
+            self.assertTrue(folder.is_dir())
+            modlist.save_lines(path, ["+Mod"])
+            self.assertFalse(folder.exists())

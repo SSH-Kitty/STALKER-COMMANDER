@@ -43,6 +43,18 @@ from .dialogs import MessageBox, add_buttons, style_window
 #: Mount points worth listing as drives; the rest are system mounts.
 _DRIVE_ROOTS = ("/run/media/", "/media/", "/mnt/", "/home")
 _SKIP_FS = {"tmpfs", "devtmpfs", "squashfs", "overlay", "proc", "sysfs", "ramfs", "efivarfs"}
+#: A Windows volume root as QStorageInfo reports it ("C:/").
+_WINDOWS_DRIVE = re.compile(r"^[A-Za-z]:/$")
+#: FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM: $RECYCLE.BIN, System Volume Information.
+_WINDOWS_HIDDEN = 0x2 | 0x4
+
+
+def looks_like_path(text: str) -> bool:
+    r"""Typed text that is a path to go to, not a filter: ``/x``, ``~``,
+    and on Windows ``D:\...`` or a ``\\server\share``."""
+    if text.startswith(("/", "~")):
+        return True
+    return os.name == "nt" and (re.match(r"^[A-Za-z]:[\\/]", text) is not None or text.startswith("\\\\"))
 
 
 def parse_filters(text: str) -> list[tuple[str, list[str]]]:
@@ -65,14 +77,23 @@ def drives() -> list[tuple[str, Path, int]]:
         root = volume.rootPath()
         if not (volume.isValid() and volume.isReady()):
             continue
-        if root != "/" and not root.startswith(_DRIVE_ROOTS):
+        windows_drive = os.name == "nt" and _WINDOWS_DRIVE.match(root) is not None
+        if os.name == "nt" and not windows_drive:
+            continue  # mounted folders and the like; their drive is listed
+        if not windows_drive and root != "/" and not root.startswith(_DRIVE_ROOTS):
             continue
         if bytes(volume.fileSystemType()).decode(errors="ignore") in _SKIP_FS:
             continue
         total = volume.bytesTotal()
         used = round(100 * (total - volume.bytesAvailable()) / total) if total > 0 else 0
-        name = "/" if root == "/" else (volume.name() or Path(root).name)
+        if windows_drive:
+            letter = root[:2].upper()
+            name = f"{volume.name()} ({letter})" if volume.name() else letter
+        else:
+            name = "/" if root == "/" else (volume.name() or Path(root).name)
         found.append((name, Path(root), used))
+    if os.name == "nt":
+        return sorted(found, key=lambda d: str(d[1]).lower())  # C:, D:, E: ...
     return sorted(found, key=lambda d: (str(d[1]) != "/", d[0].lower()))
 
 
@@ -270,43 +291,65 @@ class _Picker(QDialog):
         self.filter_edit.setClearButtonEnabled(True)
         self.filter_edit.setFixedWidth(240)
         self.filter_edit.setMinimumHeight(34)
-        self.filter_edit.textChanged.connect(lambda _t: self._render())
+        # Filtered as the user stops typing, from the folder's cached scan:
+        # rescanning on every key froze on network and sleeping drives.
+        self._filter_timer = QTimer(self)
+        self._filter_timer.setSingleShot(True)
+        self._filter_timer.setInterval(150)
+        self._filter_timer.timeout.connect(lambda: self._render(rescan=False))
+        self.filter_edit.textChanged.connect(lambda _t: self._filter_timer.start())
         self.filter_edit.returnPressed.connect(self._typed_path)
         bar.addWidget(self.filter_edit)
         return bar
 
     # ------------------------------------------------------------- listing
-    def _render(self) -> None:
-        self._render_crumbs()
-        typed = self.filter_edit.text().strip()
-        needle = "" if typed.startswith(("/", "~")) else typed.lower()
-        patterns = self._patterns()
-        self.listing.clear()
+    def _scan(self) -> list[tuple[str, str, bool, bool]] | None:
+        """``(name, path, is folder, hidden)`` for the current folder, or None
+        when it can't be read."""
         try:
             entries = list(os.scandir(self.current))
         except OSError:
-            entries = None
-        folders, files = [], []
-        for entry in entries or ():
-            if entry.name.startswith(".") and not (self.show_hidden or needle.startswith(".")):
-                continue
-            if needle and needle not in entry.name.lower():
-                continue
+            return None
+        scanned = []
+        for entry in entries:
             try:
                 is_dir = entry.is_dir()
+                hidden = entry.name.startswith(".")
+                if os.name == "nt" and not hidden:
+                    # Cached by scandir on Windows: no extra call per entry.
+                    hidden = bool(getattr(entry.stat(follow_symlinks=False), "st_file_attributes", 0) & _WINDOWS_HIDDEN)
             except OSError:
                 continue
+            scanned.append((entry.name, entry.path, is_dir, hidden))
+        return scanned
+
+    def _render(self, rescan: bool = True) -> None:
+        self._render_crumbs()
+        typed = self.filter_edit.text().strip()
+        needle = "" if looks_like_path(typed) else typed.lower()
+        patterns = self._patterns()
+        self.listing.clear()
+        cached = getattr(self, "_scanned", None)
+        if rescan or cached is None or cached[0] != self.current:
+            cached = self._scanned = (self.current, self._scan())
+        entries = cached[1]
+        folders, files = [], []
+        for name, path, is_dir, hidden in entries or ():
+            if hidden and not (self.show_hidden or needle.startswith(".")):
+                continue
+            if needle and needle not in name.lower():
+                continue
             if is_dir:
-                folders.append(entry)
-            elif self.mode != "dir" and any(fnmatch.fnmatch(entry.name.lower(), p.lower()) for p in patterns):
-                files.append(entry)
-        for entry in sorted(folders, key=lambda e: e.name.lower()):
-            item = QListWidgetItem(_icon("folder", "accent"), entry.name)
-            item.setData(Qt.ItemDataRole.UserRole, entry.path)
+                folders.append((name, path))
+            elif self.mode != "dir" and any(fnmatch.fnmatch(name.lower(), p.lower()) for p in patterns):
+                files.append((name, path))
+        for name, path in sorted(folders, key=lambda e: e[0].lower()):
+            item = QListWidgetItem(_icon("folder", "accent"), name)
+            item.setData(Qt.ItemDataRole.UserRole, path)
             self.listing.addItem(item)
-        for entry in sorted(files, key=lambda e: e.name.lower()):
-            item = QListWidgetItem(_icon("file"), entry.name)
-            item.setData(Qt.ItemDataRole.UserRole, entry.path)
+        for name, path in sorted(files, key=lambda e: e[0].lower()):
+            item = QListWidgetItem(_icon("file"), name)
+            item.setData(Qt.ItemDataRole.UserRole, path)
             self.listing.addItem(item)
         if not self.listing.count():
             if entries is None:
@@ -333,7 +376,8 @@ class _Picker(QDialog):
                 sep = QLabel("›")
                 sep.setObjectName("dim")
                 self.crumb_row.addWidget(sep)
-            button = QPushButton(part.name or "/")
+            # A drive root has no name: "C:" on Windows, "/" on Linux.
+            button = QPushButton(part.name or part.drive or "/")
             button.setObjectName("crumb")
             button.setProperty("current", index == len(parts) - 1)
             button.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -378,7 +422,7 @@ class _Picker(QDialog):
 
     def _set_hidden(self, on: bool) -> None:
         self.show_hidden = on
-        self._render()
+        self._render(rescan=False)
 
     def _context_menu(self, pos) -> None:
         menu = QMenu(self)

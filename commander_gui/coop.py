@@ -46,6 +46,7 @@ from .game_backup import (
     MANIFEST,
     MCM_FILE,
     BackupError,
+    _inside,
     _safe_member,
     _write_zip,
     create_backup_of_files,
@@ -148,10 +149,14 @@ def _copy_atomic(src: Path, dst: Path) -> None:
     os.close(fd)
     try:
         shutil.copyfile(src, tmp)
-        shutil.copymode(src, tmp)  # mkstemp makes it 0600; keep the source's mode
-        os.replace(tmp, dst)
+        if os.name != "nt":
+            shutil.copymode(src, tmp)  # mkstemp makes it 0600; keep the source's mode
+        atomic.replace_file(Path(tmp), dst)
     except BaseException:
-        Path(tmp).unlink(missing_ok=True)
+        try:
+            Path(tmp).unlink(missing_ok=True)
+        except OSError:
+            pass
         raise
 
 
@@ -331,6 +336,8 @@ def install(zip_path: str | Path, anomaly, gamma, mo2_profile, progress=None, ki
                     target = staging / "mod" / name
                 else:
                     continue
+                if not _inside(staging, target):
+                    raise CoopError(f"Unsafe path in archive: {name}")
                 target.parent.mkdir(parents=True, exist_ok=True)
                 with archive.open(member) as src, open(target, "wb") as dst:
                     shutil.copyfileobj(src, dst, 1 << 20)
@@ -475,8 +482,16 @@ def switch_to_coop(anomaly, gamma, mo2_profile) -> None:
             # over the real originals.
             state["originals"] = sorted(originals)
             _save_state(anomaly, state)
-    except BaseException:
-        _restore(anomaly, root, done, originals)
+    except BaseException as exc:
+        try:
+            _restore(anomaly, root, done, originals)
+        except OSError as rollback:
+            # Usually the same lock that stopped the switch (the game still
+            # has an exe open on Windows): say so, and keep the first error.
+            raise CoopError(
+                f"Switching to co-op failed ({exc}), and putting the original files back failed too "
+                f"({rollback}). Close the game and Mod Organizer 2, then switch again."
+            ) from exc
         raise
     state["originals"] = sorted(originals)
     state["active"] = True
@@ -998,9 +1013,12 @@ def _extract(archive: zipfile.ZipFile, name: str, dest: Path) -> None:
     try:
         with os.fdopen(fd, "wb") as out, archive.open(name) as src:
             shutil.copyfileobj(src, out, 1 << 20)
-        os.replace(tmp, dest)
+        atomic.replace_file(Path(tmp), dest)
     except BaseException:
-        Path(tmp).unlink(missing_ok=True)
+        try:
+            Path(tmp).unlink(missing_ok=True)
+        except OSError:
+            pass
         raise
 
 
@@ -1015,13 +1033,24 @@ def import_session(anomaly, gamma, mo2_profile, profile_name: str, path, report=
     with zipfile.ZipFile(path) as archive:
         plan = []
         for name in archive.namelist():
-            parts = PurePosixPath(name).parts
-            if name.endswith("/") or len(parts) < 2:
+            if name.endswith("/"):
+                continue
+            member = _safe_member(name)
+            if member is None:
+                raise CoopError(f"Unsafe path in archive: {name}")
+            parts = member.parts
+            if len(parts) < 2:
                 continue
             if parts[0] in roots:
-                plan.append((name, roots[parts[0]].joinpath(*parts[1:])))
+                root = roots[parts[0]]
             elif parts[0] == "coop" and _is_mode_file(PurePosixPath(*parts[1:]).as_posix()):
-                plan.append((name, snapshot.joinpath(*parts[1:])))
+                root = snapshot
+            else:
+                continue
+            dest = root.joinpath(*parts[1:])
+            if not _inside(root, dest):
+                raise CoopError(f"Unsafe path in archive: {name}")
+            plan.append((name, dest))
         replaced = [(name, dest) for name, dest in plan if not name.startswith("coop/") and dest.is_file()]
         # Co-op on: the snapshot goes live below, over these files.
         live = _mode_files(anomaly, gamma) if is_active(anomaly) else {}

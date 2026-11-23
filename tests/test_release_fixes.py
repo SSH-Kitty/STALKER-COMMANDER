@@ -315,6 +315,7 @@ def test_unreadable_settings_are_not_reset(tmp_path):
 # --- ASSISTANT: redaction, fatal blocks, usvfs noise, size caps ------------
 
 
+@pytest.mark.skipif(os.name == "nt", reason='POSIX home folders (Windows: test_windows_port.LogScrubTests)')
 def test_redaction_is_anchored_and_covers_wine_paths():
     from assistant import report
 

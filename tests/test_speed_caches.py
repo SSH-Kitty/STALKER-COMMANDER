@@ -38,10 +38,10 @@ class IniWriteTest(unittest.TestCase):
     def test_unchanged_value_does_not_rewrite(self):
         with tempfile.TemporaryDirectory() as tmp:
             ini = Path(tmp) / "ModOrganizer.ini"
-            ini.write_text("[General]\nselected_profile=A\n")
-            os.utime(ini, ns=(1, 1))
+            ini.write_text("[General]\nselected_profile=A\n", newline="\n")
+            os.utime(ini, ns=(10**9, 10**9))
             _set_ini_value(ini, "General", "selected_profile", "A")
-            self.assertEqual(ini.stat().st_mtime_ns, 1)
+            self.assertEqual(ini.stat().st_mtime_ns, 10**9)
             _set_ini_value(ini, "General", "selected_profile", "B")
             self.assertEqual(ini.read_text(), "[General]\nselected_profile=B\n")
 

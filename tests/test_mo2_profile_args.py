@@ -20,8 +20,8 @@ class Mo2ProfileArgsTest(unittest.TestCase):
     def setUp(self):
         self.gamma = Path(tempfile.mkdtemp())
         self.ini = self.gamma / "ModOrganizer.ini"
-        self.ini.write_text(
-            "[General]\r\nselected_profile=@ByteArray(G.A.M.M.A)\r\nversion=2.5.2\r\n\r\n[Widgets]\r\nx=1\r\n"
+        self.ini.write_bytes(
+            b"[General]\r\nselected_profile=@ByteArray(G.A.M.M.A)\r\nversion=2.5.2\r\n\r\n[Widgets]\r\nx=1\r\n"
         )
 
     def test_ascii_names_still_go_through_dash_p(self):

@@ -80,11 +80,89 @@ QTPDF_HARMLESS = (
 
 
 
+#: Windows ran out of memory to give the game: almost always a page file that
+#: is turned off or capped small (commander_gui/winpagefile.py).
+_OUT_OF_MEMORY = (
+    "Windows ran out of memory for the game. Most often the page file is turned off or too small. "
+    "Open Settings > System > About > Advanced system settings, click Settings under Performance, "
+    "then Advanced > Change under Virtual memory, tick \"Automatically manage paging file size for "
+    "all drives\" and restart the PC."
+)
+
+#: Windows exit codes (NTSTATUS) with a known cause and fix.
+_WINDOWS_EXIT_CODES = {
+    0xC0000135: (  # STATUS_DLL_NOT_FOUND
+        "Windows couldn't find a file (DLL) the program needs, most often the Visual C++ or "
+        "DirectX runtime. Install them on COMMANDER's Install page (Install Dependencies), "
+        "then launch again."
+    ),
+    0xC0000142: (  # STATUS_DLL_INIT_FAILED
+        "A file (DLL) the program needs failed to start. Install the Visual C++ and DirectX "
+        "runtimes again on COMMANDER's Install page; if that doesn't help, check whether your "
+        "antivirus is blocking the game."
+    ),
+    0xC0000017: _OUT_OF_MEMORY,  # STATUS_NO_MEMORY
+    0xC000012D: _OUT_OF_MEMORY,  # STATUS_COMMITMENT_LIMIT
+    0xC000001D: (  # STATUS_ILLEGAL_INSTRUCTION
+        "The program used a processor instruction this CPU doesn't have. Pick the version of "
+        "the game without AVX, Anomaly (DX11), on COMMANDER's Play page."
+    ),
+}
+
+
+#: Exception codes in Windows' own crash reports, beyond the exit codes above.
+_WINDOWS_CRASH_CODES = {
+    0xC0000005: "The program read or wrote memory it doesn't own.",  # access violation
+    0xC0000409: "The program stopped itself after a serious internal error.",  # stack buffer overrun / fail fast
+    0xC0000374: "The program's memory got corrupted.",  # heap corruption
+    0x80000003: "The engine stopped on an error it couldn't handle.",  # breakpoint: X-Ray's fatal error
+    0xE06D7363: "The engine stopped on an error it couldn't handle.",  # unhandled C++ exception
+}
+
+
+def _report_code(code: str) -> int | None:
+    """A crash report's exception code (``c0000005``, hex without 0x) as a
+    number; None for a .NET exception name or an empty one."""
+    code = (code or "").strip()
+    if not code:
+        return None
+    return _ntstatus(code if code.lower().startswith("0x") else "0x" + code)
+
+
+def windows_crash_code(code: str) -> str:
+    """Plain meaning of an exception code from a Windows crash report, or
+    empty when it isn't known."""
+    value = _report_code(code)
+    known = _WINDOWS_CRASH_CODES.get(value) or _WINDOWS_EXIT_CODES.get(value) if value is not None else None
+    return tr(known) if known else ""
+
+
+def is_out_of_memory(code: str) -> bool:
+    return _report_code(code) in (0xC0000017, 0xC000012D)
+
+
+def out_of_memory_fix() -> str:
+    return tr(_OUT_OF_MEMORY)
+
+
+def _ntstatus(code: str) -> int | None:
+    """``code`` as an unsigned 32-bit NTSTATUS: logs write it signed
+    (-1073741515), unsigned (3221225781) or in hex (0xC0000135)."""
+    try:
+        value = int(code.strip(), 0)
+    except ValueError:
+        return None
+    return value & 0xFFFFFFFF
+
+
 def launch_exit_code(code: str) -> tuple[str, str]:
     """Title/detail pair for a non-zero exit code line."""
+    known = _WINDOWS_EXIT_CODES.get(_ntstatus(code) or 0)
     return (
         tr("The game or Mod Organizer closed with an error (exit code {code}).", code=code),
-        tr(
+        tr(known)
+        if known
+        else tr(
             "A non-zero exit code means the program closed abnormally. The lines "
             "around this entry in launcher.log may show the underlying cause."
         ),
@@ -100,6 +178,19 @@ XRAY_FATAL_GENERIC = (
         "[error] block names the subsystem that failed."
     ),
 )
+
+
+def xray_out_of_memory() -> tuple[str, str, str]:
+    """(title, detail, suggestion) for the engine's "Out of memory" crash."""
+    return (
+        tr("Game crash: the game ran out of memory."),
+        tr(
+            "GAMMA needs more memory than many PCs have as RAM, and Windows makes up "
+            "the rest with the page file. When the page file is turned off or capped "
+            "small, the game crashes once RAM is full."
+        ),
+        tr(_OUT_OF_MEMORY),
+    )
 
 
 def xray_missing_section(section: str) -> tuple[str, str, str]:

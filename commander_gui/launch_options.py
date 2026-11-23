@@ -401,6 +401,13 @@ def apply(command: list[str], env: dict[str, str], text: str, *, game_mode: bool
             env[key] = value
         else:
             prefix.append(token)
+    if os.name == "nt":
+        # No wrapper programs on Windows (mangohud, gamescope, gamemoderun):
+        # a word before %command% - typed, or in a profile imported from
+        # Linux - became the program to start, and the game didn't. The
+        # variables stay; frame generation reads them (lossless_win).
+        prefix = []
+        resolve = False
     if resolve:
         _resolve_frame_gen(env)
         prefix = overlays.resolve(env, prefix)

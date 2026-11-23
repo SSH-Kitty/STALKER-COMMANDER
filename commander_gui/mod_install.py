@@ -24,6 +24,8 @@ INSTALLING_MARKER = ".commander-installing"
 
 #: One ``Key = value`` line of ``7zz l -slt`` output.
 _LISTING_LINE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9 ]* =( |$)")
+#: 7-Zip's closing count after the entries: "Warnings: 1", "Errors: 2".
+_SUMMARY_LINE_RE = re.compile(r"^(?:Warnings|Errors): \d+$")
 _MAX_ENTRIES = 500_000
 
 
@@ -37,6 +39,16 @@ def find_archiver() -> Path:
     COMMANDER ships this 7zz itself: the CLI dropped it in 1.41 for an
     in-process 7z.so, which only the CLI can use. Keep it on a CLI update.
     """
+    if os.name == "nt":
+        # 7z.exe with its own 7z.dll (scripts/fetch_windows_cli.py), then an
+        # installed 7-Zip.
+        program_files = Path(os.environ.get("ProgramFiles", r"C:\Program Files"))
+        for candidate in (
+            cli_binary_path().parent / "7zip" / "7z.exe",
+            program_files / "7-Zip" / "7z.exe",
+        ):
+            if candidate.is_file():
+                return candidate
     bundled = cli_binary_path().parent / "resources" / "7zz"
     if bundled.is_file() and os.access(bundled, os.X_OK):
         return bundled
@@ -51,11 +63,26 @@ def sanitize_name(name: str) -> str:
     """Return a safe single directory name for an installed mod."""
     if not isinstance(name, str) or any(ord(char) < 32 or ord(char) == 127 for char in name):
         raise ModInstallError("Mod names cannot contain control characters")
-    cleaned = re.sub(r"[\\/:]+", " ", name).strip().strip(".")
+    # Windows also refuses <>"|?* in a folder name, and silently drops a
+    # trailing dot or space - the folder would then not match modlist.txt.
+    unsafe = r'[\\/:<>"|?*]+' if os.name == "nt" else r"[\\/:]+"
+    cleaned = re.sub(unsafe, " ", name).strip().strip(".")
     cleaned = re.sub(r"\s+", " ", cleaned)
     if not cleaned or cleaned in {".", ".."}:
         raise ModInstallError("The archive does not have a usable mod name")
+    if os.name == "nt":
+        # Shorter on Windows: MO2 and the game still hit the 260-character
+        # path limit, and mods nest gamedata\... deep below this folder.
+        cleaned = cleaned[:120].rstrip(" .")
+        if cleaned.split(".", 1)[0].strip().lower() in _WINDOWS_DEVICE_NAMES:
+            cleaned = f"{cleaned} mod"  # CON, NUL, COM1... are devices, not folders
+        return cleaned
     return cleaned[:180]
+
+
+_WINDOWS_DEVICE_NAMES = frozenset(
+    {"con", "prn", "aux", "nul"} | {f"com{i}" for i in range(1, 10)} | {f"lpt{i}" for i in range(1, 10)}
+)
 
 
 def drop_romeo_prefix(name: str) -> str:
@@ -102,10 +129,13 @@ def _list_archive_paths(archiver: Path, archive: Path) -> list[str]:
         result = subprocess.run(
             # -p with no password: an encrypted archive fails instead of
             # waiting for a password on a terminal nobody is looking at.
-            [str(archiver), "l", "-slt", "-p", "--", str(archive)],
+            # -sccUTF-8: names in UTF-8, not the console's code page (on
+            # Windows a Cyrillic name otherwise came back garbled).
+            [str(archiver), "l", "-slt", "-p", "-sccUTF-8", "--", str(archive)],
             stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
+            encoding="utf-8",
             errors="replace",
             timeout=30,
             check=False,
@@ -129,6 +159,12 @@ def _list_archive_paths(archiver: Path, archive: Path) -> list[str]:
         start = next(i for i, line in enumerate(lines) if line.strip() == "----------")
     except StopIteration:
         start = -1
+    # An archive whose name doesn't match its type (a 7z saved as .zip,
+    # common on ModDB: 4 of GAMMA's own downloads) still opens, but 7-Zip
+    # ends the listing with a "Warnings: 1" count. That isn't an entry name;
+    # read as one, it refused the whole mod as having a line break in a name.
+    while lines and (not lines[-1].strip() or _SUMMARY_LINE_RE.match(lines[-1])):
+        lines.pop()
     listing = "\n".join(lines[start + 1 :])
     for block in listing.split("\n\n"):
         block_lines = block.splitlines()
@@ -418,9 +454,12 @@ def payload_root(staging: Path) -> Path:
     while True:
         children = list(current.iterdir())
         if len(children) != 1 or not children[0].is_dir():
-            return current
+            inner = _past_packaging(children)
+            if inner is None:
+                return current
+            return inner
         child = children[0]
-        if child.name == "fomod":
+        if child.name.lower() == "fomod":
             return current
         if child.name.lower() not in _GAME_DATA_FOLDER_NAMES:
             current = child
@@ -434,6 +473,49 @@ def payload_root(staging: Path) -> Path:
             current = child
             continue
         return current
+
+
+def is_packaging_folder(name: str) -> bool:
+    """A folder no game reads: ``.github``/``.git`` from a repository
+    download, ``__MACOSX`` from a zip made on a Mac."""
+    return name.startswith(".") or name.lower() == "__macosx"
+
+
+def has_game_data(folder: Path) -> bool:
+    """Whether MO2 would take ``folder`` as a mod: a data folder on top."""
+    try:
+        return any(
+            child.is_dir() and child.name.lower() in _GAME_DATA_FOLDER_NAMES
+            for child in folder.iterdir()
+        )
+    except OSError:
+        return False
+
+
+def _past_packaging(children: list[Path]) -> Path | None:
+    """The real payload when one folder sits among packaging leftovers.
+
+    A GitHub download ("mod-main/" with README.md, .github and the mod in
+    a subfolder), a zip with a LICENSE or "read me.txt" beside the mod's
+    folder, or a Mac zip's ``__MACOSX`` stopped the single-folder unwrap
+    above, so ``gamedata`` landed one level down and MO2 flagged the mod
+    invalid. Their files never reach the game anyway: MO2 only mounts the
+    data folders. Taken only when it leads to game data, so nothing
+    changes for a layout this can't fix.
+    """
+    if any(
+        child.is_dir() and child.name.lower() in (*_GAME_DATA_FOLDER_NAMES, "fomod")
+        for child in children
+    ):
+        return None
+    folders = [
+        child for child in children
+        if child.is_dir() and not child.is_symlink() and not is_packaging_folder(child.name)
+    ]
+    if len(folders) != 1:
+        return None
+    inner = payload_root(folders[0])
+    return inner if has_game_data(inner) else None
 
 
 def move_payload(

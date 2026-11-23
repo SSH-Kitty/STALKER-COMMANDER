@@ -9,8 +9,10 @@ from this machine with Copy and Open buttons. The text itself is in
 from __future__ import annotations
 
 import html
+import os
 import platform
 import re
+import sys
 from pathlib import Path
 
 import PySide6
@@ -78,14 +80,19 @@ def live_values(window) -> dict[str, str]:
     from ..game_backup import backups_root
     from ..log_dump import log_dumps_dir
     from ..modlist import modlist_path_for
-    from ..self_update import commander_appimage_path
+    from ..self_update import commander_appimage_path, commander_windows_install_dir
 
     settings = getattr(window, "settings", None)
     profile = getattr(settings, "active_profile", None)
     root = project_root()
     appimage = commander_appimage_path()
+    windows_install = commander_windows_install_dir()
     if appimage is not None:
         packaging = f"AppImage ({appimage})"
+    elif windows_install is not None:
+        packaging = f"Windows Setup ({windows_install})"
+    elif os.name == "nt" and getattr(sys, "frozen", False):
+        packaging = "Windows portable"
     elif str(root).startswith(("/opt/", "/usr/")):
         packaging = "System package (AUR)"
     else:

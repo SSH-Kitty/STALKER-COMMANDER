@@ -42,8 +42,10 @@ _ACTIVE = "gamma"
 
 
 def config_path() -> Path:
-    root = os.environ.get("XDG_CONFIG_HOME")
-    return (Path(root) if root else Path.home() / ".config") / "stalker-gamma" / "gui-settings.json"
+    """COMMANDER's gui-settings.json (theme, font), on every platform."""
+    from commander_gui.config import gui_settings_path
+
+    return gui_settings_path()
 
 
 def load_saved_theme() -> str:
@@ -89,9 +91,12 @@ def token(name: str) -> str:
     return values.get(aliases.get(name, name), values["text"])
 
 
+_FALLBACK_FONT = "Segoe UI" if os.name == "nt" else "DejaVu Sans"
 _FONT_SIZE_RE = re.compile(r"font-size:(\d+)px")
 #: COMMANDER's Settings > Font choices (commander_gui/themes.py).
-_FONT_FAMILIES = ("Exo 2", "Noto Sans", "DejaVu Sans", "Liberation Sans", "Inter")
+from commander_gui.themes import FONT_FAMILIES as _FONT_FAMILIES
+from commander_gui.themes import MONO_FONT as _MONO_FONT
+from commander_gui.themes import migrate_font_family as _migrate_font
 
 
 def load_saved_font_family() -> str:
@@ -100,6 +105,7 @@ def load_saved_font_family() -> str:
         value = json.loads(config_path().read_text(encoding="utf-8")).get("font_family")
     except (OSError, ValueError, AttributeError):
         value = None
+    value = _migrate_font(value)
     return value if isinstance(value, str) and value in _FONT_FAMILIES else "Exo 2"
 
 
@@ -115,7 +121,7 @@ def _stylesheet() -> str:
 def _base_stylesheet() -> str:
     t = _tokens()
     family = load_saved_font_family()
-    return f"""QWidget {{ background:{t['bg']}; color:{t['text']}; font-family:\"{family}\",\"DejaVu Sans\",sans-serif; font-size:13px; }}
+    return f"""QWidget {{ background:{t['bg']}; color:{t['text']}; font-family:\"{family}\",\"{_FALLBACK_FONT}\",sans-serif; font-size:13px; }}
 QLabel {{ background:transparent; }} QWidget#topbar {{ background:{t['panel']}; border-bottom:1px solid {t['border']}; }}
 QWidget#quickActions, QWidget#wordmarkBlock {{ background:transparent; }} QPushButton {{ background:{t['card']}; color:{t['text']}; border:1px solid {t['border']}; border-radius:6px; padding:6px 14px; }}
 QPushButton:hover {{ border-color:{t['accent']}; }} QPushButton#primary {{ background:{t['accent']}; color:{t['bg']}; font-weight:600; border:none; }}
@@ -151,7 +157,7 @@ QScrollBar::handle {{ background:{t['border']}; border-radius:3px; min-height:24
 QScrollBar::add-line, QScrollBar::sub-line, QScrollBar::add-page, QScrollBar::sub-page {{ background:none; border:none; width:0; height:0; }}
 QWidget#titleStrip {{ background:transparent; }} QPushButton#winMin, QPushButton#winMax, QPushButton#winClose {{ background:transparent; border:none; border-radius:0; padding:0; }}
 QPushButton#winMin:hover, QPushButton#winMax:hover {{ background:{t['card']}; }} QPushButton#winClose:hover {{ background:#c42b1c; }} QPushButton#winClose:pressed {{ background:#a1261a; }}
-QPlainTextEdit#excerpt, QPlainTextEdit#technical {{ font-family:monospace; font-size:12px; background:{t['bg']}; }}"""
+QPlainTextEdit#excerpt, QPlainTextEdit#technical {{ font-family:{_MONO_FONT}; font-size:12px; background:{t['bg']}; }}"""
 
 
 def load_font() -> str:

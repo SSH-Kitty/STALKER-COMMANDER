@@ -76,11 +76,27 @@ def _first_line(path: str, prefix: str = "") -> str:
 
 
 def _distro() -> str:
+    if os.name == "nt":
+        return platform.platform()
     name = _first_line("/etc/os-release", "PRETTY_NAME=").strip('"')
     return name or "(unknown)"
 
 
 def _memory() -> str:
+    if os.name == "nt":
+        import ctypes
+
+        class _Mem(ctypes.Structure):
+            _fields_ = [("length", ctypes.c_ulong), ("load", ctypes.c_ulong)] + [
+                (n, ctypes.c_ulonglong) for n in ("total", "avail", "ptotal", "pavail", "vtotal", "vavail", "ext")
+            ]
+
+        mem = _Mem()
+        mem.length = ctypes.sizeof(_Mem)
+        if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(mem)):
+            return "?"
+        return f"{mem.total / 2**30:.1f} GiB total, {mem.avail / 2**30:.1f} GiB available"
+
     def gib(key: str) -> str:
         value = _first_line("/proc/meminfo", key + ":").split()
         return f"{int(value[0]) / 1048576:.1f} GiB" if value else "?"
@@ -88,8 +104,53 @@ def _memory() -> str:
     return f"{gib('MemTotal')} total, {gib('MemAvailable')} available, swap {gib('SwapTotal')}"
 
 
+#: Windows' "Display adapters" device class: one numbered subkey per driver.
+_DISPLAY_CLASS = r"SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}"
+
+
+def _windows_gpus() -> list[str]:
+    """Display adapters and driver versions, from the registry.
+
+    What Win32_VideoController reports, without starting a hidden PowerShell
+    for it (slow, and a pattern antivirus heuristics flag). Basic display
+    drivers left by removed GPUs have no DriverDesc and are skipped.
+    """
+    import winreg
+
+    found = []
+    try:
+        root = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, _DISPLAY_CLASS)
+    except OSError as exc:
+        return [f"GPU: unavailable ({exc.__class__.__name__})"]
+    with root:
+        index = 0
+        while True:
+            try:
+                name = winreg.EnumKey(root, index)
+            except OSError:
+                break
+            index += 1
+            if not name.isdigit():
+                continue  # "Properties" and the like
+            try:
+                with winreg.OpenKey(root, name) as key:
+                    desc = winreg.QueryValueEx(key, "DriverDesc")[0]
+                    try:
+                        version = winreg.QueryValueEx(key, "DriverVersion")[0]
+                    except OSError:
+                        version = "?"
+            except OSError:
+                continue
+            line = f"GPU: {desc} | {version}"
+            if line not in found:
+                found.append(line)
+    return found or ["GPU: none found"]
+
+
 def _gpus() -> list[str]:
     """Vulkan devices and their drivers; the DRM drivers when vulkaninfo is missing."""
+    if os.name == "nt":
+        return _windows_gpus()
     try:
         result = subprocess.run(
             ["vulkaninfo", "--summary"],
@@ -128,6 +189,16 @@ def _install_kind() -> str:
     return str(project_root())
 
 
+def _locale() -> str:
+    env = os.environ.get("LC_ALL") or os.environ.get("LANG")
+    if env or os.name != "nt":
+        return env or "(unset)"
+    import ctypes
+
+    buf = ctypes.create_unicode_buffer(85)
+    return buf.value if ctypes.windll.kernel32.GetUserDefaultLocaleName(buf, 85) else "(unset)"
+
+
 def _login_shape() -> str:
     """What Wine and MO2 care about in the login name, without the name:
     non-ASCII characters and spaces break some of their paths."""
@@ -141,14 +212,15 @@ def _login_shape() -> str:
 def system_snapshot() -> list[str]:
     """Version, system, hardware and limits: the startup banner in commander.log
     and the top of every diagnostics export."""
-    import resource
     import shutil
 
     from .deck_launch import steam_deck_model
 
     try:
+        import resource  # POSIX only
+
         nofile = "/".join(str(v) for v in resource.getrlimit(resource.RLIMIT_NOFILE))
-    except (OSError, ValueError):
+    except (ImportError, OSError, ValueError):
         nofile = "?"
     proxies = [k for k in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY") if os.environ.get(k) or os.environ.get(k.lower())]
     lines = [
@@ -157,22 +229,24 @@ def system_snapshot() -> list[str]:
         f"Distro: {_distro()}",
         f"Kernel: {platform.release()}",
         f"Python: {sys.version.split()[0]}",
-        (
+        *(() if os.name == "nt" else ((
             f"Desktop: {os.environ.get('XDG_CURRENT_DESKTOP', '(unset)')} "
             f"session={os.environ.get('XDG_SESSION_TYPE', '(unset)')} "
             f"DISPLAY={os.environ.get('DISPLAY', '(unset)')} "
             f"WAYLAND_DISPLAY={os.environ.get('WAYLAND_DISPLAY', '(unset)')}"
-        ),
-        f"Locale: {os.environ.get('LC_ALL') or os.environ.get('LANG') or '(unset)'}",
+        ),)),
+        f"Locale: {_locale()}",
         f"Login name: {_login_shape()}",
-        f"CPU: {_first_line('/proc/cpuinfo', 'model name').lstrip(': ') or platform.machine()} ({os.cpu_count()} threads)",
+        f"CPU: {(_first_line('/proc/cpuinfo', 'model name').lstrip(': ') or platform.processor() or platform.machine())} ({os.cpu_count()} threads)",
         f"RAM: {_memory()}",
         *_gpus(),
         f"Steam Deck: {steam_deck_model() or 'no'}",
-        f"vm.max_map_count: {_first_line('/proc/sys/vm/max_map_count') or '?'}",
-        f"Open files limit (soft/hard): {nofile}",
-        f"gamemoderun: {'yes' if shutil.which('gamemoderun') else 'no'}",
-        f"ptrace_scope: {ptrace_scope()}",
+        *(() if os.name == "nt" else (
+            f"vm.max_map_count: {_first_line('/proc/sys/vm/max_map_count') or '?'}",
+            f"Open files limit (soft/hard): {nofile}",
+            f"gamemoderun: {'yes' if shutil.which('gamemoderun') else 'no'}",
+            f"ptrace_scope: {ptrace_scope()}",
+        )),
         f"Proxy: {', '.join(proxies) if proxies else 'none'}",
     ]
     try:
@@ -273,9 +347,19 @@ def _read_file(path: Path) -> str:
         return f"Could not read {path}: {exc}"
 
 
+def _windows_info() -> str:
+    from .settings import load_settings
+    from .wincrash import windows_facts
+
+    profile = load_settings().active_profile
+    folders = (profile.anomaly, profile.gamma, profile.cache) if profile is not None else ("", "", "")
+    return "\n".join(windows_facts(*folders))
+
+
 def collect_diagnostics() -> str:
     sections = [
         _section("System Info", _system_info()),
+        *((_section("Windows", _windows_info()),) if os.name == "nt" else ()),
         _section("CLI Version", _cli_version()),
         _section("CLI Settings (settings.json)", redact(_read_file(settings_path()))),
         _section(

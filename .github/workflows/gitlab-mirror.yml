@@ -11,20 +11,29 @@ on:
 
 concurrency: gitlab-mirror
 
+# Only reads this repo; GitLab is written with its own token.
+permissions:
+  contents: read
+
 jobs:
   mirror:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Push all branches and tags to GitLab
         env:
           GITLAB_TOKEN: ${{ secrets.GITLAB_TOKEN }}
+        # The token goes in a header for this one command, not in the URL,
+        # where git can echo it in error messages.
         run: |
-          git push --prune \
-            "https://oauth2:${GITLAB_TOKEN}@gitlab.com/commander-group3/stalker-commander.git" \
+          auth=$(printf 'oauth2:%s' "$GITLAB_TOKEN" | base64 -w0)
+          echo "::add-mask::$auth"
+          git -c "http.https://gitlab.com/.extraheader=Authorization: Basic $auth" push --prune \
+            "https://gitlab.com/commander-group3/stalker-commander.git" \
             '+refs/remotes/origin/*:refs/heads/*' \
             '^refs/remotes/origin/HEAD' \
             '+refs/tags/*:refs/tags/*'

@@ -153,7 +153,70 @@ def _owned_by_us(path: Path) -> bool:
         return False
 
 
+class _PipeSocket:
+    """The bits of a socket _IpcClient uses, over Discord's Windows named pipe.
+
+    A plain read on a pipe blocks until data comes, with no timeout: a hung
+    Discord, or another program holding ``discord-ipc-0``, kept the probe's
+    thread (and so the Settings button and app shutdown) waiting forever.
+    Reads wait at most ``_TIMEOUT_SECONDS``, like the Linux socket's.
+    """
+
+    def __init__(self, pipe, timeout: float | None = None) -> None:
+        self._pipe = pipe
+        self._timeout = _TIMEOUT_SECONDS if timeout is None else timeout
+
+    def sendall(self, data: bytes) -> None:
+        self._pipe.write(data)
+
+    def _available(self) -> int:
+        import ctypes
+        import msvcrt
+        from ctypes import wintypes
+
+        avail = wintypes.DWORD(0)
+        handle = msvcrt.get_osfhandle(self._pipe.fileno())
+        if not ctypes.windll.kernel32.PeekNamedPipe(
+            wintypes.HANDLE(handle), None, 0, None, ctypes.byref(avail), None
+        ):
+            raise OSError(ctypes.GetLastError(), "Discord's pipe closed")
+        return avail.value
+
+    def recv(self, size: int) -> bytes:
+        deadline = time.monotonic() + self._timeout
+        while True:
+            avail = self._available()
+            if avail:
+                return self._pipe.read(min(size, avail))
+            if time.monotonic() >= deadline:
+                raise TimeoutError("Discord did not answer")
+            time.sleep(0.02)
+
+    def close(self) -> None:
+        self._pipe.close()
+
+
+def _connect_windows(client_id: str) -> _IpcClient | None:
+    # \\.\pipe\ names are machine-wide; Discord only creates them in the
+    # user's own session, so this trusts whichever pipe answers the handshake.
+    for n in range(10):
+        try:
+            pipe = open(rf"\\.\pipe\discord-ipc-{n}", "r+b", buffering=0)  # noqa: SIM115
+        except OSError:
+            continue
+        client = _IpcClient(_PipeSocket(pipe))
+        try:
+            if client.handshake(client_id):
+                return client
+        except (OSError, ValueError, struct.error):
+            pass
+        pipe.close()
+    return None
+
+
 def _connect(client_id: str) -> _IpcClient | None:
+    if os.name == "nt":
+        return _connect_windows(client_id)
     for path in _candidate_sockets():
         if not _owned_by_us(path):
             continue
