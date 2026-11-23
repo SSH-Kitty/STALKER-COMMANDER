@@ -15309,7 +15309,7 @@ class TesterNov2VerifyAndImportTests(unittest.TestCase):
         self.assertEqual(names, ["mo_interface.log"])
 
 
-from commander_gui import modlist  # noqa: E402
+from commander_gui import modlist
 
 
 class DroppedSeparatorFolderTest(unittest.TestCase):
