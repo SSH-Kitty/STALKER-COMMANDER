@@ -22,6 +22,7 @@ _REAL_APPLY = winprep.apply
 
 
 class PlanTest(unittest.TestCase):
+    @unittest.skipUnless(os.name == "nt", "Windows paths")
     def test_only_folders_not_excluded_yet_are_planned(self):
         step = winprep.plan(
             [r"C:\GAMMA\anomaly", r"C:\GAMMA\gamma", r"C:\GAMMA\cache"],
@@ -32,6 +33,7 @@ class PlanTest(unittest.TestCase):
         self.assertEqual([Path(p).name for p in step.exclude], ["gamma", "cache"])
         self.assertFalse(step.long_paths)
 
+    @unittest.skipUnless(os.name == "nt", "Windows paths")
     def test_the_same_folder_twice_is_excluded_once(self):
         step = winprep.plan([r"C:\GAMMA\x", r"C:\GAMMA\X"], [], wanted=True, long_paths_on=True)
         self.assertEqual(len(step.exclude), 1)
@@ -89,6 +91,7 @@ class ScriptTest(unittest.TestCase):
         )
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
 
+    @unittest.skipUnless(os.name == "nt", "Windows paths")
     def test_powershell_is_found_by_full_path(self):
         exe = Path(winprep.powershell_exe())
         self.assertTrue(exe.is_absolute())

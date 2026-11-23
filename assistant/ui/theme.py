@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from pathlib import Path
 
@@ -90,6 +91,7 @@ def token(name: str) -> str:
     return values.get(aliases.get(name, name), values["text"])
 
 
+_FALLBACK_FONT = "Segoe UI" if os.name == "nt" else "DejaVu Sans"
 _FONT_SIZE_RE = re.compile(r"font-size:(\d+)px")
 #: COMMANDER's Settings > Font choices (commander_gui/themes.py).
 from commander_gui.themes import FONT_FAMILIES as _FONT_FAMILIES
@@ -119,7 +121,7 @@ def _stylesheet() -> str:
 def _base_stylesheet() -> str:
     t = _tokens()
     family = load_saved_font_family()
-    return f"""QWidget {{ background:{t['bg']}; color:{t['text']}; font-family:\"{family}\",\"Segoe UI\",sans-serif; font-size:13px; }}
+    return f"""QWidget {{ background:{t['bg']}; color:{t['text']}; font-family:\"{family}\",\"{_FALLBACK_FONT}\",sans-serif; font-size:13px; }}
 QLabel {{ background:transparent; }} QWidget#topbar {{ background:{t['panel']}; border-bottom:1px solid {t['border']}; }}
 QWidget#quickActions, QWidget#wordmarkBlock {{ background:transparent; }} QPushButton {{ background:{t['card']}; color:{t['text']}; border:1px solid {t['border']}; border-radius:6px; padding:6px 14px; }}
 QPushButton:hover {{ border-color:{t['accent']}; }} QPushButton#primary {{ background:{t['accent']}; color:{t['bg']}; font-weight:600; border:none; }}

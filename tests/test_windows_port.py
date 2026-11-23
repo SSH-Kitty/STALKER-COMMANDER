@@ -87,6 +87,7 @@ class GitBinaryTest(unittest.TestCase):
 class Mo2IniRewriteTest(unittest.TestCase):
     """Move install: MO2 spells paths ``C:/...``, ``C:\\...`` and ``C:\\\\...`` in one file."""
 
+    @unittest.skipUnless(os.name == "nt", "Windows paths")
     def test_every_spelling_of_the_old_path_is_rewritten_once(self):
         with tempfile.TemporaryDirectory() as tmp:
             gamma = Path(tmp) / "new-gamma"
