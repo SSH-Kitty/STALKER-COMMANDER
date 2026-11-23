@@ -74,6 +74,11 @@ Python, Qt, the CLI and 7-Zip are all bundled. Setup adds a Start menu entry and
 The installed version **updates itself**: it offers new versions when it starts, checks them against the published
 checksum, runs the new Setup and restarts COMMANDER.
 
+Uninstalling it (**Settings → Apps** or **Control Panel → Programs**) also takes back what COMMANDER changed in
+Windows: the graphics card choice for the game, its Steam shortcut and, after asking, the Defender exclusions for your
+game folders. It asks whether to delete COMMANDER's settings and backups too, and never deletes your game, saves or
+mods.
+
 > [!NOTE]
 > COMMANDER isn't code-signed, so Windows SmartScreen may say it "protected your PC". Click **More info → Run
 > anyway**. To check the file first, compare its checksum with the `.exe.sha512sum` file from the release:
@@ -194,6 +199,9 @@ Everything added since the last stable release, **1.3.1**.
 - **Windows extras.** Installs and updates keep the PC awake and show their progress on the taskbar button.
   On laptops with two graphics cards, the game runs on the faster one. COMMANDER warns before you install into
   OneDrive, and explains when Smart App Control or an antivirus blocks a program.
+- **Log dumps on Windows** include the crash reports Windows itself keeps for the game, MO2 and COMMANDER, and the
+  Windows settings that matter to GAMMA (page file, Smart App Control, runtimes and more). ASSISTANT tells you
+  whether the game crashed in the graphics driver, an overlay or the engine.
 
 #### Modpacks and co-op
 

@@ -1,5 +1,6 @@
 """Windows extras: keep-awake, taskbar progress, the laptop GPU choice,
-Smart App Control and OneDrive warnings, and the oldest-Windows check."""
+Smart App Control and OneDrive warnings, the oldest-Windows check, the
+page file check and the uninstaller's cleanup."""
 
 import importlib.util
 import os
@@ -10,12 +11,21 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from commander_gui import gui_settings, wingpu, winpower, winsecurity, wintaskbar
+from commander_gui import (
+    gui_settings,
+    wincleanup,
+    wingpu,
+    winpagefile,
+    winpower,
+    winsecurity,
+    wintaskbar,
+)
 
 WINDOWS = os.name == "nt"
 # Saved at import, before conftest stubs them out for every test.
 _REAL_SYNC = wingpu.sync
 _REAL_SAC_STATE = winsecurity.smart_app_control_state
+_REAL_PAGE_FILE = winpagefile.page_file
 _ENTRY = Path(__file__).resolve().parents[1] / "packaging" / "windows" / "entry.py"
 
 
@@ -275,6 +285,168 @@ class OldestWindowsTest(unittest.TestCase):
 
     def test_this_pc_is_new_enough(self):
         self.assertFalse(self.entry.windows_too_old())
+
+    def test_the_uninstaller_may_run_the_cleanup(self):
+        self.assertIn("commander_gui.wincleanup", self.entry.HELPER_MODULES)
+
+
+class PageFileTest(unittest.TestCase):
+    def test_reading_the_setting(self):
+        self.assertTrue(winpagefile.parse(["?:\\pagefile.sys"]).managed)
+        self.assertTrue(winpagefile.parse(["C:\\pagefile.sys 0 0"]).managed)
+        self.assertTrue(winpagefile.parse(["C:\\pagefile.sys"]).managed)
+        fixed = winpagefile.parse(["C:\\pagefile.sys 2048 4096", "D:\\pagefile.sys 1024 1024"])
+        self.assertEqual((fixed.managed, fixed.max_mb), (False, 5120))
+        self.assertTrue(winpagefile.parse([""]).off)
+        self.assertTrue(winpagefile.parse([]).off)
+
+    def test_too_small_only_when_fixed_or_off_and_short_of_32_gb(self):
+        managed = winpagefile.PageFile(True, 0)
+        off = winpagefile.PageFile(False, 0)
+        self.assertFalse(winpagefile.too_small(managed, 8192))
+        self.assertTrue(winpagefile.too_small(off, 16384))
+        self.assertFalse(winpagefile.too_small(off, 32768))
+        self.assertFalse(winpagefile.too_small(winpagefile.PageFile(False, 16384), 16384))
+        self.assertTrue(winpagefile.too_small(winpagefile.PageFile(False, 4096), 16384))
+        self.assertFalse(winpagefile.too_small(None, 8192))
+        self.assertFalse(winpagefile.too_small(off, 0))
+
+    @unittest.skipIf(not WINDOWS, "reads the Windows registry")
+    def test_this_pcs_setting_and_ram_read_without_error(self):
+        self.assertIsInstance(_REAL_PAGE_FILE(), (winpagefile.PageFile, type(None)))
+        self.assertGreater(winpagefile.ram_mb(), 0)
+
+
+@unittest.skipIf(not WINDOWS, "the page file check is Windows-only")
+class PageFileWarningTest(unittest.TestCase):
+    def _ask(self, setting, answer):
+        from commander_gui.ui import common
+
+        with (
+            patch.object(winpagefile, "page_file", return_value=setting),
+            patch.object(winpagefile, "ram_mb", return_value=16384),
+            patch.object(winpagefile, "open_settings") as opened,
+            patch.object(common.QMessageBox, "warning", return_value=answer) as box,
+        ):
+            ok = common.page_file_ok(None)
+        return ok, box, opened
+
+    def test_play_anyway_is_remembered_until_the_setting_changes(self):
+        from commander_gui.ui.common import QMessageBox
+
+        off = winpagefile.PageFile(False, 0)
+        ok, box, _opened = self._ask(off, QMessageBox.StandardButton.No)
+        self.assertTrue(ok)
+        self.assertIn("no page file", box.call_args.args[2])
+        self.assertIn("16 GB", box.call_args.args[2])
+        self.assertEqual(self._ask(off, QMessageBox.StandardButton.No)[1].call_count, 0)
+        ok, box, _opened = self._ask(winpagefile.PageFile(False, 4096), QMessageBox.StandardButton.No)
+        self.assertEqual(box.call_count, 1)
+        self.assertIn("4 GB", box.call_args.args[2])
+
+    def test_open_settings_stops_the_launch(self):
+        from commander_gui.ui.common import QMessageBox
+
+        ok, _box, opened = self._ask(winpagefile.PageFile(False, 0), QMessageBox.StandardButton.Yes)
+        self.assertFalse(ok)
+        opened.assert_called_once()
+
+    def test_a_managed_page_file_asks_nothing(self):
+        ok, box, _opened = self._ask(winpagefile.PageFile(True, 0), None)
+        self.assertTrue(ok)
+        self.assertEqual(box.call_count, 0)
+
+
+class OutOfMemoryCrashTest(unittest.TestCase):
+    def test_the_engine_out_of_memory_crash_points_at_the_page_file(self):
+        from assistant.analyzers.xray import analyze_xray
+
+        lines = [
+            "FATAL ERROR",
+            "",
+            "[error]Expression    : fatal error",
+            "[error]Function      : xrMemory::mem_alloc",
+            "[error]Arguments     : Out of memory. Memory request: 262144 K",
+        ]
+        findings = analyze_xray("xray.log", "game log", lines)
+        self.assertTrue(any("ran out of memory" in f.title for f in findings), [f.title for f in findings])
+        self.assertTrue(any("page file" in f.suggestion for f in findings))
+
+    def test_the_out_of_memory_exit_codes_are_explained(self):
+        from assistant import knowledge
+
+        for code in ("0xC0000017", "-1073741523"):  # STATUS_NO_MEMORY, STATUS_COMMITMENT_LIMIT
+            self.assertIn("page file", knowledge.launch_exit_code(code)[1])
+
+
+class UninstallCleanupTest(unittest.TestCase):
+    APP = r"C:\Users\Player\AppData\Local\Programs\STALKER COMMANDER"
+
+    def _entry(self, key, exe):
+        return (key, 0x00, [("appname", 0x01, "x"), ("Exe", 0x01, f'"{exe}"')])
+
+    def test_only_shortcuts_into_the_install_folder_are_removed(self):
+        shortcuts = [
+            self._entry("0", self.APP + r"\COMMANDER.exe"),
+            self._entry("1", r"C:\Games\Other\game.exe"),
+            self._entry("2", self.APP.lower() + r"\commander.exe"),
+            self._entry("3", self.APP + r" 2\COMMANDER.exe"),  # a different folder
+        ]
+        kept = wincleanup.without_shortcuts_into(shortcuts, self.APP)
+        self.assertEqual([key for key, _t, _v in kept], ["1", "3"])
+
+    def test_the_defender_script_removes_exactly_the_saved_folders(self):
+        script = wincleanup.removal_script([r"C:\GAMMA\anomaly", r"C:\Users\O'Brien\gamma"])
+        self.assertIn("Remove-MpPreference -ExclusionPath @('C:\\GAMMA\\anomaly','C:\\Users\\O''Brien\\gamma')", script)
+        self.assertNotIn("Add-MpPreference", script)
+
+    @unittest.skipIf(not WINDOWS, "wincleanup only runs on Windows")
+    def test_the_count_step_reports_the_saved_exclusions(self):
+        gui_settings.save_gui_settings(defender_excluded=[r"C:\GAMMA\a", r"C:\GAMMA\b"])
+        self.assertEqual(wincleanup.main(["defender-count"]), 2)
+        self.assertEqual(wincleanup.main(["no-such-step"]), wincleanup.FAILED)
+
+    @unittest.skipIf(not WINDOWS, "wincleanup only runs on Windows")
+    def test_a_silent_uninstall_never_asks_for_admin_rights(self):
+        gui_settings.save_gui_settings(defender_excluded=[r"C:\GAMMA\a"])
+        with (
+            patch.object(wincleanup, "_is_admin", return_value=False),
+            patch("commander_gui.winruntimes._run_elevated") as elevated,
+        ):
+            self.assertEqual(wincleanup.main(["defender", "--only-if-admin"]), wincleanup.DECLINED)
+        elevated.assert_not_called()
+
+    @unittest.skipIf(not WINDOWS, "wincleanup only runs on Windows")
+    def test_removed_exclusions_are_forgotten_and_declined_ones_kept(self):
+        gui_settings.save_gui_settings(defender_excluded=[r"C:\GAMMA\a"])
+        with patch("commander_gui.winruntimes._run_elevated", return_value=98):  # UAC declined
+            self.assertEqual(wincleanup.main(["defender"]), wincleanup.DECLINED)
+        self.assertEqual(wincleanup.excluded_folders(), [r"C:\GAMMA\a"])
+        with patch("commander_gui.winruntimes._run_elevated", return_value=0):
+            self.assertEqual(wincleanup.main(["defender"]), 0)
+        self.assertEqual(wincleanup.excluded_folders(), [])
+
+    @unittest.skipIf(not WINDOWS, "wincleanup only runs on Windows")
+    def test_steam_open_leaves_the_shortcuts_and_says_so(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            from commander_gui import steam_shortcuts as st
+
+            vdf = Path(tmp) / "shortcuts.vdf"
+            st.write_shortcuts(vdf, st.set_shortcuts_map([], [self._entry("0", self.APP + r"\COMMANDER.exe")]))
+            with (
+                patch.object(st, "find_userdata_config_dirs", return_value=[Path(tmp)]),
+                patch.object(st, "steam_is_running", return_value=True),
+                patch.object(wincleanup, "undo_gpu_preferences"),
+            ):
+                self.assertEqual(wincleanup.main(["windows-changes", "--app", self.APP]), wincleanup.STEAM_RUNNING)
+            self.assertEqual(len(st.get_shortcuts_map(st.read_shortcuts(vdf))), 1)
+            with (
+                patch.object(st, "find_userdata_config_dirs", return_value=[Path(tmp)]),
+                patch.object(st, "steam_is_running", return_value=False),
+                patch.object(wincleanup, "undo_gpu_preferences"),
+            ):
+                self.assertEqual(wincleanup.main(["windows-changes", "--app", self.APP]), 0)
+            self.assertEqual(st.get_shortcuts_map(st.read_shortcuts(vdf)), [])
 
 
 if __name__ == "__main__":

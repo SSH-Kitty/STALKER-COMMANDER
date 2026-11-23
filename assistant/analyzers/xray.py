@@ -147,6 +147,8 @@ def _fatal_finding(
         title, detail, suggestion = knowledge.xray_missing_section(
             section_match.group(1)
         )
+    elif any("out of memory" in value.lower() for value in values.values()):
+        title, detail, suggestion = knowledge.xray_out_of_memory()
     else:
         base_title, base_detail = knowledge.XRAY_FATAL_GENERIC
         description = values.get("description", "")

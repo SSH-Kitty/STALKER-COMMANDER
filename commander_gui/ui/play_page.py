@@ -131,6 +131,7 @@ from .common import (
     mo2_running,
     notice,
     notify_desktop,
+    page_file_ok,
     pick_shortcuts_vdf,
     play_click_sound,
     populate_runner_combo,
@@ -1637,6 +1638,9 @@ class PlayPage(QWidget):
             if os.name != "nt" and (bad := wine_unsafe_folder(profile.anomaly, profile.gamma)):
                 self._set_launch_button_state(False)
                 warn_wine_unsafe_folder(self, bad)
+                return
+            if not open_mo2 and not page_file_ok(self):
+                self._set_launch_button_state(False)
                 return
             if not direct:
                 try:

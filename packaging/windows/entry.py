@@ -18,6 +18,7 @@ HELPER_MODULES = frozenset({
     "commander_gui.ui.game_splash",
     "commander_gui.ui.graphics_window",
     "commander_gui.winjob",  # sends a CLI its Ctrl+C (cancel)
+    "commander_gui.wincleanup",  # Setup's uninstaller undoes COMMANDER's Windows changes
 })
 
 #: Windows 10 version 1809, the oldest Windows Qt 6 runs on. The installer

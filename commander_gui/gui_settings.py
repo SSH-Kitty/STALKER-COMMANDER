@@ -113,6 +113,7 @@ _DEFAULTS = {
     "defender_excluded": [],  # Windows: install folders COMMANDER added to Defender's exclusions (winprep.py)
     "high_performance_gpu": True,  # Windows: run the game on a laptop's fast graphics card (wingpu.py)
     "gpu_preferences_set": [],  # Windows: game exes COMMANDER set to the fast graphics card (wingpu.py)
+    "page_file_warned": "",  # Windows: the page file setup the "too small" warning was last answered for (winpagefile.py)
 }
 
 _cache: dict | None = None
@@ -185,7 +186,7 @@ def load_gui_settings() -> dict:
             data.update(stored)
     if not isinstance(data.get("runner"), str):
         data["runner"] = "auto"
-    for key in ("wine_prefix", "target", "custom_launch_options", "offline_archive"):
+    for key in ("wine_prefix", "target", "custom_launch_options", "offline_archive", "page_file_warned"):
         if not isinstance(data.get(key), str):
             data[key] = _DEFAULTS[key]
     excluded = data.get("defender_excluded")

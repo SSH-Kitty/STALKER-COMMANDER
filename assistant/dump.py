@@ -25,6 +25,7 @@ SOURCE_LABELS: dict[str, str] = {
     "anomaly": "Anomaly",
     "gamma": "GAMMA / MO2",
     "wine-prefix": "Wine prefix",
+    "windows": "Windows crash reports",
     "report": "Report",
     "other": "Other files",
 }

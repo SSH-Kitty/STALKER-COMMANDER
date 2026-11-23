@@ -209,6 +209,46 @@ def _onedrive_ok(parent, *paths: str) -> bool:
     return answer == QMessageBox.StandardButton.Yes
 
 
+def _gigabytes(mb: int) -> str:
+    """4096 -> "4", 1536 -> "1.5"."""
+    return f"{mb / 1024:.1f}".removesuffix(".0")
+
+
+def page_file_ok(parent) -> bool:
+    """False when the user goes to fix a page file too small for GAMMA
+    instead of playing (winpagefile.py). Asked once per page file setup:
+    "Play anyway" is remembered until the setting or the RAM changes."""
+    if os.name != "nt":
+        return True
+    from .. import winpagefile
+
+    setting = winpagefile.page_file()
+    ram = winpagefile.ram_mb()
+    if setting is None or not winpagefile.too_small(setting, ram):
+        return True
+    signature = winpagefile.signature(setting, ram)
+    if gui_settings.load_gui_settings().get("page_file_warned") == signature:
+        return True
+    if setting.off:
+        text = tr("Windows has no page file on this PC. GAMMA can need more memory than its {ram} GB of RAM, and then crashes with out-of-memory errors.", ram=_gigabytes(ram))
+    else:
+        text = tr("This PC's page file can't grow past {pagefile} GB. With {ram} GB of RAM, GAMMA can run out of memory and crash.", pagefile=_gigabytes(setting.max_mb), ram=_gigabytes(ram))
+    text += "\n\n" + tr("To fix it, open the page file settings, click Change under Virtual memory, tick \"Automatically manage paging file size for all drives\", then restart the PC.")
+    answer = QMessageBox.warning(
+        parent,
+        tr("The page file is too small for GAMMA"),
+        text,
+        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        QMessageBox.StandardButton.Yes,
+        labels={QMessageBox.StandardButton.Yes: tr("Open page file settings"), QMessageBox.StandardButton.No: tr("Play anyway")},
+    )
+    if answer == QMessageBox.StandardButton.Yes:
+        winpagefile.open_settings()
+        return False
+    gui_settings.save_gui_settings(page_file_warned=signature)
+    return True
+
+
 def count_cached_archives(cache_path: str) -> int:
     """Count .zip archives in *cache_path*."""
     if not cache_path:

@@ -134,8 +134,11 @@ Filename: "{app}\{#AppExe}"; Flags: nowait runasoriginaluser skipifnotsilent; Ch
 ; at a deleted exe.
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: none; ValueName: "STALKER COMMANDER"; Flags: uninsdeletevalue dontcreatekey
 
-; Uninstall removes only what Setup installed. Settings in %APPDATA%\stalker-gamma
-; and the user's Anomaly / GAMMA folders are deliberately not touched.
+; Uninstall also takes back what COMMANDER changed in Windows (see
+; CurUninstallStepChanged): the per-game graphics card choices, its Steam
+; shortcuts and, after asking, the Defender exclusions. COMMANDER's settings,
+; logs and backups go only when the user says so. The Anomaly / GAMMA folders
+; (the game, saves, mods) are never touched.
 
 [Code]
 // ---------------------------------------------------------------- sound
@@ -259,6 +262,119 @@ end;
 function RelaunchAfterUpdate: Boolean;
 begin
   Result := ExpandConstant('{param:relaunch|0}') = '1';
+end;
+
+// ------------------------------------------------------------ uninstall
+// Exit codes of commander_gui/wincleanup.py.
+const
+  CLEANUP_STEAM_RUNNING = 3;
+
+var
+  DeleteSettings, DeleteBackups: Boolean;
+  SteamShortcutsLeft, DefenderLeft: Boolean;
+
+// Runs a commander_gui.wincleanup step with the COMMANDER.exe being
+// uninstalled (still on disk at usUninstall). -1 when it couldn't start.
+function CleanupStep(const Args: String): Integer;
+var
+  ResultCode: Integer;
+begin
+  if Exec(ExpandConstant('{app}\{#AppExe}'), '-m commander_gui.wincleanup ' + Args, '', SW_HIDE,
+    ewWaitUntilTerminated, ResultCode) then
+    Result := ResultCode
+  else
+    Result := -1;
+  Log('wincleanup ' + Args + ': ' + IntToStr(Result));
+end;
+
+function SettingsDir: String;
+begin
+  Result := ExpandConstant('{userappdata}\stalker-gamma');
+end;
+
+function DataDir: String;
+begin
+  Result := ExpandConstant('{localappdata}\stalker-gamma-commander');
+end;
+
+procedure UndoWindowsChanges;
+var
+  Count: Integer;
+begin
+  if CleanupStep('windows-changes --app "' + ExpandConstant('{app}') + '"') = CLEANUP_STEAM_RUNNING then
+    SteamShortcutsLeft := True;
+  Count := CleanupStep('defender-count');
+  if Count <= 0 then
+    Exit;
+  if UninstallSilent then
+  begin
+    // No UAC prompt out of nowhere: only when already elevated.
+    DefenderLeft := CleanupStep('defender --only-if-admin') <> 0;
+    Exit;
+  end;
+  if MsgBox('COMMANDER added your game folders to Microsoft Defender''s exclusions, so Defender doesn''t ' +
+      'slow down installs and the game.' + #13#10#13#10 + 'Remove these exclusions now? Windows will ask for ' +
+      'permission.', mbConfirmation, MB_YESNO) = IDYES then
+    DefenderLeft := CleanupStep('defender') <> 0
+  else
+    DefenderLeft := True;
+end;
+
+procedure AskAboutUserData;
+begin
+  if UninstallSilent then
+    Exit;
+  if DirExists(SettingsDir) then
+    DeleteSettings := MsgBox('Also delete COMMANDER''s settings and logs?' + #13#10#13#10 +
+      'Keep them if you will install COMMANDER again: your profiles, folders and options come back as they were. ' +
+      'Your game, saves and mods are not affected either way.', mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES;
+  if DirExists(DataDir + '\backups') then
+    DeleteBackups := MsgBox('Also delete the backups COMMANDER made (' + DataDir + '\backups)?' + #13#10#13#10 +
+      'They are copies of your game setup, mods and saves. They can''t be restored once deleted.',
+      mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES;
+end;
+
+procedure ReportLeftovers;
+var
+  Text: String;
+begin
+  if UninstallSilent then
+    Exit;
+  Text := '';
+  if SteamShortcutsLeft then
+    Text := Text + '- The "STALKER COMMANDER" shortcut in Steam: Steam was open. In Steam, right-click it > ' +
+      'Manage > Remove non-Steam game from your library.' + #13#10;
+  if DefenderLeft then
+    Text := Text + '- The Defender exclusions for your game folders: Windows Security > Virus & threat protection > ' +
+      'Manage settings > Exclusions.' + #13#10;
+  if Text <> '' then
+    MsgBox('COMMANDER is uninstalled. These are still there, and can be removed by hand:' + #13#10#13#10 + Text,
+      mbInformation, MB_OK);
+end;
+
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+begin
+  if CurUninstallStep = usUninstall then
+  begin
+    // Before Setup deletes COMMANDER.exe, which the cleanup runs with.
+    UndoWindowsChanges;
+    AskAboutUserData;
+  end
+  else if CurUninstallStep = usPostUninstall then
+  begin
+    if DeleteSettings then
+      DelTree(SettingsDir, True, True, True);
+    if DeleteBackups then
+      DelTree(DataDir + '\backups', True, True, True);
+    if DeleteSettings then
+    begin
+      // Plugins and Steam icons, which are only of use to COMMANDER itself.
+      DelTree(DataDir + '\plugins', True, True, True);
+      DelTree(DataDir + '\icons', True, True, True);
+      RemoveDir(DataDir);  // only when nothing else (kept backups) is left
+    end;
+    ReportLeftovers;
+  end;
 end;
 
 // ---------------------------------------------------------------- events

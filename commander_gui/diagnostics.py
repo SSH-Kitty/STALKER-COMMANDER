@@ -347,9 +347,19 @@ def _read_file(path: Path) -> str:
         return f"Could not read {path}: {exc}"
 
 
+def _windows_info() -> str:
+    from .settings import load_settings
+    from .wincrash import windows_facts
+
+    profile = load_settings().active_profile
+    folders = (profile.anomaly, profile.gamma, profile.cache) if profile is not None else ("", "", "")
+    return "\n".join(windows_facts(*folders))
+
+
 def collect_diagnostics() -> str:
     sections = [
         _section("System Info", _system_info()),
+        *((_section("Windows", _windows_info()),) if os.name == "nt" else ()),
         _section("CLI Version", _cli_version()),
         _section("CLI Settings (settings.json)", redact(_read_file(settings_path()))),
         _section(

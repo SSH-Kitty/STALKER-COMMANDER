@@ -2,7 +2,9 @@
 
 Gathers COMMANDER, Anomaly, GAMMA/MO2 and Wine-prefix logs plus crash dumps
 into ``~/.config/stalker-gamma/logs/dumps/commander-log-dump-YYYYMMDD-HHMM.zip``
-and shows the exact path to the user when finished.
+(``%APPDATA%\\stalker-gamma\\logs\\dumps`` on Windows) and shows the exact
+path to the user when finished. On Windows, the crash reports Windows itself
+keeps go in ``windows/`` instead of a Wine prefix (wincrash.py).
 """
 
 from __future__ import annotations
@@ -230,8 +232,13 @@ def build_log_dump(
     now: datetime | None = None,
     per_file_cap: int = MAX_FILE_BYTES,
     total_cap: int = MAX_TOTAL_BYTES,
+    extra_entries: dict[str, str | Path] | None = None,
 ) -> tuple[Path, dict[str, object]]:
     """Archive candidate logs from *sources* into a timestamped zip.
+
+    *extra_entries* maps an archive path (``windows/crash-reports.txt``) to
+    text, redacted like every log, or to a file packed as it is (a crash
+    dump), within the same size caps.
 
     Returns ``(archive_path, stats)`` where stats reports included files,
     skipped files and total archived bytes for display in the UI.
@@ -316,6 +323,24 @@ def build_log_dump(
                         else "ok, NOT REDACTED - binary file"
                     )
                     manifest_lines.append(f"[{tag}] {arcname} ({size} bytes)")
+            for arcname, value in sorted((extra_entries or {}).items()):
+                arcname = "/".join(_safe_archive_part(part) for part in arcname.split("/"))
+                if isinstance(value, str):
+                    zf.writestr(arcname, _scrub(value))
+                    manifest_lines.append(f"[ok] {arcname}")
+                    included += 1
+                    continue
+                try:
+                    size = value.stat().st_size
+                    if size > per_file_cap or total_bytes + size > total_cap:
+                        skipped.append(f"{arcname} ({size} bytes)")
+                        continue
+                    zf.writestr(arcname, value.read_bytes())
+                except OSError:
+                    continue
+                included += 1
+                total_bytes += size
+                manifest_lines.append(f"[ok, NOT REDACTED - raw memory dump] {arcname} ({size} bytes)")
             for name, text in sorted((extra_texts or {}).items()):
                 safe_name = _safe_archive_part(name)
                 zf.writestr(f"report/{safe_name}", _scrub(text))
@@ -366,9 +391,19 @@ def create_log_dump(
     sources = gather_default_sources()
     for label, root in sorted(sources.items()):
         say(f"Scanning {label}: {root}")
+    extra_entries: dict[str, str | Path] = {}
+    if os.name == "nt":
+        # Windows' own crash records: the Windows twin of the Wine prefix.
+        from .wincrash import dump_entries
+
+        say("Reading Windows crash reports")
+        texts, files = dump_entries()
+        extra_entries.update({f"windows/{name}": text for name, text in texts.items()})
+        extra_entries.update({f"windows/{name}": path for name, path in files.items()})
     say("Compressing logs")
     return build_log_dump(
         log_dumps_dir(),
         sources,
         extra_texts={"diagnostics.txt": collect_diagnostics()},
+        extra_entries=extra_entries,
     )

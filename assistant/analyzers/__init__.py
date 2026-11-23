@@ -9,7 +9,15 @@ from commander_gui.i18n import tr
 
 from ..dump import SOURCE_LABELS, DumpArchive, DumpFile
 from ..findings import Finding, collapse_findings, sort_findings
-from . import cli_log, generic, launcher_log, mo2, winetricks_vcredist, xray
+from . import (
+    cli_log,
+    generic,
+    launcher_log,
+    mo2,
+    windows_crashes,
+    winetricks_vcredist,
+    xray,
+)
 
 Analyzer = Callable[[str, str, list[str]], list[Finding]]
 
@@ -20,6 +28,7 @@ _ROUTES: list[tuple[re.Pattern[str], Analyzer]] = [
     (re.compile(r"mo_interface\.log$", re.IGNORECASE), mo2.analyze_mo2_interface),
     (re.compile(r"usvfs[^/]*\.log$", re.IGNORECASE), mo2.analyze_usvfs),
     (re.compile(r"winetricks\.log$", re.IGNORECASE), winetricks_vcredist.analyze_winetricks),
+    (re.compile(r"^windows/crash-reports\.txt$", re.IGNORECASE), windows_crashes.analyze_windows_crashes),
     (
         re.compile(r"(dd_)?vcre?dist.*\.log$", re.IGNORECASE),
         winetricks_vcredist.analyze_vcredist,
@@ -76,6 +85,8 @@ def _where_label(entry: DumpFile) -> str:
         return tr("Game engine log")
     if name == "mo_interface.log":
         return tr("Mod Organizer log")
+    if entry.arcname.lower() == "windows/crash-reports.txt":
+        return tr("Windows crash list")
     if name == "winetricks.log":
         return tr("Wine prefix runtime list")
     if "vcredist" in name or "vcdist" in name:
