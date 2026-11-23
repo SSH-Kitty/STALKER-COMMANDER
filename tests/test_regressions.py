@@ -622,7 +622,8 @@ class RegressionTests(unittest.TestCase):
 
         task.shutdown(timeout_ms=1)
 
-        self.assertTrue(task._thread.isRunning())
+        thread = task._thread  # the task drops its own reference once it is done
+        self.assertTrue(thread.isRunning())
         self.assertIsNone(task.parent())
         # QThread.wait() blocks without running this (main) thread's event
         # loop, but the worker's `finished` signal -> `thread.quit()` is a
@@ -633,7 +634,7 @@ class RegressionTests(unittest.TestCase):
         finished = False
         while _time.monotonic() < deadline:
             QApplication.processEvents()
-            if task._thread.wait(50):
+            if thread.wait(50):
                 finished = True
                 break
         self.assertTrue(finished)
