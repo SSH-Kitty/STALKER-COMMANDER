@@ -38,8 +38,8 @@ PROGRAMS = ("anomaly", "xr_3da", "modorganizer", "commander", "stalker-gamma", "
 MAX_AGE_DAYS = 60
 MAX_REPORTS = 12
 MAX_DUMPS = 3
-#: Larger minidumps are listed, not packed (a heap dump is gigabytes).
-MAX_DUMP_BYTES = 64_000_000
+# Minidumps over log_dump's per-file cap (MAX_FILE_BYTES) are listed in the
+# dump's manifest as skipped, not packed (a heap dump is gigabytes).
 
 _EVENT_RE = re.compile(r"<Event\b.*?</Event>", re.DOTALL)
 _DATA_RE = re.compile(r"<Data(?:\s[^>]*)?>(.*?)</Data>|<Data(?:\s[^>]*)?/>", re.DOTALL)
@@ -71,10 +71,13 @@ class Crash:
 def _normal_code(value: str) -> str:
     """Windows writes exception codes in hex, with or without 0x; an
     all-digit code such as 80000003 is still hex. Only a negative number
-    is a decimal (a signed NTSTATUS)."""
-    value = value.strip().lower().removeprefix("0x")
+    is a decimal (a signed NTSTATUS). Anything else (a .NET exception
+    type such as System.IO.FileNotFoundException) is kept as written."""
+    value = value.strip()
     if value.startswith("-") and value[1:].isdigit():
-        value = f"{int(value) & 0xFFFFFFFF:08x}"
+        return f"{int(value) & 0xFFFFFFFF:08x}"
+    if re.fullmatch(r"(?:0[xX])?[0-9a-fA-F]+", value):
+        return value.lower().removeprefix("0x")
     return value
 
 
@@ -89,9 +92,12 @@ def _wer_roots() -> list[Path]:
 
 
 def _report_program(folder_name: str) -> str:
-    """``AppCrash_AnomalyDX11AVX._1f2e..._id`` -> ``AnomalyDX11AVX.``"""
-    parts = folder_name.split("_")
-    return parts[1] if len(parts) > 2 else ""
+    """``AppCrash_AnomalyDX11AVX._1f2e..._id`` -> ``AnomalyDX11AVX._1f2e..._id``.
+
+    Only the report-type prefix is cut: the program name can hold ``_``
+    itself (``xr_3da.exe``), so the rest is matched by its start."""
+    _kind, sep, rest = folder_name.partition("_")
+    return rest if sep else ""
 
 
 def wer_report_folders(roots: list[Path] | None = None, now: float | None = None) -> list[Path]:
@@ -211,7 +217,13 @@ def parse_events(xml: str) -> list[Crash]:
         elif number == "1026":
             text = data[0]
             app = re.search(r"([\w.-]+\.exe)", text)
-            code = re.search(r"\b(?:0x)?(e0434352|c0000005|c0000409|[0-9a-f]{8})\b", text, re.IGNORECASE)
+            # The exception type, as WER's Sig[7] names it; else a known
+            # code or an explicit 0x code, never any 8-digit hex word (an id).
+            code = (
+                re.search(r"Exception Info:\s*([\w.`+]+)", text)
+                or re.search(r"\b(?:0x)?(e0434352|c0000005|c0000409)\b", text, re.IGNORECASE)
+                or re.search(r"\b0x([0-9a-f]{8})\b", text, re.IGNORECASE)
+            )
             if app and is_game_program(app.group(1)):
                 crashes.append(Crash(stamp, "dotnet", app.group(1), "", _normal_code(code.group(1)) if code else "", "Event Log"))
     return crashes
@@ -275,7 +287,8 @@ def dump_entries() -> tuple[dict[str, str], dict[str, Path]]:
             crashes.append(crash)
     for path in crash_dump_files():
         files[f"crashdumps/{path.name}"] = path
-    crashes.sort(key=lambda crash: crash.when, reverse=True)
+    # Newest first; an unreadable time ("?") sorts last, not above the digits.
+    crashes.sort(key=lambda crash: (crash.when != "?", crash.when), reverse=True)
     header = [
         "Crashes and hangs Windows recorded for the game's programs",
         f"(last {MAX_AGE_DAYS} days, from Windows Error Reporting and the Event Log)",

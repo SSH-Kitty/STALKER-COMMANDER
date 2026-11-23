@@ -14,7 +14,8 @@ are in its settings. Each step's exit code is what the uninstaller reads.
 
 ``defender-count``
     Exit code: how many folders COMMANDER added to Microsoft Defender's
-    exclusions (at most 99).
+    exclusions (at most 99), or COUNT_UNKNOWN (100) when the list can't
+    be read.
 
 ``defender [--only-if-admin]``
     Removes those exclusions in one elevated PowerShell (one UAC prompt,
@@ -36,6 +37,8 @@ from pathlib import PureWindowsPath
 STEAM_RUNNING = 3
 DECLINED = 2
 FAILED = 1
+#: defender-count's exit code when the list can't be read (outside 0-99).
+COUNT_UNKNOWN = 100
 
 
 # ----------------------------------------------------------- GPU and Steam
@@ -159,7 +162,10 @@ def main(argv: list[str]) -> int:
         if step == "windows-changes" and len(rest) == 2 and rest[0] == "--app":
             return windows_changes(rest[1])
         if step == "defender-count":
-            return min(len(excluded_folders()), 99)
+            try:
+                return min(len(excluded_folders()), 99)
+            except Exception:  # noqa: BLE001 - FAILED (1) would read as "1 folder"
+                return COUNT_UNKNOWN
         if step == "defender":
             return remove_defender_exclusions(only_if_admin="--only-if-admin" in rest)
     except Exception:  # noqa: BLE001 - an uninstall must never stop on this

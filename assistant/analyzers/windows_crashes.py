@@ -30,7 +30,7 @@ from ..findings import (
 from .common import FindingFactory
 
 _LINE_RE = re.compile(
-    r"^(?P<when>\S+ \S+)\s+(?P<kind>crash|hang|dotnet)\s+app=(?P<app>\S+)\s+"
+    r"^(?P<when>\?|\S+ \S+)\s+(?P<kind>crash|hang|dotnet)\s+app=(?P<app>\S+)\s+"
     r"module=(?P<module>\S+)\s+code=(?P<code>\S+)\s+source=(?P<source>.+)$"
 )
 
@@ -74,15 +74,19 @@ def _category(app: str) -> str:
 def analyze_windows_crashes(arcname: str, where: str, lines: list[str]) -> list[Finding]:
     """One finding per kind of crash (program, module, code), counted."""
     factory = FindingFactory(arcname, where)
-    groups: dict[tuple[str, str, str, str], list[tuple[int, str]]] = {}
+    groups: dict[tuple[str, str, str, str], list[tuple[int, str, str]]] = {}
     for index, line in enumerate(lines):
         match = _LINE_RE.match(line.strip())
         if match:
             key = (match["kind"], match["app"], match["module"], match["code"])
-            when = match["when"]
-            # One crash listed by both sources counts once.
-            if all(seen_when != when for _index, seen_when in groups.get(key, [])):
-                groups.setdefault(key, []).append((index, when))
+            when, source = match["when"], match["source"].strip()
+            # One crash listed by both sources (WER and the Event Log) counts
+            # once; two crashes in one minute from the same source are two.
+            if all(
+                seen_when != when or seen_source == source
+                for _index, seen_when, seen_source in groups.get(key, [])
+            ):
+                groups.setdefault(key, []).append((index, when, source))
     if not groups:
         return [
             factory.make(
@@ -97,7 +101,8 @@ def analyze_windows_crashes(arcname: str, where: str, lines: list[str]) -> list[
     findings = []
     for (kind, app, module, code), seen in groups.items():
         first_index = seen[0][0]
-        newest = max(when for _index, when in seen)
+        # "?" is a time Windows wrote unreadably: never "the newest".
+        newest = max((when for _index, when, _source in seen if when != "?"), default="?")
         count_text = tr("Windows recorded this {count} time(s), last on {when} (UTC).", count=len(seen), when=newest)
         meaning = knowledge.windows_crash_code(code)
         module = "" if module == "-" else module
@@ -134,7 +139,7 @@ def analyze_windows_crashes(arcname: str, where: str, lines: list[str]) -> list[
                 first_index + 1,
                 detail=" ".join(part for part in (meaning, count_text) if part),
                 suggestion=suggestion,
-                excerpt_text="\n".join(lines[index] for index, _when in seen[:5]),
+                excerpt_text="\n".join(lines[index] for index, _when, _source in seen[:5]),
                 technical=f"app={app} module={module or '-'} code={code or '-'}",
                 dedup_key=f"wincrash:{kind}:{app}:{module}:{code}",
             )

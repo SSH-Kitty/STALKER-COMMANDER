@@ -323,12 +323,22 @@ def build_log_dump(
                         else "ok, NOT REDACTED - binary file"
                     )
                     manifest_lines.append(f"[{tag}] {arcname} ({size} bytes)")
-            for arcname, value in sorted((extra_entries or {}).items()):
+            # Text first (the crash list is small and the ASSISTANT reads it),
+            # so the raw dumps after it cannot use up the total cap.
+            for arcname, value in sorted(
+                (extra_entries or {}).items(), key=lambda item: (not isinstance(item[1], str), item[0])
+            ):
                 arcname = "/".join(_safe_archive_part(part) for part in arcname.split("/"))
                 if isinstance(value, str):
-                    zf.writestr(arcname, _scrub(value))
-                    manifest_lines.append(f"[ok] {arcname}")
+                    data = _scrub(value).encode("utf-8")
+                    size = len(data)
+                    if size > per_file_cap or total_bytes + size > total_cap:
+                        skipped.append(f"{arcname} ({size} bytes)")
+                        continue
+                    zf.writestr(arcname, data)
+                    manifest_lines.append(f"[ok] {arcname} ({size} bytes)")
                     included += 1
+                    total_bytes += size
                     continue
                 try:
                     size = value.stat().st_size

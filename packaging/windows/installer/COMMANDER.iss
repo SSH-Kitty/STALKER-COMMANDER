@@ -50,9 +50,12 @@ VersionInfoOriginalFileName=COMMANDER-Installer-{#AppVersion}.exe
 ; Qt 6.11 (PySide6) needs Windows 10 1809 or newer.
 MinVersion=10.0.17763
 
-; Per user by default (no administrator prompt); the user can switch to all users.
+; Per user only (no administrator prompt). No "all users" option: COMMANDER's
+; settings, game folders and Windows changes are per user anyway, an admin
+; install would need UAC for every silent self-update, and an uninstall
+; elevated with another account's password would clean up that account's
+; profile instead of the player's.
 PrivilegesRequired=lowest
-PrivilegesRequiredOverridesAllowed=dialog
 DefaultDirName={autopf}\{#AppName}
 DefaultGroupName={#AppName}
 DisableProgramGroupPage=yes
@@ -268,6 +271,7 @@ end;
 // Exit codes of commander_gui/wincleanup.py.
 const
   CLEANUP_STEAM_RUNNING = 3;
+  CLEANUP_COUNT_UNKNOWN = 100;
 
 var
   DeleteSettings, DeleteBackups: Boolean;
@@ -304,7 +308,9 @@ begin
   if CleanupStep('windows-changes --app "' + ExpandConstant('{app}') + '"') = CLEANUP_STEAM_RUNNING then
     SteamShortcutsLeft := True;
   Count := CleanupStep('defender-count');
-  if Count <= 0 then
+  // 0 none; -1 couldn't start; CLEANUP_COUNT_UNKNOWN or above: the list
+  // can't be read, so the defender step would have nothing to remove.
+  if (Count <= 0) or (Count >= CLEANUP_COUNT_UNKNOWN) then
     Exit;
   if UninstallSilent then
   begin

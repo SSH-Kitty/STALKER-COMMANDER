@@ -65,13 +65,25 @@ class ReportTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             for name in ("AppCrash_AnomalyDX11AVX._1f_d3_aa", "AppCrash_chrome.exe_1f_d3_bb",
-                         "AppHang_ModOrganizer.ex_1f_d3_cc", "AppCrash_AnomalyDX11.exe_old_dd", "NonCritical_x_y_z"):
+                         "AppHang_ModOrganizer.ex_1f_d3_cc", "AppCrash_AnomalyDX11.exe_old_dd", "NonCritical_x_y_z",
+                         "AppCrash_xr_3da.exe_1f_d3_ee"):
                 (root / name).mkdir()
                 (root / name / "Report.wer").write_bytes(REPORT.encode("utf-16"))
             old = time.time() - 90 * 86400
             os.utime(root / "AppCrash_AnomalyDX11.exe_old_dd", (old, old))
             found = sorted(p.name for p in wincrash.wer_report_folders([root]))
-        self.assertEqual(found, ["AppCrash_AnomalyDX11AVX._1f_d3_aa", "AppHang_ModOrganizer.ex_1f_d3_cc"])
+        self.assertEqual(
+            found,
+            ["AppCrash_AnomalyDX11AVX._1f_d3_aa", "AppCrash_xr_3da.exe_1f_d3_ee", "AppHang_ModOrganizer.ex_1f_d3_cc"],
+        )
+
+    def test_a_dotnet_exception_type_keeps_its_case(self):
+        report = REPORT.replace("EventType=APPCRASH", "EventType=CLR20r3").replace(
+            "Sig[6].Value=c0000005", "Sig[7].Value=System.IO.FileNotFoundException"
+        )
+        self.assertEqual(wincrash.parse_report(report).code, "System.IO.FileNotFoundException")
+        self.assertEqual(wincrash._normal_code("0xC0000005"), "c0000005")
+        self.assertEqual(wincrash._normal_code("-1073741819"), "c0000005")
 
 
 class EventLogTest(unittest.TestCase):
@@ -83,6 +95,18 @@ class EventLogTest(unittest.TestCase):
                 ("crash", "AnomalyDX11AVX.exe", "xrGame.dll", "80000003", "2026-11-20 21:03"),
                 ("hang", "ModOrganizer.exe", "", "", "2026-11-21 08:15"),
             ],
+        )
+
+    def test_a_dotnet_event_names_the_exception_not_an_id(self):
+        xml = (
+            "<Event><System><EventID>1026</EventID><TimeCreated SystemTime='2026-11-21T09:00:00Z'/></System>"
+            "<EventData><Data>Application: stalker-gamma.exe CoreCLR Version: 8.0 thread 0000abcd "
+            "Exception Info: System.IO.FileNotFoundException: missing</Data></EventData></Event>"
+            "<Event><System><EventID>1026</EventID><TimeCreated SystemTime='2026-11-21T09:05:00Z'/></System>"
+            "<EventData><Data>Application: stalker-gamma.exe id 0000abcd code 0xE0434352</Data></EventData></Event>"
+        )
+        self.assertEqual(
+            [c.code for c in wincrash.parse_events(xml)], ["System.IO.FileNotFoundException", "e0434352"]
         )
 
     def test_unreadable_output_gives_nothing(self):
@@ -208,6 +232,17 @@ class AnalyzerTest(unittest.TestCase):
             "2026-11-20 21:03  crash   app=AnomalyDX11.exe  module=xrCore.dll  code=c0000005  source=Event Log",
         )
         self.assertIn("1 time(s)", findings[0].detail)
+
+    def test_two_crashes_in_one_minute_from_one_source_count_twice(self):
+        line = "2026-11-20 21:03  crash   app=AnomalyDX11.exe  module=xrCore.dll  code=c0000005  source=WER"
+        self.assertIn("2 time(s)", self._findings(line, line)[0].detail)
+
+    def test_an_unreadable_time_is_never_the_last_one(self):
+        findings = self._findings(
+            "?  crash   app=AnomalyDX11.exe  module=xrCore.dll  code=c0000005  source=WER",
+            "2026-11-20 21:03  crash   app=AnomalyDX11.exe  module=xrCore.dll  code=c0000005  source=WER",
+        )
+        self.assertIn("2 time(s), last on 2026-11-20 21:03", findings[0].detail)
 
     def test_out_of_memory_points_at_the_page_file(self):
         findings = self._findings("2026-11-20 21:03  crash   app=AnomalyDX11.exe  module=KERNELBASE.dll  code=c0000017  source=WER")

@@ -2950,12 +2950,18 @@ class InstallPage(QWidget):
                 os.name == "nt"
                 and not gamma_installed(profile.gamma, profile.mo2_profile)
                 and not anomaly_installed(profile.anomaly)
+                and (
+                    not Path(profile.gamma).expanduser().is_absolute()
+                    or not any(p and Path(p).expanduser().is_dir() for p in paths.values())
+                )
             ):
                 # Nothing installed yet: a fresh install defaults to the fixed
                 # root, not the CLI's relative default (which depends on where
-                # COMMANDER was started) or folders left by an uninstall. The
-                # player can still pick another folder. A half-done install
-                # (Anomaly in place) keeps its folders so GAMMA lands beside it.
+                # COMMANDER was started) or folders an uninstall removed. The
+                # player can still pick another folder. Folders that exist
+                # were picked on purpose (Create folders, Settings > Game, an
+                # interrupted install), and a half-done install (Anomaly in
+                # place) keeps its folders so GAMMA lands beside it.
                 suggested = DEFAULT_WINDOWS_ROOT
             folders = (profile.anomaly, profile.gamma, profile.cache)
             if getattr(self, "_seen_folders", None) != folders:

@@ -405,6 +405,9 @@ class UninstallCleanupTest(unittest.TestCase):
         gui_settings.save_gui_settings(defender_excluded=[r"C:\GAMMA\a", r"C:\GAMMA\b"])
         self.assertEqual(wincleanup.main(["defender-count"]), 2)
         self.assertEqual(wincleanup.main(["no-such-step"]), wincleanup.FAILED)
+        # Unreadable settings must not read as "1 folder" (FAILED's value).
+        with patch.object(wincleanup, "excluded_folders", side_effect=ValueError("corrupt")):
+            self.assertEqual(wincleanup.main(["defender-count"]), wincleanup.COUNT_UNKNOWN)
 
     @unittest.skipIf(not WINDOWS, "wincleanup only runs on Windows")
     def test_a_silent_uninstall_never_asks_for_admin_rights(self):
