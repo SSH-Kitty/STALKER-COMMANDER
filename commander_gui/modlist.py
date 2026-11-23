@@ -469,8 +469,43 @@ def save_lines(path: str | Path, lines: list[str]) -> None:
                 newline = "\r\n"
     except OSError:
         pass
+    old = _separator_names(path.read_text(encoding="utf-8", errors="replace").splitlines()) if path.is_file() else set()
     write_text(path, newline.join(lines) + newline)
     ensure_separator_folders(path, lines)
+    _remove_dropped_separator_folders(path, old - _separator_names(lines))
+
+
+def _separator_names(lines: list[str]) -> set[str]:
+    names: set[str] = set()
+    for line in lines:
+        try:
+            info = _line_info(line)
+        except ValueError:
+            continue
+        if info is not None and separator_name(info[1]) is not None:
+            names.add(info[1])
+    return names
+
+
+def _remove_dropped_separator_folders(modlist: Path, dropped: set[str]) -> None:
+    """Delete the folder of a category that was deleted or renamed.
+
+    MO2 adds any ``mods/`` folder missing from modlist.txt back to the list,
+    so a leftover ``<name>_separator`` folder made a deleted or renamed
+    category come back on the next launch. Only a folder holding nothing but
+    the ``meta.ini`` of a separator is removed.
+    """
+    mods = modlist.parent.parent.parent / "mods"
+    if modlist.parent.parent.name != "profiles" or not mods.is_dir():
+        return
+    for name in dropped:
+        folder = mods / name
+        try:
+            if folder.is_dir() and not folder.is_symlink() and [p.name for p in folder.iterdir()] == ["meta.ini"]:
+                (folder / "meta.ini").unlink()
+                folder.rmdir()
+        except OSError:
+            continue
 
 
 #: What MO2 itself writes into a separator's folder.

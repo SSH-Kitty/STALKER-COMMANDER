@@ -15307,3 +15307,20 @@ class TesterNov2VerifyAndImportTests(unittest.TestCase):
             (Path(tmp) / "logs" / "mo_interface.log").write_text("x")
             names = [p.name for p in _walk_candidates(Path(tmp))]
         self.assertEqual(names, ["mo_interface.log"])
+
+
+from commander_gui import modlist  # noqa: E402
+
+
+class DroppedSeparatorFolderTest(unittest.TestCase):
+    def test_deleted_category_folder_is_removed_so_mo2_cannot_bring_it_back(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "profiles" / "P" / "modlist.txt"
+            path.parent.mkdir(parents=True)
+            (root / "mods").mkdir()
+            modlist.save_lines(path, ["+Mod", "-Stuff_separator"])
+            folder = root / "mods" / "Stuff_separator"
+            self.assertTrue(folder.is_dir())
+            modlist.save_lines(path, ["+Mod"])
+            self.assertFalse(folder.exists())

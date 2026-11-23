@@ -67,6 +67,7 @@ from ..mod_install import (
     write_basic_meta_ini,
 )
 from ..modlist import (
+    _PINNED_FIRST_CATEGORIES,
     BACKUP_SUFFIX,
     _line_info,
     _valid_name,
@@ -3086,7 +3087,12 @@ class ModManagerPage(QWidget):
         move_up_action.setEnabled(not blocked)
         move_down_action.setEnabled(not blocked)
         delete_action = None
-        if category in self._tracked_user_categories():
+        # An empty category is safe to offer Delete on even when COMMANDER did
+        # not create it (one made in MO2 or an older install has no record).
+        is_empty = not any(name == category and mods for name, mods in grouped(self._lines))
+        if category in self._tracked_user_categories() or (
+            is_empty and category.strip().lower() not in _PINNED_FIRST_CATEGORIES
+        ):
             menu.addSeparator()
             delete_action = menu.addAction(tr("Delete Category"))
             delete_action.setEnabled(not blocked)
