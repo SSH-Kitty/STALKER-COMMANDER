@@ -718,6 +718,17 @@ class RegressionTests(unittest.TestCase):
             from commander_gui.winetricks import WINETRICKS_VERBS
 
             self.assertLessEqual(set(WINETRICKS_VERBS), set(page.deps_rows))
+            # Nothing installed: on Windows both folder fields default to
+            # C:\GAMMA (the player can pick another). Elsewhere they show
+            # the profile's own folders.
+            from commander_gui.ui.install_page import DEFAULT_WINDOWS_ROOT
+
+            expected_root = DEFAULT_WINDOWS_ROOT if os.name == "nt" else str(Path(tmp))
+            self.assertEqual(page.root_card_edit.text(), expected_root)
+            self.assertEqual(page.auto_root_edit.text(), expected_root)
+            # Picking the profile's own folder shows those folders as they are.
+            page.root_card_edit.setText(str(Path(tmp)))
+            page._refresh_folder_tiles(profile)
             # Step 1 previews a newly picked Installation directory.
             self.assertEqual(page.folder_tiles["anomaly"].state, "warn")
             page.root_card_edit.setText(str(Path(tmp) / "new"))

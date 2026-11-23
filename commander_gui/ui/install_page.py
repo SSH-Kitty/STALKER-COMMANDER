@@ -2948,11 +2948,14 @@ class InstallPage(QWidget):
             suggested = parent
             if (
                 os.name == "nt"
-                and not Path(profile.gamma).expanduser().is_absolute()
                 and not gamma_installed(profile.gamma, profile.mo2_profile)
+                and not anomaly_installed(profile.anomaly)
             ):
-                # The CLI's relative default: suggest the fixed root instead
-                # of a folder that depends on where COMMANDER was started.
+                # Nothing installed yet: a fresh install defaults to the fixed
+                # root, not the CLI's relative default (which depends on where
+                # COMMANDER was started) or folders left by an uninstall. The
+                # player can still pick another folder. A half-done install
+                # (Anomaly in place) keeps its folders so GAMMA lands beside it.
                 suggested = DEFAULT_WINDOWS_ROOT
             folders = (profile.anomaly, profile.gamma, profile.cache)
             if getattr(self, "_seen_folders", None) != folders:
