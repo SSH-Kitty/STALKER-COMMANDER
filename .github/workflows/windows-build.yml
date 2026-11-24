@@ -1,5 +1,5 @@
 # Tests the Windows version, then builds it on every push to the
-# COMMANDER-Windows branch, or by hand from the Actions tab. Two downloads:
+# main branch, or by hand from the Actions tab. Two downloads:
 #   "COMMANDER Portable"  - the app, ready to run (COMMANDER.exe + data\),
 #                           with COMMANDER.exe.sha512sum
 #   "COMMANDER Installer" - COMMANDER-Installer-<version>.exe and its
@@ -9,9 +9,9 @@ name: Windows build
 
 on:
   push:
-    branches: [COMMANDER-Windows]
+    branches: [main]
   pull_request:
-    branches: [COMMANDER-Windows]
+    branches: [main]
   workflow_dispatch:
 
 permissions:
