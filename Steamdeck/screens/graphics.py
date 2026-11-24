@@ -13,9 +13,11 @@ look picked here already covers.
 
 from __future__ import annotations
 
+import itertools
 from pathlib import Path
 
 from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
 from commander_gui import gui_settings, launch_options, overlays
 from commander_gui.i18n import tr
@@ -23,6 +25,9 @@ from commander_gui.ui.frame_gen_card import FrameGenCard, game_has_frame_gen
 
 from ..scale import px
 from ..widgets import (
+    MARGIN_X,
+    MARGIN_Y,
+    ROW_GAP,
     DeckPicker,
     DeckRow,
     DeckSegmented,
@@ -43,14 +48,34 @@ _LOOKS = (
 )
 
 
+#: The narrowest a column of modules goes, at the Deck's scale.
+_MIN_COLUMN = 380
+
+
 class GraphicsScreen(DeckScreen):
     came_from = "settings"
 
     def build(self) -> None:
+        # Each section is a module in a column. Short enough to fit the
+        # screen, they stack in one; if not, they go side by side (_reflow),
+        # so nothing runs off the bottom of a game overlay nobody scrolls.
+        self._modules: list[QWidget] = []
+        self._choices: list[tuple[DeckSegmented, int]] = []
+        self._columns = [QVBoxLayout(), QVBoxLayout(), QVBoxLayout()]
+        grid = QHBoxLayout()
+        grid.setSpacing(px(ROW_GAP * 2))
+        for column in self._columns:
+            column.setSpacing(px(ROW_GAP))
+            column.setContentsMargins(0, 0, 0, 0)
+            grid.addLayout(column, 1)
+        self.body.addLayout(grid)
+        self._placed: tuple | None = None
+        self._heights_key: list[int] = []
         # (segmented, variable) for the frame generation rows.
         self._fg_rows: list[tuple[DeckSegmented, str]] = []
         self._section(tr("Frame generation"))
-        self._caption(tr("Lossless Scaling Frame Generation for smoother gameplay. Plays best above 40 FPS but adds a little input lag."))
+        self.fg_about = deck_label("", role="caption", wrap=True)
+        self.body.addWidget(self.fg_about)
         self.fg_status = deck_label("", role="caption", wrap=True)
         self.fg_status.setObjectName("deckBodyWarn")
         self.body.addWidget(self.fg_status)
@@ -125,11 +150,90 @@ class GraphicsScreen(DeckScreen):
             list(zip((tr("Off"), "FXAA", "SMAA"), overlays.VKBASALT_AA)),
             lambda value: self._save(vkbasalt_aa=value),
         )
-        self.body.addStretch(1)
+        self._reflow()
 
     # -- building blocks ----------------------------------------------------
     def _section(self, text: str) -> None:
-        self.body.addWidget(deck_label(text, role="rowTitle"))
+        """Start a module: the rows after this go into it."""
+        module = QWidget()
+        layout = QVBoxLayout(module)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(px(ROW_GAP))
+        self._modules.append(module)
+        self.body = layout
+        layout.addWidget(deck_label(text, role="rowTitle"))
+
+    # -- layout -----------------------------------------------------------
+    def _heights(self, width: int) -> list[int]:
+        out = []
+        for module in self._modules:
+            layout = module.layout()
+            out.append(layout.totalHeightForWidth(width) if layout.hasHeightForWidth() else layout.sizeHint().height())
+        return out
+
+    @staticmethod
+    def _need(module: QWidget) -> int:
+        """The width a module's rows need. Its wrapped captions are left out:
+        they wrap to whatever width there is."""
+        rows = (module.layout().itemAt(n).widget() for n in range(module.layout().count()))
+        return max((w.minimumSizeHint().width() for w in rows if w is not None and not isinstance(w, QLabel)), default=0)
+
+    def _fit_choices(self, columns: int) -> None:
+        """Narrower columns, narrower choices, but never narrower than their
+        own labels ("Lossless Scaling")."""
+        each = {1: 150, 2: 105, 3: 75}[columns]
+        for segmented, n in self._choices:
+            segmented.setMinimumWidth(0)
+            segmented.setMaximumWidth(16777215)
+            segmented.setFixedWidth(max(px(each * n), segmented.sizeHint().width()))
+        for module in self._modules:
+            module.layout().invalidate()  # their widths changed
+
+    def _reflow(self) -> None:
+        """As few columns as fit this screen's height (up to three), the
+        modules in order across them; a count whose modules can't sit side
+        by side in the width is skipped."""
+        total, avail = self.width(), self.height() - 2 * px(MARGIN_Y)
+        gap, inner = px(ROW_GAP), self.width() - 2 * px(MARGIN_X)
+        count = len(self._modules)
+        best = None
+        for columns in range(1, min(3, count) + 1):
+            self._fit_choices(columns)
+            width = (inner - px(ROW_GAP * 2) * (columns - 1)) // columns
+            heights = self._heights(width)
+            needs = [self._need(m) for m in self._modules]
+            options = []
+            for cut in itertools.combinations(range(1, count), columns - 1):
+                spans = list(zip((0, *cut), (*cut, count)))
+                wide = sum(max(needs[a:b]) for a, b in spans) + px(ROW_GAP * 2) * (columns - 1)
+                tall = max(sum(heights[a:b]) + gap * (b - a - 1) for a, b in spans)
+                if wide <= inner:
+                    options.append((tall, cut))
+            if not options:
+                continue
+            tall, cut = min(options)
+            best = (columns, cut)
+            if tall <= avail:
+                break
+        columns, cuts = best or (1, ())
+        self._fit_choices(columns)
+        key = (columns, cuts, total)
+        if key == self._placed and self._heights_key == self._heights(inner):
+            return
+        self._placed, self._heights_key = key, self._heights(inner)
+        for column in self._columns:
+            while column.count():
+                column.takeAt(0)
+        for n, (a, b) in enumerate(zip((0, *cuts), (*cuts, count))):
+            for module in self._modules[a:b]:
+                self._columns[n].addWidget(module)
+        for column in self._columns:
+            column.addStretch(1)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        if getattr(self, "_modules", None):  # not before build() is done
+            self._reflow()
 
     def _caption(self, text: str) -> None:
         self.body.addWidget(deck_label(text, role="caption", wrap=True))
@@ -141,6 +245,7 @@ class GraphicsScreen(DeckScreen):
         row.value_label.hide()
         segmented = DeckSegmented(options)
         segmented.setFixedWidth(px(150 * len(options)))
+        self._choices.append((segmented, len(options)))
         segmented.changed.connect(on_change)
         row.layout().addWidget(segmented)
         self.body.addWidget(row)
@@ -195,8 +300,14 @@ class GraphicsScreen(DeckScreen):
     def _refresh_frame_gen(self, text: str) -> None:
         on = launch_options.is_on(text, launch_options.FRAME_GEN)
         dll = launch_options.lossless_dll()
-        ready = launch_options.frame_gen_ready(dll)
-        if dll is None:
+        model = launch_options.frame_gen_model(text)
+        mako = model == launch_options.MODEL_MAKO
+        ready = launch_options.frame_gen_ready(dll, model)
+        if mako and not ready:
+            status = tr("MAKO FG is missing from this COMMANDER install. Reinstall COMMANDER, or pick Lossless Scaling.")
+        elif mako:
+            status = tr("Frame generation wasn't on when the game started, so changes apply from the next launch. In co-op, let COMMANDER restart Steam when it asks.") if game_has_frame_gen() is False else ""
+        elif dll is None:
             status = tr("Frame generation needs Lossless Scaling (paid, on Steam). In Desktop Mode, set its Properties > Compatibility to a Proton version and install it: COMMANDER finds its Lossless.dll there.")
         elif not ready and dll.name.lower() == launch_options.BETA_DLL.lower():
             status = tr("lsfg-vk.dll is from Lossless Scaling's lsfg-vk beta. In Steam, switch Lossless Scaling back to its usual version (Properties > Betas > None), or pick its Lossless.dll.")
@@ -206,6 +317,10 @@ class GraphicsScreen(DeckScreen):
             status = tr("Frame generation wasn't on when the game started, so changes apply from the next launch. In co-op, let COMMANDER restart Steam when it asks.")
         else:
             status = ""
+        self.fg_about.setText(tr(
+            "MAKO FG frame generation for smoother gameplay. Plays best above 40 FPS but adds a little input lag." if mako
+            else "Lossless Scaling Frame Generation for smoother gameplay. Plays best above 40 FPS but adds a little input lag."))
+        self.dll_row.setVisible(not mako)
         self.dll_row.set_value(launch_options.dll_label(dll) if dll else tr("No DLL found"))
         self.fg_status.setText(status)
         self.fg_status.setVisible(bool(status))
@@ -213,11 +328,17 @@ class GraphicsScreen(DeckScreen):
         # Left on with no DLL any more: it can still be switched off.
         self.fg_row.setEnabled(ready or on)
         for segmented, key in self._fg_rows:
+            if key == launch_options.FG_MODEL:
+                # A choice, not a setting: always shown, always open.
+                segmented.set_value(model)
+                segmented.setEnabled(True)
+                continue
             current = launch_options.var(text, key)
             if key == launch_options.FG_MULTIPLIER:
                 current = current or "2"
             segmented.set_value(current if on else object())
             segmented.setEnabled(on and ready)
+        self._reflow()  # a status line comes and goes: the height changes
 
     def _choose_dll(self) -> None:
         """Lossless Scaling's Lossless.dll, picked by hand."""

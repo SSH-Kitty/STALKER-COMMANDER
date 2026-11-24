@@ -1550,7 +1550,10 @@ def _log_launch(command: list[str], env: dict[str, str], cwd: str) -> None:
     else:
         try:
             dll = launch_options.lossless_dll()
-            lines.append(f"frame gen: not loaded (Lossless.dll={dll}, ready={launch_options.frame_gen_ready(dll)})")
+            lines.append(
+                f"frame gen: not loaded (Lossless.dll={dll}, ready={launch_options.frame_gen_ready(dll)}, "
+                f"MAKO FG ready={launch_options.mako_fg_ready()})"
+            )
         except (OSError, ValueError) as exc:
             lines.append(f"frame gen: not loaded ({exc})")
     data_home = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share")

@@ -82,12 +82,17 @@ FRAME_GEN = "LSFGVK_ENV=1"
 FG_MULTIPLIER = "LSFGVK_MULTIPLIER"
 FG_FLOW_SCALE = "LSFGVK_FLOW_SCALE"
 FG_PERFORMANCE = "LSFGVK_PERFORMANCE_MODE"
+#: Which model makes the frames: MAKO FG, shipped with COMMANDER, or Lossless
+#: Scaling's, which needs the user's Lossless.dll.
+FG_MODEL = "LSFGVK_MODEL"
+MODEL_MAKO = "mako-fg"
+MODEL_LOSSLESS = "lossless-scaling"
 #: Frame generation runs on Lossless Scaling's usual Lossless.dll.
 #: lsfg-vk.dll is its lsfg-vk beta branch's, which it doesn't run.
 LOSSLESS_DLL = "Lossless.dll"
 BETA_DLL = "lsfg-vk.dll"
 #: The frame generation layer, shipped in COMMANDER: MAKO Renderer
-#: (GPL-3.0-or-later, its render-v4.6.0 release, unmodified; licenses in
+#: (GPL-3.0-or-later, its render-v5.0.0 release, unmodified; licenses in
 #: licenses/MAKO). lsfg-vk 2's code, run with Lossless.dll.
 _BUNDLED_FRAME_GEN = Path(__file__).resolve().parent.parent / "cli" / "usr" / "lib" / "mako" / "libmako-render.so"
 #: Its explicit layer: enabled through VK_INSTANCE_LAYERS, under the
@@ -125,12 +130,37 @@ def native_dll(path: Path) -> bool:
     return len(head) >= clr + 8 and int.from_bytes(head[clr + 4 : clr + 8], "little") == 0
 
 
-def frame_gen_ready(dll: Path | None = None) -> bool:
-    """True when frame generation can run with dll (by default
-    lossless_dll()): COMMANDER has it, and dll is a Lossless.dll."""
+def mako_fg_ready() -> bool:
+    """True when MAKO FG's layer and program are in this COMMANDER."""
+    return _BUNDLED_FRAME_GEN.is_file() and (_BUNDLED_FG / "mako-fg-host").is_file()
+
+
+def mako_fg_label() -> str:
+    """MAKO FG and its version, e.g. MAKO FG V1.24, from what is bundled."""
+    try:
+        return json.loads((_BUNDLED_FG / "version.json").read_text())["display"]
+    except (OSError, ValueError, KeyError):
+        return "MAKO FG"
+
+
+def frame_gen_ready(dll: Path | None = None, model: str = MODEL_LOSSLESS) -> bool:
+    """True when frame generation can run with model: MAKO FG needs only
+    COMMANDER's own files, Lossless Scaling's also dll (by default
+    lossless_dll()) to be a Lossless.dll."""
+    if model == MODEL_MAKO:
+        return mako_fg_ready()
     dll = dll or lossless_dll()
     return (dll is not None and _BUNDLED_FRAME_GEN.is_file()
             and dll.name.lower() != BETA_DLL.lower() and native_dll(dll))
+
+
+def frame_gen_model(text: str) -> str:
+    """The model in the launch options text. Unpicked: Lossless Scaling's
+    when its DLL is usable (what COMMANDER ran before MAKO FG), else MAKO FG."""
+    chosen = var(text, FG_MODEL)
+    if chosen in (MODEL_MAKO, MODEL_LOSSLESS):
+        return chosen
+    return MODEL_LOSSLESS if frame_gen_ready(model=MODEL_LOSSLESS) else MODEL_MAKO
 
 
 def install_layer(bundled: Path, library_path: Path, manifest: dict, manifest_path: Path) -> None:
@@ -204,9 +234,44 @@ def _install_frame_gen() -> None:
             "instance_extensions": [{"name": "VK_EXT_swapchain_colorspace", "spec_version": "4"}],
         },
     }, _data_home() / "vulkan" / "explicit_layer.d" / "commander-mako.json")
+    _install_frame_gen_host()
 
 
-def _frame_gen_config(dll: Path, text: str) -> Path:
+#: MAKO FG's program and model, shipped beside the layer; the layer looks
+#: for mako-fg/ next to its own library, so the copy goes beside the copy.
+_BUNDLED_FG = _BUNDLED_FRAME_GEN.parent / "mako-fg"
+
+
+#: What MAKO FG needs beside the layer, to run.
+_FG_FILES = ("version.json", "mako-fg-host", "model/weights.bin", "model/ops.spv", "model/transport.spv", "model/mixture.spv")
+
+
+def _install_frame_gen_host() -> None:
+    """Copy MAKO FG out of COMMANDER beside the installed layer, as
+    install_layer does for the layer, when its version changed or a file is
+    missing. Each file goes in under a temporary name and is renamed over the
+    old one: a running game keeps its mako-fg-host (copying over a program
+    that runs fails), and an interrupted copy never leaves half a file."""
+    import shutil
+
+    target = _data_home() / "commander" / "mako" / "mako-fg"
+    version = _BUNDLED_FG / "version.json"
+    if not version.is_file():
+        return
+    if all((target / name).is_file() for name in _FG_FILES) \
+            and (target / "version.json").read_bytes() == version.read_bytes():
+        return
+
+    def copy(source: str, destination: str) -> None:
+        shutil.copy2(source, destination + ".part")
+        os.replace(destination + ".part", destination)
+
+    shutil.copytree(_BUNDLED_FG, target, dirs_exist_ok=True, copy_function=copy)
+    # version.json last: it is what says the copy is whole.
+    copy(str(version), str(target / "version.json"))
+
+
+def _frame_gen_config(dll: Path | None, text: str, model: str = MODEL_LOSSLESS) -> Path:
     """The frame generation config file (MAKO_CONFIG), from the variables in
     text. It is reread while the game runs, on and off included: off is
     frame_generation_enabled = false, which passes frames through."""
@@ -215,14 +280,16 @@ def _frame_gen_config(dll: Path, text: str) -> Path:
     lines = [
         "version = 2",
         "[global]",
-        f"dll = {json.dumps(str(dll))}",
+        *([f"dll = {json.dumps(str(dll))}"] if model == MODEL_LOSSLESS and dll else []),
         "[[profile]]",
         f"name = {json.dumps(_PROFILE)}",
         f"active_in = {json.dumps(list(_GAMES))}",
+        f"frame_generation_model = {json.dumps(model)}",
         f"frame_generation_enabled = {'true' if is_on(text, FRAME_GEN) else 'false'}",
         f"multiplier = {_multiplier(text)}",
         f"flow_scale = {_flow_scale(text)}",
         f"performance_mode = {'true' if var(text, FG_PERFORMANCE) == '1' else 'false'}",
+        f"mako_fg_mode = {json.dumps('performance' if var(text, FG_PERFORMANCE) == '1' else 'quality')}",
     ]
     return _write_config(settings_dir() / "frame-gen.toml", lines)
 
@@ -230,9 +297,9 @@ def _frame_gen_config(dll: Path, text: str) -> Path:
 def live_frame_gen(text: str) -> None:
     """The Play page's frame generation settings, to a running game: it
     rereads its config file, on and off included."""
-    dll = lossless_dll()
-    if frame_gen_ready(dll):
-        _frame_gen_config(dll, text)
+    dll, model = lossless_dll(), frame_gen_model(text)
+    if frame_gen_ready(dll, model):
+        _frame_gen_config(dll, text, model)
 
 
 def _resolve_frame_gen(env: dict[str, str]) -> None:
@@ -244,11 +311,16 @@ def _resolve_frame_gen(env: dict[str, str]) -> None:
     shortcut never changes with it. First in VK_INSTANCE_LAYERS: nearest
     the game, over vkBasalt and MangoHud (see overlays._under_frame_gen)."""
     names = {key: env.pop(key) for key in [k for k in env if k.startswith("LSFGVK_")]}
-    dll = lossless_dll()
-    if not frame_gen_ready(dll):
+    text = shlex.join(f"{k}={v}" for k, v in names.items())
+    dll, model = lossless_dll(), frame_gen_model(text)
+    if not frame_gen_ready(dll, model):
+        return
+    # Nobody who never set frame generation up (no pick, no Lossless.dll, off)
+    # gets a layer in their game: MAKO FG is there to turn on, not to load.
+    if var(text, FG_MODEL) is None and not frame_gen_ready(dll) and not is_on(text, FRAME_GEN):
         return
     _install_frame_gen()
-    env["MAKO_CONFIG"] = str(_frame_gen_config(dll, shlex.join(f"{k}={v}" for k, v in names.items())))
+    env["MAKO_CONFIG"] = str(_frame_gen_config(dll, text, model))
     others = [layer for layer in env.get("VK_INSTANCE_LAYERS", "").split(":") if layer and layer != FRAME_GEN_LAYER]
     env["VK_INSTANCE_LAYERS"] = ":".join([FRAME_GEN_LAYER, *others])
     # As MAKO's own launcher: no lsfg-vk installed on the system next to
@@ -317,11 +389,12 @@ def set_var(text: str, key: str, value: str | None) -> str:
 
 def frame_gen(text: str, on: bool) -> str:
     """text with frame generation switched on (at 2x unless a multiplier is
-    set) or off, which takes all of lsfg-vk's variables out."""
+    set) or off, which takes all of lsfg-vk's variables out but the model's:
+    that is a choice, not a setting of the running frame generation."""
     if on:
         text = toggle(text, FRAME_GEN, True)
         return text if var(text, FG_MULTIPLIER) else set_var(text, FG_MULTIPLIER, "2")
-    return shlex.join(t for t in split(text) if not t.startswith("LSFGVK_"))
+    return shlex.join(t for t in split(text) if not t.startswith("LSFGVK_") or t.startswith(FG_MODEL + "="))
 
 
 def split(text: str) -> list[str]:

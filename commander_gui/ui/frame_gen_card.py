@@ -38,6 +38,7 @@ class FrameGenCard(QWidget):
     #: Each settings row: (row label, variable, ((button text, value), ...)).
     #: A None value leaves the variable out, for the default.
     _ROWS = (
+        ("Model", launch_options.FG_MODEL, (("MAKO FG", launch_options.MODEL_MAKO), ("Lossless Scaling", launch_options.MODEL_LOSSLESS))),
         ("Multiplier", launch_options.FG_MULTIPLIER, (("2x", "2"), ("3x", "3"), ("4x", "4"), ("5x", "5"))),
         ("Detail", launch_options.FG_FLOW_SCALE, (("100%", None), ("75%", "0.75"), ("50%", "0.5"), ("25%", "0.25"))),
         ("Mode", launch_options.FG_PERFORMANCE, (("Quality", None), ("Performance", "1"))),
@@ -72,7 +73,8 @@ class FrameGenCard(QWidget):
             toggle.append((button, value))
         self._rows.append((toggle, None))
         layout.addLayout(header)
-        layout.addWidget(info_label(tr("Lossless Scaling Frame Generation for smoother gameplay. Plays best above 40 FPS but adds a little input lag.")))
+        self._about = info_label("")
+        layout.addWidget(self._about)
         self._missing = info_label("")
         self._missing.setObjectName("warn")
         self._missing.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
@@ -148,38 +150,48 @@ class FrameGenCard(QWidget):
         to get until there's a Lossless.dll. True when there is."""
         text = self._get_text()
         on = launch_options.is_on(text, launch_options.FRAME_GEN)
+        model = launch_options.frame_gen_model(text)
+        mako = model == launch_options.MODEL_MAKO
         steps = []
         dll = launch_options.lossless_dll()
-        ready = launch_options.frame_gen_ready(dll)
-        if dll is None:
+        if mako:
+            if not launch_options.mako_fg_ready():
+                steps.append(tr("MAKO FG is missing from this COMMANDER install. Reinstall COMMANDER, or pick Lossless Scaling."))
+        elif dll is None:
             steps.append(tr("Frame generation needs a file from Lossless Scaling (paid, on Steam). Set its Properties > Compatibility to a Proton version and install it: COMMANDER finds the file there. Have the file already? Use Choose DLL."))
-        elif not ready and dll.name.lower() == launch_options.BETA_DLL.lower():
+        elif not launch_options.frame_gen_ready(dll, model) and dll.name.lower() == launch_options.BETA_DLL.lower():
             steps.append(tr("lsfg-vk.dll is from Lossless Scaling's lsfg-vk beta. In Steam, switch Lossless Scaling back to its usual version (Properties > Betas > None), or pick its Lossless.dll."))
-        elif not ready:
+        elif not launch_options.frame_gen_ready(dll, model):
             steps.append(tr("That file isn't one frame generation can use. Pick Lossless.dll from Lossless Scaling."))
-        self._dll_label.setText(launch_options.dll_label(dll) if dll else tr("No DLL found"))
-        self._dll_label.setToolTip(str(dll or ""))
+        self._about.setText(tr(
+            "MAKO FG frame generation for smoother gameplay. Plays best above 40 FPS but adds a little input lag." if mako
+            else "Lossless Scaling Frame Generation for smoother gameplay. Plays best above 40 FPS but adds a little input lag."))
+        label = launch_options.mako_fg_label() if mako else launch_options.dll_label(dll) if dll else ""
+        self._dll_label.setText(label if mako or dll else tr("No DLL found"))
+        self._dll_label.setToolTip("" if mako else str(dll or ""))
         lines = list(steps)
         # Changes reach a running game only when frame generation was loaded
         # at its start; say so rather than let the buttons seem to do nothing.
         loaded = game_has_frame_gen()
         if not steps and loaded is False:
             lines = [tr("Frame generation wasn't on when the game started, so changes apply from the next launch. In co-op, let COMMANDER restart Steam when it asks.")]
-        self._running.setText(tr("Loaded in the running game, with {dll}.", dll=launch_options.dll_label(dll)) if loaded and dll else "")
-        self._running.setVisible(bool(loaded and dll))
+        self._running.setText(tr("Loaded in the running game, with {dll}.", dll=label) if loaded and label else "")
+        self._running.setVisible(bool(loaded and label))
         self._missing.setText("\n".join(lines))
         self._missing.setVisible(bool(lines))
-        self._get_lossless_button.setVisible(dll is None)
+        self._get_lossless_button.setVisible(not mako and dll is None)
+        self._choose_dll_button.setVisible(not mako)
         for buttons, key in self._rows:
-            current = on if key is None else launch_options.var(text, key)
+            current = on if key is None else model if key == launch_options.FG_MODEL else launch_options.var(text, key)
             if key == launch_options.FG_MULTIPLIER:
                 current = current or "2"
             for button, value in buttons:
-                # Off, the settings show no pick: they'd look live.
-                button.setChecked(value == current and (on or key is None))
+                # Off, the settings show no pick: they'd look live. The model
+                # is a choice, not a setting: always shown, always open.
+                button.setChecked(value == current and (on or key in (None, launch_options.FG_MODEL)))
                 # Left on (typed in, or set before an uninstall): Off stays
                 # clickable so it can still be switched off.
-                button.setEnabled(on and not steps if key else not steps or (on and value is False))
+                button.setEnabled(True if key == launch_options.FG_MODEL else on and not steps if key else not steps or (on and value is False))
         return not steps
 
 
@@ -188,6 +200,8 @@ class WindowsFrameGenCard(FrameGenCard):
     Scaling app: COMMANDER writes a profile for the game into its settings
     and starts it with the game (see lossless_win). Needs the app, not a DLL;
     changes apply from the next launch."""
+
+    _ROWS = FrameGenCard._ROWS[1:]  # no model to pick: it is Lossless Scaling's
 
     def __init__(self, get_text, set_text) -> None:
         super().__init__(get_text, set_text)
@@ -215,6 +229,7 @@ class WindowsFrameGenCard(FrameGenCard):
             steps.append(tr("Frame generation needs the Lossless Scaling app (paid, on Steam). Install it and COMMANDER finds it there. Have it already somewhere else? Use Choose app."))
         elif not lossless_win.settings_path().is_file():
             steps.append(tr(lossless_win.MESSAGES["no-file"]))
+        self._about.setText(tr("Lossless Scaling Frame Generation for smoother gameplay. Plays best above 40 FPS but adds a little input lag."))
         self._dll_label.setText(f"{exe.parent.name}/{exe.name}" if exe else tr("Lossless Scaling not found"))
         self._dll_label.setToolTip(str(exe or ""))
         lines = list(steps)

@@ -14910,7 +14910,7 @@ class LaunchOptionChipTests(unittest.TestCase):
             head[clr + 4 : clr + 8] = clr_size.to_bytes(4, "little")
             return bytes(head)
 
-        text = "LSFGVK_ENV=1 LSFGVK_MULTIPLIER=3 LSFGVK_PERFORMANCE_MODE=1 %command%"
+        text = "LSFGVK_ENV=1 LSFGVK_MODEL=lossless-scaling LSFGVK_MULTIPLIER=3 LSFGVK_PERFORMANCE_MODE=1 %command%"
         with tempfile.TemporaryDirectory() as tmp:
             dll = Path(tmp, "Lossless.dll")
             dll.write_bytes(pe(0))
@@ -14942,6 +14942,8 @@ class LaunchOptionChipTests(unittest.TestCase):
             config = conf.read_text()
             self.assertIn('[[profile]]\nname = "COMMANDER"\nactive_in = ["AnomalyDX11AVX.exe", ', config)
             self.assertIn("frame_generation_enabled = true\nmultiplier = 3\n", config)
+            # MAKO 5 defaults to MAKO FG; COMMANDER keeps the model it has always run.
+            self.assertIn('frame_generation_model = "lossless-scaling"\n', config)
             self.assertIn("performance_mode = true\n", config)
             self.assertIn(f"dll = {json.dumps(str(dll))}\n", config)
             # Reread in the running game: off is frame_generation_enabled = false.
@@ -14971,6 +14973,71 @@ class LaunchOptionChipTests(unittest.TestCase):
             self.assertNotIn("enable_environment", layer)
         self.assertTrue(launch_options._BUNDLED_FRAME_GEN.is_file())
 
+    def test_frame_gen_model_is_picked_or_follows_the_dll(self):
+        """Unpicked: Lossless Scaling's when its DLL is usable (as COMMANDER
+        always ran), else MAKO FG, which needs no DLL. Off keeps the pick."""
+        from commander_gui import launch_options as lo
+
+        with patch.object(lo, "frame_gen_ready", side_effect=lambda dll=None, model=lo.MODEL_LOSSLESS: model == lo.MODEL_LOSSLESS):
+            self.assertEqual(lo.frame_gen_model(""), lo.MODEL_LOSSLESS)
+            self.assertEqual(lo.frame_gen_model("LSFGVK_MODEL=mako-fg"), lo.MODEL_MAKO)
+        with patch.object(lo, "frame_gen_ready", return_value=False):
+            self.assertEqual(lo.frame_gen_model(""), lo.MODEL_MAKO)
+            self.assertEqual(lo.frame_gen_model("LSFGVK_MODEL=bogus"), lo.MODEL_MAKO)
+        on = lo.frame_gen("LSFGVK_MODEL=lossless-scaling", True)
+        self.assertEqual(lo.frame_gen(on, False), "LSFGVK_MODEL=lossless-scaling")
+        self.assertEqual(lo.frame_gen("LSFGVK_MULTIPLIER=3 mangohud", False), "mangohud")
+
+    def test_mako_fg_layer_loads_only_for_those_who_set_frame_generation_up(self):
+        """No Lossless.dll, no pick, off: nothing is injected into the game.
+        Picked, or switched on: MAKO FG loads, with no DLL at all."""
+        from commander_gui import launch_options as lo
+
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"XDG_DATA_HOME": tmp}), \
+                patch("commander_gui.config.settings_dir", return_value=Path(tmp)), \
+                patch.object(lo, "lossless_dll", return_value=None):
+            lo._install_frame_gen.cache_clear()
+            for text, loads in (
+                ("", False),
+                ("LSFGVK_MULTIPLIER=3", False),
+                ("LSFGVK_ENV=1 LSFGVK_MULTIPLIER=2", True),
+                ("LSFGVK_MODEL=mako-fg", True),
+            ):
+                env = {}
+                env.update({k.split("=", 1)[0]: k.split("=", 1)[1] for k in text.split() if "=" in k})
+                lo._resolve_frame_gen(env)
+                self.assertEqual("MAKO_CONFIG" in env, loads, text)
+            lo._install_frame_gen.cache_clear()
+
+    def test_mako_fg_config_needs_no_dll(self):
+        from commander_gui import launch_options as lo
+
+        with tempfile.TemporaryDirectory() as tmp, patch("commander_gui.config.settings_dir", return_value=Path(tmp)):
+            config = lo._frame_gen_config(None, "LSFGVK_ENV=1 LSFGVK_PERFORMANCE_MODE=1", lo.MODEL_MAKO).read_text()
+        self.assertIn('frame_generation_model = "mako-fg"\n', config)
+        self.assertIn('mako_fg_mode = "performance"\n', config)
+        self.assertNotIn("dll =", config)
+
+    def test_bundled_mako_fg_is_copied_beside_the_installed_layer(self):
+        """The layer looks for mako-fg/ next to its own library."""
+        from commander_gui import launch_options
+
+        self.assertTrue((launch_options._BUNDLED_FG / "mako-fg-host").is_file())
+        self.assertTrue((launch_options._BUNDLED_FG / "model" / "ops.spv").is_file())
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"XDG_DATA_HOME": tmp}):
+            launch_options._install_frame_gen_host()
+            host = Path(tmp, "commander/mako/mako-fg/mako-fg-host")
+            self.assertTrue(host.is_file())
+            self.assertTrue(os.access(host, os.X_OK))
+            # A copy missing a file is made whole; a whole one is left alone.
+            Path(tmp, "commander/mako/mako-fg/model/ops.spv").unlink()
+            launch_options._install_frame_gen_host()
+            self.assertTrue(Path(tmp, "commander/mako/mako-fg/model/ops.spv").is_file())
+            stamp = host.stat().st_mtime_ns
+            launch_options._install_frame_gen_host()
+            self.assertEqual(host.stat().st_mtime_ns, stamp)
+            self.assertEqual(list(Path(tmp, "commander/mako/mako-fg").rglob("*.part")), [])
+
     def test_quiet_wine_logs_and_proton_log_exclude_each_other(self):
         from commander_gui import launch_options
 
@@ -14979,7 +15046,8 @@ class LaunchOptionChipTests(unittest.TestCase):
         self.assertEqual(launch_options.toggle(text, "PROTON_LOG=1", True), "PROTON_LOG=1")
 
     @unittest.skipIf(os.name == "nt", "launch wrappers and Vulkan layers are Linux only")
-    def test_coop_shortcut_options_ignore_game_mode(self):
+    @patch("commander_gui.launch_options.lossless_dll", return_value=None)  # this machine may have one
+    def test_coop_shortcut_options_ignore_game_mode(self, _dll):
         """The co-op shortcut is the same in Game and Desktop Mode (else each
         switch restarts Steam), and co-op never drops the Steam overlay."""
         from commander_gui import launch_options
@@ -14993,7 +15061,8 @@ class LaunchOptionChipTests(unittest.TestCase):
         self.assertEqual(shortcuts, {"mangohud %command% -x"})
 
     @unittest.skipIf(os.name == "nt", "launch wrappers and Vulkan layers are Linux only")
-    def test_for_steam_merges_into_shortcut_options(self):
+    @patch("commander_gui.launch_options.lossless_dll", return_value=None)  # this machine may have one
+    def test_for_steam_merges_into_shortcut_options(self, _dll):
         from commander_gui import launch_options
 
         base = "STEAM_COMPAT_DATA_PATH='/my pfx' SteamAppId=480 %command% run -e Anomaly"
@@ -15015,7 +15084,8 @@ class LaunchOptionChipTests(unittest.TestCase):
             self.assertEqual(launch_options.for_steam("", base), "STEAM_COMPAT_DATA_PATH='/my pfx' SteamAppId=480 %command% run -e Anomaly")
 
     @unittest.skipIf(os.name == "nt", "launch wrappers and Vulkan layers are Linux only")
-    def test_apply_splits_env_wrappers_and_arguments(self):
+    @patch("commander_gui.launch_options.lossless_dll", return_value=None)  # this machine may have one
+    def test_apply_splits_env_wrappers_and_arguments(self, _dll):
         from commander_gui import launch_options
 
         env: dict[str, str] = {}

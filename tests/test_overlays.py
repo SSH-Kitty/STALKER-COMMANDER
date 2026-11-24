@@ -26,7 +26,8 @@ class OverlayTests(unittest.TestCase):
         self.addCleanup(launch_options._install_frame_gen.cache_clear)
 
     @unittest.skipIf(os.name == "nt", "launch wrappers and Vulkan layers are Linux only")
-    def test_bundled_layers_replace_missing_ones(self):
+    @patch("commander_gui.launch_options.lossless_dll", return_value=None)  # this machine may have one
+    def test_bundled_layers_replace_missing_ones(self, _dll):
         gui_settings.save_gui_settings(mangohud_preset="fps", vkbasalt_preset="bleak", vkbasalt_sharpness="off", vkbasalt_aa="smaa")
         with patch("shutil.which", return_value=None):
             env = {}
@@ -332,7 +333,7 @@ class OverlayTests(unittest.TestCase):
         for name in ("Lossless.dll", "lsfg-vk.dll"):
             (folder / name).write_bytes(b"MZ")
         gui_settings.save_gui_settings(lossless_dll=str(folder / "lsfg-vk.dll"))
-        text = ["LSFGVK_ENV=1 %command%"]
+        text = ["LSFGVK_ENV=1 LSFGVK_MODEL=lossless-scaling %command%"]
         with patch("commander_gui.launcher._steam_library_paths", return_value=[]), \
                 patch.object(launch_options, "native_dll", return_value=True), \
                 patch.object(frame_gen_card, "game_has_frame_gen", return_value=None):
@@ -344,11 +345,11 @@ class OverlayTests(unittest.TestCase):
             self.assertIn("Properties > Betas > None", card._missing.text())
             _on, off = (button for button, _value in card._rows[0][0])
             self.assertTrue(off.isEnabled())  # left on: it can still go off
-            self.assertFalse(any(button.isEnabled() for button, _value in card._rows[1][0]))
+            self.assertFalse(any(button.isEnabled() for button, _value in card._rows[2][0]))
             # Off: the settings show no pick, so they don't look live.
             text[0] = launch_options.frame_gen(text[0], False)
             card.sync()
-            self.assertFalse(any(button.isChecked() for button, _value in card._rows[1][0]))
+            self.assertFalse(any(button.isChecked() for button, _value in card._rows[2][0]))
 
     def test_mouse_grab_set_in_the_prefix(self):
         # Off, so the overlay gets clicks over a fullscreen game; only the

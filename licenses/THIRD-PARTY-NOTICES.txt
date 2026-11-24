@@ -78,17 +78,32 @@ curl-impersonate                   (cli/usr/bin/libcurl-impersonate.so)
     (LICENSE_LIBIDN2_LGPL3, LICENSE_LIBIDN2_GPL2, LICENSE_LIBIDN2_GPL3,
     LICENSE_LIBIDN2_UNICODE) - source: https://ftp.gnu.org/gnu/libidn/
 
-MAKO Renderer 4.6.0               (cli/usr/lib/mako/libmako-render.so)
+MAKO Renderer 5.0.0               (cli/usr/lib/mako/libmako-render.so)
   Copyright (C) 2025-2026 Eugenio Segala and contributors.
   License: GPL-3.0-or-later (MAKO/LICENSE.md, also texts/GPL-3.0-only.txt);
   third-party parts it contains are listed in MAKO/THIRD_PARTY_NOTICES.md.
-  Source:  https://github.com/eugeniosegala/MAKO/tree/render-v4.6.0
-           and in COMMANDER's repository, licenses/MAKO/MAKO-render-v4.6.0-source.tar.gz
+  Source:  https://github.com/eugeniosegala/MAKO/tree/render-v5.0.0
+           and in COMMANDER's repository, licenses/MAKO/MAKO-render-v5.0.0-source.tar.gz
            (https://github.com/SSH-Kitty/STALKER-GAMMA-COMMANDER/tree/main/licenses/MAKO)
-  The 64-bit Vulkan layer from the render-v4.6.0 release archive
-  (MAKO-Renderer-v4.6.0-linux.tar.xz). It descends from the GPL-3.0-or-later
+  The 64-bit Vulkan layer from the render-v5.0.0 release archive
+  (MAKO-Renderer-v5.0.0-linux.tar.xz). It descends from the GPL-3.0-or-later
   lsfg-vk version 2 tree. It holds no Lossless Scaling code: frame
   generation needs the user's own Lossless.dll from Lossless Scaling.
+
+MAKO FG V1.24                     (cli/usr/lib/mako/mako-fg/)
+  MAKO FG by Eugenio Segala. Open-weight frame generation model and its
+  prebuilt runtime (mako-fg-host), from the render-v5.0.0 release archive.
+  License: CC BY-NC 4.0, non-commercial use only
+  (https://creativecommons.org/licenses/by-nc/4.0/; text in
+  cli/usr/lib/mako/mako-fg/LICENSE). Redistributed unmodified; its own
+  third-party notices (ncnn, glslang) are kept with it in
+  cli/usr/lib/mako/mako-fg/THIRD_PARTY_NOTICES.
+  Source of the model and runtime is not published.
+  Non-commercial note: COMMANDER is free. Donations and sponsorship fund
+  COMMANDER's own development. They do not pay for, unlock or condition
+  MAKO FG, which is not sold, and anyone who copies or repackages COMMANDER
+  must keep MAKO FG non-commercial as its licence requires.
+  Model: https://huggingface.co/eugeniosegala/MAKO-FG
 
 MangoHud 0.8.4                    (cli/usr/lib/mangohud/libMangoHud.so)
   Copyright (c) 2020 flightlessmango.
