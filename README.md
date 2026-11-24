@@ -22,6 +22,8 @@ like GAMMA and ROMEO, on Windows, Linux and the Steam Deck.**
 <a href="https://github.com/SSH-Kitty/STALKER-GAMMA-COMMANDER/releases/latest"><img alt="Download the AppImage" src="docs/readme/button-download.svg" width="300"></a>
 <br>
 <a href="https://discord.gg/6A9psrtYhh"><img alt="Join the Discord" src="docs/readme/button-discord.svg" width="300"></a>
+&nbsp;
+<a href="https://ko-fi.com/sshkitty"><img alt="Support on Ko-fi" src="docs/readme/button-kofi.svg" width="300"></a>
 
 <a href="#what-this-is"><img height="30" alt="What this is" src="https://img.shields.io/badge/What%20this%20is-1f2b21?style=for-the-badge"></a>
 <a href="#installation"><img height="30" alt="Installation" src="https://img.shields.io/badge/Installation-1f2b21?style=for-the-badge"></a>
