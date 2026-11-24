@@ -5,6 +5,8 @@ from __future__ import annotations
 import dataclasses
 import os
 import shutil
+import subprocess
+import sys
 import time
 import uuid
 from collections.abc import Mapping
@@ -292,6 +294,51 @@ def _validate_move_destination(
     return resolved_destination
 
 
+def _remove_tree(path: Path) -> None:
+    """Delete a folder tree; on Windows ``rd`` is far faster than ``rmtree``.
+
+    Python removes ~100k files one call at a time, which takes minutes under
+    Defender or in a VM. Falls back to ``rmtree``, clearing read-only flags.
+    """
+    if os.name == "nt":
+        try:
+            subprocess.run(
+                ["cmd", "/c", "rd", "/s", "/q", str(path)],
+                check=False,
+                capture_output=True,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        except OSError:
+            pass
+        if not path.exists():
+            return
+
+    def _clear_readonly(func, target, _exc):
+        try:
+            os.chmod(target, 0o700)
+            func(target)
+        except OSError:
+            pass
+
+    if sys.version_info >= (3, 12):
+        shutil.rmtree(path, onexc=_clear_readonly)
+    else:
+        shutil.rmtree(path, onerror=_clear_readonly)
+
+
+def _forget_stored_size(label: str) -> None:
+    """Zero a deleted folder in the Storage usage numbers the Dashboard shows
+    while the task is still running (it does not re-measure until it ends)."""
+    try:
+        stored = gui_settings.load_gui_settings().get("storage_sizes") or {}
+        sizes = stored.get("sizes")
+        if isinstance(sizes, dict) and label in sizes:
+            sizes[label] = 0
+            gui_settings.save_gui_settings(storage_sizes=stored)
+    except Exception:
+        pass
+
+
 def _wipe_folders(paths: list[tuple[str, str]], report) -> list[str]:
     """Delete the given ``(label, path)`` install folders completely.
 
@@ -311,9 +358,10 @@ def _wipe_folders(paths: list[tuple[str, str]], report) -> list[str]:
             report(f"{label}: folder not present, skipping ({path})")
             continue
         report(f"Deleting {label} folder: {resolved}")
-        shutil.rmtree(resolved, ignore_errors=True)
+        _remove_tree(resolved)
         if resolved.exists():
             raise ValueError(f"{label} folder could not be fully deleted: {resolved}")
+        _forget_stored_size(label)
         wiped.append(str(resolved))
         report(f"{label} folder deleted.")
     return wiped

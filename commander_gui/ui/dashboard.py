@@ -1685,8 +1685,8 @@ class DashboardPage(QWidget):
         """Mirror the Play page lock while installation work is active."""
         # An install, update or uninstall just changed the folders: measure
         # them again on the next refresh instead of reusing the cached sizes.
+        self._size_cache_key = None  # busy: redraw saved sizes, not stale memory
         if not busy:
-            self._size_cache_key = None
             self._update_cache = None  # an update may have just been applied
         button = getattr(self, "_play_button", None)
         if button is None:
