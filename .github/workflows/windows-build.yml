@@ -130,14 +130,14 @@ jobs:
           # Installer: the installed version's self-update refuses a Setup
           # without this file next to it on the release (self_update.py).
           foreach ($setup in Get-ChildItem dist/COMMANDER-Installer-*.exe) { Write-Sha512 $setup.FullName }
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           # A folder's contents go in the artifact as they are: the download
           # unzips straight to COMMANDER.exe, data\ and the checksum.
           name: COMMANDER Portable
           path: portable/
           if-no-files-found: error
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: COMMANDER Installer
           path: |
@@ -183,7 +183,7 @@ jobs:
         # The self-test fails the job unless the windowless exe reads its
         # stdin as UTF-8, starts Chromium and answers on stdout.
         run: python packaging/windows/pack_moddb_plugin.py
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: COMMANDER-ModDB-Browser-Plugin-windows-x86_64
           # Already xz-compressed: zipping it again only costs time.
