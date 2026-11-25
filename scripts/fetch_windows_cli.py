@@ -25,8 +25,8 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
-CLI_VERSION = "1.41.1"
-CLI_SHA256 = "e7fb059f564bb08da6dab0db98e3cb0f4ec5e47265a79794b4cbd6483c90b84e"
+CLI_VERSION = "1.44.0"
+CLI_SHA256 = "f1a19d74d9746adad6b777a8dda00aeb2af6560c9d4ee95b87267381e1412534"
 CLI_URL = (
     "https://github.com/FaithBeam/stalker-gamma-cli/releases/download/"
     f"{CLI_VERSION}/stalker-gamma%2Bwin.x64.zip"

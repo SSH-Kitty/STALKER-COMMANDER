@@ -332,7 +332,7 @@ TOPICS: list[dict] = [
             (
                 "The commands COMMANDER runs",
                 [
-                    "Every install goes through the bundled CLI. COMMANDER adds --progress-update-interval-ms 200 so it can draw the progress table smoothly, and reads each progress line (addon name, operation, percent and position) as it arrives.",
+                    "Every install goes through the bundled CLI. COMMANDER adds --progress-update-interval-ms 500 so it can draw the progress table smoothly, and reads each progress line (addon name, operation, percent and position) as it arrives.",
                     ("table", [
                         ("Install Anomaly", "stalker-gamma anomaly install"),
                         ("Verify Anomaly", "stalker-gamma anomaly check (compares every file against anomaly/tools/checksums.md5)"),

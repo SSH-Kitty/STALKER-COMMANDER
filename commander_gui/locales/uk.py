@@ -2181,7 +2181,7 @@ TRANSLATIONS: dict[str, str] = {
     'Installing Anomaly and GAMMA': 'Встановлення Anomaly та GAMMA',
     'Exactly what the Install page runs, what each option changes, and how failures are handled.': 'Що саме запускає сторінка «Встановлення», що змінює кожна опція і як обробляються збої.',
     'The commands COMMANDER runs': 'Команди, які запускає COMMANDER',
-    'Every install goes through the bundled CLI. COMMANDER adds --progress-update-interval-ms 200 so it can draw the progress table smoothly, and reads each progress line (addon name, operation, percent and position) as it arrives.': 'Кожне встановлення проходить через вбудовану CLI. COMMANDER додає --progress-update-interval-ms 200, щоб плавно малювати таблицю прогресу, і читає кожен рядок прогресу (назву аддона, операцію, відсоток і позицію) щойно він надходить.',
+    'Every install goes through the bundled CLI. COMMANDER adds --progress-update-interval-ms 500 so it can draw the progress table smoothly, and reads each progress line (addon name, operation, percent and position) as it arrives.': 'Кожне встановлення проходить через вбудовану CLI. COMMANDER додає --progress-update-interval-ms 500, щоб плавно малювати таблицю прогресу, і читає кожен рядок прогресу (назву аддона, операцію, відсоток і позицію) щойно він надходить.',
     'stalker-gamma anomaly install': 'stalker-gamma anomaly install',
     'Verify Anomaly': 'Перевірити Anomaly',
     'stalker-gamma anomaly check (compares every file against anomaly/tools/checksums.md5)': 'stalker-gamma anomaly check (порівнює кожен файл з anomaly/tools/checksums.md5)',

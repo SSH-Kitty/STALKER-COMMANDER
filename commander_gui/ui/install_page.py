@@ -3779,7 +3779,7 @@ class InstallPage(QWidget):
                 preserve_mcm=preserve_mcm,
             )
             + resume,
-            progress_interval_ms=200,
+            progress_interval_ms=500,
         )
         if skip_extract:
             # full_progress has no console pane; use the status bar instead.
@@ -4366,7 +4366,7 @@ class InstallPage(QWidget):
         self.full_progress.reset()
         self.anomaly_button.setEnabled(False)
         self.install_button.setEnabled(False)
-        cmd = cli_command(self._anomaly_install_args(), progress_interval_ms=200)
+        cmd = cli_command(self._anomaly_install_args(), progress_interval_ms=500)
         self._anomaly_runner = CommandRunner(cmd, parent=self)
         self._anomaly_runner.line.connect(self.full_progress.on_line)
         self._anomaly_runner.finished.connect(self._on_anomaly_finished)
@@ -5650,7 +5650,7 @@ class InstallPage(QWidget):
             except OSError:
                 pass  # the CLI says what went wrong
         runner = CommandRunner(
-            cli_command(args, progress_interval_ms=200),
+            cli_command(args, progress_interval_ms=500),
             parent=self,
         )
         runner.line.connect(self._on_verify_line)

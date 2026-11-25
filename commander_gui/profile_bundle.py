@@ -164,7 +164,7 @@ class ImportedProfileBundle:
                 except (TypeError, ValueError, OverflowError):
                     # OverflowError: JSON's Infinity parses to float("inf").
                     continue
-                if not 1 <= value <= 64:  # the Install page offers 1 to 8; this only stops absurd values
+                if not 1 <= value <= 20:  # the Install page offers 1 to 8; CLI 1.42+ exits on anything outside 1-20
                     continue
             elif not _valid_source_value(name, value):
                 continue

@@ -269,7 +269,7 @@ Everything added since the last stable release, **1.3.1**.
 
 #### Under the hood
 
-- **stalker-gamma-cli 1.36.1 → 1.41.1**: much faster updates (only changed files are extracted), faster unpacking,
+- **stalker-gamma-cli 1.36.1 → 1.44.0**: much faster updates (only changed files are extracted), faster unpacking,
   timestamped update logs, and no more `unzip` or `tar` needed.
 - Downloads without a known size show MB instead of a wrong percentage.
 - Stopping a long job asks first.

@@ -567,7 +567,7 @@ class UpdateScreen(DeckScreen):
         self.progress.show()
         self.action_button.hide()
         self._runner = CommandRunner(
-            cli_command(args, progress_interval_ms=200), parent=self
+            cli_command(args, progress_interval_ms=500), parent=self
         )
         self._runner.line.connect(self._on_line)
         self._runner.finished.connect(self._on_applied)

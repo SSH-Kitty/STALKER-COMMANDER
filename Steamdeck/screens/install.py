@@ -575,7 +575,7 @@ class InstallScreen(DeckScreen):
         if self.anomaly_mirror_row.is_checked():
             args.append("--use-anomaly-mirror")
         self._begin_run(
-            cli_command(args, progress_interval_ms=200),
+            cli_command(args, progress_interval_ms=500),
             operation="anomaly",
             status=tr("Installing Anomaly"),
         )
@@ -694,7 +694,7 @@ class InstallScreen(DeckScreen):
         if self._resuming:
             args += cli_resume_args(profile.gamma, "full-install")
         self._begin_run(
-            cli_command(args, progress_interval_ms=200),
+            cli_command(args, progress_interval_ms=500),
             operation="gamma",
             status=tr("Installing GAMMA"),
         )

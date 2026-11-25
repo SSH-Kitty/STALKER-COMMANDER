@@ -1054,7 +1054,7 @@ class UpdatePage(QWidget):
         if backup_error:
             self.apply_progress.log.append_line(f"Settings backup failed: {backup_error}")
         self._apply_runner = CommandRunner(
-            cli_command(args, progress_interval_ms=200), parent=self
+            cli_command(args, progress_interval_ms=500), parent=self
         )
         self._apply_runner.line.connect(self.apply_progress.on_line)
         self._apply_runner.finished.connect(self._on_apply_finished)

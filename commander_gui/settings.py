@@ -108,6 +108,8 @@ class CliProfile:
                     # a "DownloadThreads": Infinity value would crash
                     # load_settings() itself instead of just being skipped.
                     continue
+                if not 1 <= value <= 20:  # CLI 1.42+ exits on anything else
+                    continue
             elif python_key == "active":
                 if isinstance(value, bool):
                     pass
