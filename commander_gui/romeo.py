@@ -32,7 +32,7 @@ from threading import Event
 
 from . import atomic
 from .config import git_binary
-from .coop import _swap_dir
+from .coop import _swap_dir, recover_swaps
 from .mod_install import ModInstallError
 from .modlist import read_lines, save_lines
 
@@ -172,6 +172,27 @@ def _place_kept_mcm(modlist: Path, kept: list[str]) -> None:
     save_lines(modlist, lines)
 
 
+def _swap_profile(new: Path, old: Path) -> None:
+    """Replace the profile folder ``old`` with ``new``, keeping what ROMEO
+    does not ship: local saves, settings.ini and anything else of the player's."""
+    keep = old.with_name(f".{old.name}.keep")
+    shutil.rmtree(keep, ignore_errors=True)
+    moved: list[str] = []
+    if old.is_dir():
+        keep.mkdir()
+        for item in old.iterdir():
+            if not (new / item.name).exists():
+                os.replace(item, keep / item.name)
+                moved.append(item.name)
+    try:
+        _swap_dir(new, old)
+    finally:  # even if the swap failed, what was set aside goes back
+        for name in moved:
+            if not (old / name).exists():
+                os.replace(keep / name, old / name)
+        shutil.rmtree(keep, ignore_errors=True)
+
+
 def _merge(src: Path, dest: Path, keep_existing: bool) -> None:
     """Move every file under ``src`` to the same place under ``dest``."""
     for path in sorted(src.rglob("*")):
@@ -195,6 +216,7 @@ def install(
     list is kept as ``modlist.txt.before-update``.
     """
     src = staging / wrapper if wrapper else staging
+    recover_swaps(gamma)
     profile_dir = gamma / "profiles" / profile
     try:
         old_modlist = (profile_dir / "modlist.txt").read_bytes()
@@ -214,7 +236,7 @@ def install(
         _swap_dir(mod, gamma / "mods" / mod.name)
     for old in gone:
         shutil.rmtree(old)
-    _swap_dir(src / "GAMMA" / "profiles" / profile, gamma / "profiles" / profile)
+    _swap_profile(src / "GAMMA" / "profiles" / profile, gamma / "profiles" / profile)
     # First install only: on an update splash.png is already ROMEO's.
     if old_modlist is None and (gamma / "splash.png").is_file() and not (gamma / _SPLASH_BACKUP).exists():
         os.replace(gamma / "splash.png", gamma / _SPLASH_BACKUP)
@@ -330,6 +352,15 @@ def uninstall(gamma: Path, anomaly: Path, cache: Path) -> tuple[list[str], bool]
         (gamma / "splash.png").unlink(missing_ok=True)
     atmos = _restore_atmos(appdata, cache)
     for name in profiles:
+        saves = gamma / "profiles" / name / "saves"
+        try:
+            has_saves = saves.is_dir() and any(saves.iterdir())
+        except OSError:
+            has_saves = False
+        if has_saves:  # MO2 local saves live in the profile: keep them
+            keep = gamma / f"saves from removed profile {name}"
+            if not keep.exists():
+                shutil.copytree(saves, keep)
         shutil.rmtree(gamma / "profiles" / name)
     from .launcher import set_mo2_selected_profile
 

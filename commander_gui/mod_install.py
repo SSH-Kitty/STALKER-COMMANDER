@@ -170,10 +170,15 @@ def _list_archive_paths(archiver: Path, archive: Path) -> list[str]:
         block_lines = block.splitlines()
         # An archive-level block (the archive itself, or a nested archive's
         # header) describes a container, not an entry to extract.
+        # An entry always has a "Folder = " line, a header never does: a file
+        # name holding "\nType = 7z" must not pass for a header, or its own
+        # path would skip the checks below.
         if any(
             line.startswith(("Type = ", "Physical Size = ")) for line in block_lines
-        ):
+        ) and not any(line.startswith("Folder = ") for line in block_lines):
             continue
+        if sum(line.startswith("Path = ") for line in block_lines) > 1:
+            raise ModInstallError("Archive contains an entry name with a line break")
         path = None
         for line in block.splitlines():
             if line.strip() and not _LISTING_LINE_RE.match(line):

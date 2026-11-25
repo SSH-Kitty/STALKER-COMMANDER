@@ -472,7 +472,12 @@ def save_lines(path: str | Path, lines: list[str]) -> None:
     old = _separator_names(path.read_text(encoding="utf-8", errors="replace").splitlines()) if path.is_file() else set()
     write_text(path, newline.join(lines) + newline)
     ensure_separator_folders(path, lines)
-    _remove_dropped_separator_folders(path, old - _separator_names(lines))
+    new = _separator_names(lines)
+    # Windows folders ignore case: a case-only rename is the same folder.
+    keep = {n.lower() for n in new} if os.name == "nt" else new
+    _remove_dropped_separator_folders(
+        path, {n for n in old if (n.lower() if os.name == "nt" else n) not in keep}
+    )
 
 
 def _separator_names(lines: list[str]) -> set[str]:

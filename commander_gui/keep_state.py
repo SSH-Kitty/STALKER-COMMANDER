@@ -126,6 +126,8 @@ def _load(anomaly: Path, gamma: str) -> KeptState | None:
     """The state a stopped run saved for this install, if any."""
     try:
         data = json.loads((anomaly / _STATE_FILE).read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            return None
         state = KeptState(**{
             key: Path(value) if key in _PATH_FIELDS and value else value
             for key, value in data.items()

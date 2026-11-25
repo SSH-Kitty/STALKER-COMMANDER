@@ -178,10 +178,37 @@ def _check_unpacked_size(archive: zipfile.ZipFile) -> None:
         raise CoopError("This archive unpacks to an unreasonable size.")
 
 
+#: What _swap_dir calls the folder it set aside; unlike ".old" a player never types it.
+_SWAP_SUFFIX = ".commander-old"
+
+
+def recover_swaps(gamma) -> None:
+    """Clean up after a _swap_dir that a crash or power cut cut short.
+
+    The set-aside folder is put back when the new one never arrived, else
+    deleted. Left alone it shows in Mod Organizer as a second mod or profile
+    (ROMEO's is about 75 GB).
+    """
+    for parent in (Path(gamma).expanduser() / "mods", Path(gamma).expanduser() / "profiles"):
+        try:
+            leftovers = [p for p in parent.iterdir() if p.name.endswith(_SWAP_SUFFIX) and p.is_dir()]
+        except OSError:
+            continue
+        for old in leftovers:
+            dest = old.with_name(old.name[: -len(_SWAP_SUFFIX)])
+            try:
+                if dest.exists():
+                    shutil.rmtree(old, ignore_errors=True)
+                else:
+                    os.replace(old, dest)
+            except OSError:
+                pass
+
+
 def _swap_dir(new: Path, dest: Path) -> None:
     """Put ``new`` at ``dest``; the old ``dest`` comes back if the move fails."""
     dest.parent.mkdir(parents=True, exist_ok=True)
-    old = dest.with_name(dest.name + ".old")
+    old = dest.with_name(dest.name + _SWAP_SUFFIX)
     shutil.rmtree(old, ignore_errors=True)
     had_old = dest.exists()
     if had_old:
@@ -210,6 +237,17 @@ def looks_like_xrrazom(names: list[str]) -> bool:
     return any(p[:2] == ["anomaly", "bin"] for p in parts) and any(p[0] == "gamedata" for p in parts)
 
 
+def _wrapper(names: list[str]) -> str:
+    """The one folder ("xrRazom/") around a whole archive, "" when there is none.
+    looks_like_xrrazom() looks through it, so unpacking must too."""
+    tops = {n.split("/", 1)[0] for n in names if n.strip("/")}
+    if len(tops) == 1 and all("/" in n for n in names if n.strip("/")):
+        top = next(iter(tops))
+        if top.lower() not in {"gamedata", "anomaly"}:
+            return top + "/"
+    return ""
+
+
 def inspect_zip(path: str | Path) -> dict:
     """Validate an xrRazom zip and return its release info."""
     try:
@@ -219,11 +257,13 @@ def inspect_zip(path: str | Path) -> dict:
             bad = [n for n in names if _safe_member(n) is None]
             if bad:
                 raise CoopError(f"Unsafe path in archive: {bad[0]}")
+            wrap = _wrapper(names)
+            names = [n[len(wrap):] for n in names]
             if not any(n.startswith(_ENGINE_ROOT + "bin/") for n in names) or not any(
                 n.startswith("gamedata/") for n in names
             ):
                 raise CoopError("This is not an xrRazom Co-op archive (no Anomaly/bin or gamedata folder).")
-            release = archive.read(RELEASE_FILE).decode("utf-8", "replace") if RELEASE_FILE in names else ""
+            release = archive.read(wrap + RELEASE_FILE).decode("utf-8", "replace") if RELEASE_FILE in names else ""
     except zipfile.BadZipFile as exc:
         raise CoopError(f"Not a valid zip file: {exc}") from exc
     return parse_release(release)
@@ -291,7 +331,7 @@ def installed_zip(anomaly, gamma) -> str:
     meta = configparser.ConfigParser(interpolation=None)
     try:
         meta.read(Path(gamma).expanduser() / "mods" / MOD_NAME / "meta.ini", encoding="utf-8")
-    except (OSError, configparser.Error):
+    except (OSError, ValueError, configparser.Error):
         return ""
     # A switch back from Anomaly wrote the mod's name there instead.
     name = meta.get("General", "installationFile", fallback="")
@@ -309,6 +349,8 @@ def install(zip_path: str | Path, anomaly, gamma, mo2_profile, progress=None, ki
     info = inspect_zip(zip_path)
     if kind == KIND_GAMMA and not str(gamma).strip():
         raise CoopError("Pick a GAMMA folder first.")
+    if str(gamma).strip():
+        recover_swaps(gamma)
     root = state_dir(anomaly)
     root.mkdir(parents=True, exist_ok=True)
     atomic.remove_stale(root, ".coop-*")
@@ -319,10 +361,12 @@ def install(zip_path: str | Path, anomaly, gamma, mo2_profile, progress=None, ki
         mod_rels: set[str] = set()
         with zipfile.ZipFile(zip_path) as archive:
             members = [m for m in archive.infolist() if not m.is_dir()]
+            wrap = _wrapper([m.filename for m in members])
             for count, member in enumerate(members, 1):
                 name = member.filename
                 if _safe_member(name) is None:
                     raise CoopError(f"Unsafe path in archive: {name}")
+                name = name[len(wrap):]
                 if name.startswith(_ENGINE_ROOT):
                     rel = name[len(_ENGINE_ROOT):]
                     target = staging / "files" / rel
@@ -402,6 +446,7 @@ def prepare_launch(anomaly, gamma, mo2_profile) -> None:
     switch_to_singleplayer only change the profile active then, so one
     picked later (ROMEO) started without co-op, or solo with the mod on.
     """
+    recover_swaps(gamma)
     state = load_state(anomaly)
     if not state:
         return
@@ -1116,10 +1161,13 @@ def mod_list(anomaly, gamma, mo2_profile) -> dict:
     gamma_kind = install_kind(anomaly) == KIND_GAMMA and _has_modlist(gamma, mo2_profile)
     mods = []
     if gamma_kind:
-        mods = [
-            name for status, name in modlist.entries(modlist.read_lines(_modlist(gamma, mo2_profile)))
-            if status == "Enabled" and name != MOD_NAME and modlist.separator_name(name) is None
-        ]
+        try:
+            mods = [
+                name for status, name in modlist.entries(modlist.read_lines(_modlist(gamma, mo2_profile)))
+                if status == "Enabled" and name != MOD_NAME and modlist.separator_name(name) is None
+            ]
+        except ValueError:  # unreadable or malformed modlist.txt: share no mods
+            mods = []
     return {
         "gamma": (installed_version(str(gamma)) or "") if gamma_kind else "",
         "xrrazom": str(state.get("release", {}).get("version") or ""),

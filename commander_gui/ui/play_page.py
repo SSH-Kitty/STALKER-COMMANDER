@@ -1218,7 +1218,11 @@ class PlayPage(QWidget):
             lines = read_lines(path)
         except (OSError, ValueError):
             return True
-        if not enabled_mod_count(lines):
+        try:
+            nothing_enabled = not enabled_mod_count(lines)
+        except ValueError:
+            return True
+        if nothing_enabled:
             backup = newest_backup_with_mods(path)
             if backup is not None:
                 return self._confirm_restore_modlist(path, backup)

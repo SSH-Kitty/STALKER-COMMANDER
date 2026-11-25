@@ -1066,6 +1066,13 @@ class UpdatePage(QWidget):
         self._apply_runner.start()
 
     def _on_apply_finished(self, rc: int, output: str) -> None:
+        try:
+            self._finish_apply(rc, output)
+        finally:  # a stuck busy flag would block every other page
+            self.window.set_install_busy(False)
+            self._update_button_states()
+
+    def _finish_apply(self, rc: int, output: str) -> None:
         self._applying = False
         cancelled = self._apply_runner is not None and self._apply_runner.was_cancelled
         if cancelled:
@@ -1120,8 +1127,6 @@ class UpdatePage(QWidget):
                 )
         # A failed update keeps its console up so the error can be read.
         self._set_console_visible(not cancelled and not cli_ok(rc, output, ""))
-        self.window.set_install_busy(False)
-        self._update_button_states()
 
     def _cancel_apply(self) -> None:
         if self._apply_runner is None or not self._apply_runner.is_running():

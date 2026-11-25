@@ -8466,7 +8466,7 @@ class UserModsTrackerTests(unittest.TestCase):
         import hashlib
 
         if checksum is None and not missing_checksum:
-            checksum = hashlib.sha512(body).hexdigest().encode() + b"  X.AppImage\n"
+            checksum = hashlib.sha512(body).hexdigest().encode() + b"  STALKER-GAMMA-COMMANDER-9.9.9-x86_64.AppImage\n"
 
         class FakeResponse:
             def __init__(self, data, hdrs):
@@ -8524,8 +8524,8 @@ class UserModsTrackerTests(unittest.TestCase):
         import hashlib
 
         body = _FAKE_APPIMAGE_HEADER + b"payload"
-        good = hashlib.sha512(body).hexdigest().encode() + b"  X.AppImage\n"
-        bad = hashlib.sha512(b"other").hexdigest().encode() + b"  X.AppImage\n"
+        good = hashlib.sha512(body).hexdigest().encode() + b"  STALKER-GAMMA-COMMANDER-9.9.9-x86_64.AppImage\n"
+        bad = hashlib.sha512(b"other").hexdigest().encode() + b"  STALKER-GAMMA-COMMANDER-9.9.9-x86_64.AppImage\n"
         with tempfile.TemporaryDirectory() as tmp:
             running_path = Path(tmp) / "Commander.AppImage"
             running_path.write_bytes(b"old")

@@ -373,7 +373,7 @@ def lossless_dll() -> Path | None:
         dll = library / "steamapps" / "common" / "Lossless Scaling" / LOSSLESS_DLL
         if dll.is_file():
             return dll
-    return chosen or None
+    return Path(chosen) if chosen else None
 
 
 def var(text: str, key: str) -> str | None:
@@ -398,6 +398,14 @@ def frame_gen(text: str, on: bool) -> str:
 
 
 def split(text: str) -> list[str]:
+    # A backslash that escapes nothing is a Windows or Wine path separator
+    # (-ini C:\games\x.ini); shlex would drop it.
+    # Quoted parts are left alone: shlex.join writes such paths in 'quotes'.
+    text = re.sub(
+        r"""('[^']*'|"(?:\\.|[^"\\])*")|\\(?![ "'\\$])""",
+        lambda m: m.group(1) or "\\\\",
+        text,
+    )
     try:
         return shlex.split(text)
     except ValueError:

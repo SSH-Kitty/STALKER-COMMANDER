@@ -171,8 +171,12 @@ def _reset_settings(path: Path, backup: Path) -> CliSettings:
     except OSError:
         # Couldn't set the corrupt file aside: don't save over it either,
         # or the only copy of the user's profiles is gone.
+        settings.load_error = "could not set the corrupt settings.json aside"
         return settings
-    settings.save(path)
+    try:
+        settings.save(path)
+    except OSError:  # read-only or full disk: run on defaults, not crash
+        pass
     return settings
 
 
@@ -182,7 +186,10 @@ def load_settings(path: Path | None = None) -> CliSettings:
         settings = CliSettings()
         default = CliProfile(active=True)
         settings.profiles = [default]
-        settings.save(path)
+        try:
+            settings.save(path)
+        except OSError:  # read-only or full disk: run on defaults, not crash
+            pass
         return settings
     try:
         # utf-8-sig: a BOM (Windows editors add one) is not corruption.

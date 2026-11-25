@@ -284,6 +284,10 @@ def _run_elevated(exe: str, args: tuple[str, ...], *, verb: str = "runas", show:
         kernel32.CloseHandle(info.hProcess)
 
 
+#: Largest runtime installer worth downloading (the biggest is under 40 MB).
+_MAX_DOWNLOAD = 200 * 1024 * 1024
+
+
 def _checked(path: str, runtime: Runtime) -> bool:
     """The download is the one meant: its pinned hash, else Microsoft's signature."""
     if runtime.sha256:
@@ -296,7 +300,11 @@ def _install_one(runtime: Runtime, tmp: str) -> bool:
     exe = str(Path(tmp) / runtime.url.rsplit("/", 1)[1])
     try:
         with urllib.request.urlopen(runtime.url, timeout=60) as src, open(exe, "wb") as dst:
+            size = 0
             while chunk := src.read(1 << 20):
+                size += len(chunk)
+                if size > _MAX_DOWNLOAD:
+                    raise OSError("the download is larger than any runtime installer")
                 dst.write(chunk)
     except OSError as exc:
         raise RuntimeError(tr("Could not download {name}: {error}", name=name, error=exc)) from exc
@@ -317,13 +325,17 @@ def _install_one(runtime: Runtime, tmp: str) -> bool:
         setup = extract_dir / "DXSETUP.exe"
         if not setup.is_file():
             raise RuntimeError(tr("{name} did not extract correctly.", name=name))
-        held = _hold(str(setup))
+        # DXSETUP loads the programs and cabinets next to it as admin, so all
+        # of them are held against change, not just DXSETUP itself.
+        files = [p for p in extract_dir.iterdir() if p.is_file()]
+        handles = [_hold(str(p)) for p in files]
         try:
-            if held is None or not signed_by_microsoft(str(setup)):
+            if any(h is None for h in handles) or not signed_by_microsoft(str(setup)):
                 check_exit_code(_BAD_SIGNATURE, runtime)
             restart = check_exit_code(_run_elevated(str(setup), ("/silent",)), runtime)
         finally:
-            _release(held)
+            for h in handles:
+                _release(h)
     if missing_dlls(runtime):
         raise RuntimeError(tr("The installer finished but {name} is still missing.", name=name))
     return restart

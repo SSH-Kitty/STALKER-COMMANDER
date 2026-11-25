@@ -141,7 +141,11 @@ def _acquire_instance_lock() -> QLockFile | None:
     lock_path = settings_dir() / "commander.lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     lock = QLockFile(str(lock_path))
-    return lock if lock.tryLock(0) else None
+    if lock.tryLock(0):
+        return lock
+    # Only "someone holds it" means another COMMANDER; a lock folder that
+    # can't be written must not stop the only copy from starting.
+    return None if lock.error() == QLockFile.LockError.LockFailedError else lock
 
 
 def _wake_socket() -> str:

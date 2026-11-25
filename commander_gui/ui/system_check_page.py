@@ -741,6 +741,8 @@ class SystemCheckPage(QWidget):
         self.refresh_button.setText(tr("Refresh Checks"))
 
     def _install_runtimes(self, button: QPushButton) -> None:
+        if self._vc_task is not None:  # a second click must not start a second elevated installer
+            return
         button.setEnabled(False)
         button.setText(tr("Installing"))
         task = BackgroundTask(winruntimes.install, parent=self)

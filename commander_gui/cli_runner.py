@@ -216,14 +216,9 @@ class CliWorker(QObject):
         pid = proc.pid
         try:
             if os.name == "nt":
-                from .winjob import send_ctrl_c
-
-                # Ctrl+C on the CLI's own console, as SIGINT on Linux: the
-                # CLI cancels cleanly (resume bookkeeping). CTRL_BREAK via
-                # send_signal never arrived - the windowed COMMANDER shares
-                # no console with it - so every cancel was a hard kill.
-                if not send_ctrl_c(pid):
-                    raise OSError("Ctrl+C could not be delivered")
+                # The helper that delivers Ctrl+C can take seconds; off the
+                # GUI thread, so Cancel doesn't freeze the window.
+                threading.Thread(target=self._ctrl_c_or_kill, args=(proc, pid), daemon=True).start()
             else:
                 os.killpg(pid, _CANCEL_SIGNAL)
                 # A paused (SIGSTOPped) group only acts on the cancel signal
@@ -242,6 +237,20 @@ class CliWorker(QObject):
             args=(proc,),
             daemon=True,
         ).start()
+
+    def _ctrl_c_or_kill(self, proc: subprocess.Popen, pid: int) -> None:
+        from .winjob import send_ctrl_c
+
+        # Ctrl+C on the CLI's own console, as SIGINT on Linux: the CLI
+        # cancels cleanly (resume bookkeeping). CTRL_BREAK via send_signal
+        # never arrived - the windowed COMMANDER shares no console with it -
+        # so every cancel was a hard kill.
+        try:
+            delivered = send_ctrl_c(pid)
+        except OSError:
+            delivered = False
+        if not delivered:
+            self._kill_tree(proc)
 
     def _force_kill_after_cancel(self, proc: subprocess.Popen) -> None:
         time.sleep(3)

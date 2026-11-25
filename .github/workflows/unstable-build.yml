@@ -27,6 +27,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          # The build runs downloaded tools; the write token must not sit in .git/config.
+          persist-credentials: false
       - name: Install build dependencies
         # The build's Qt smoke test loads QtGui, which links libEGL/libGL.
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libegl1 libgl1 libxkbcommon0 libfontconfig1 binutils

@@ -23,6 +23,7 @@ and every current file that would be replaced is first packed into a
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
@@ -35,6 +36,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
+from .atomic import remove_stale as atomic_remove_stale
 from .atomic import replace_file
 from .i18n import tr
 
@@ -96,7 +98,12 @@ def backups_root() -> Path:
 
 def _slug(name: str) -> str:
     slug = re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("._")
-    return slug or "profile"
+    if slug:
+        return slug
+    # No ASCII at all (Cyrillic, CJK): every such name would share one folder,
+    # and then list, prune and restore each other's backups.
+    digest = hashlib.sha1(name.encode(), usedforsecurity=False).hexdigest()[:8]
+    return f"profile-{digest}" if name.strip() else "profile"
 
 
 #: Longest name a player can give a backup.
@@ -197,6 +204,7 @@ def _write_zip(
             f"Not enough free space for the backup: it needs about "
             f"{total / 1e6:.0f} MB, {free / 1e6:.0f} MB is free in {dest.parent}."
         )
+    atomic_remove_stale(dest.parent, ".partial-*.zip")  # left by a killed backup
     fd, tmp = tempfile.mkstemp(prefix=".partial-", suffix=".zip", dir=dest.parent)
     os.close(fd)
     try:

@@ -35,6 +35,7 @@ yet.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import shutil
@@ -119,10 +120,16 @@ def _published_sha512(url: str) -> str | None:
         raise CommanderSelfUpdateError(f"Could not fetch the update checksum: {exc}") from exc
     except urllib.error.URLError as exc:
         raise CommanderSelfUpdateError(f"Could not fetch the update checksum: {exc}") from exc
-    match = SHA512_RE.search(text)
-    if match is None:
-        raise CommanderSelfUpdateError("The update's checksum file is malformed")
-    return match.group(1).lower()
+    # "<hash>  <file name>": the line for this file, not the first hash found.
+    wanted = url.rsplit("/", 1)[-1]
+    for line in text.splitlines():
+        match = SHA512_RE.search(line)
+        if match is None:
+            continue
+        named = line[match.end():].strip().lstrip("*")
+        if not named or named.rsplit("/", 1)[-1] == wanted:
+            return match.group(1).lower()
+    raise CommanderSelfUpdateError("The update's checksum file is malformed")
 
 
 class CommanderSelfUpdateError(Exception):
@@ -408,6 +415,20 @@ def _setup_download_dir() -> Path:
     return folder
 
 
+#: Setup path -> SHA-512 it had when it passed its checks. COMMANDER may wait
+#: hours for the user's Restart; anything else running as them could swap the
+#: file in %TEMP% meanwhile, so relaunch_commander() hashes it again.
+_SETUP_DIGESTS: dict[str, str] = {}
+
+
+def _file_sha512(path: Path) -> str:
+    digest = hashlib.sha512()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def download_commander_setup(
     tag: str,
     cancel_event: threading.Event | None = None,
@@ -440,6 +461,10 @@ def download_commander_setup(
     except OSError as exc:
         downloaded.unlink(missing_ok=True)
         raise CommanderSelfUpdateError(f"Could not save the update: {exc}") from exc
+    try:
+        _SETUP_DIGESTS[str(final)] = _file_sha512(final)
+    except OSError as exc:
+        raise CommanderSelfUpdateError(f"Could not read the update: {exc}") from exc
     return final
 
 
@@ -520,6 +545,16 @@ def relaunch_commander(
         release_lock()
     if os.name == "nt" and Path(path).suffix.lower() == ".exe":
         verify_setup_file(path)
+        expected = _SETUP_DIGESTS.get(str(path))
+        try:
+            changed = expected is not None and _file_sha512(Path(path)) != expected
+        except OSError as exc:
+            raise CommanderSelfUpdateError(f"Could not read the update: {exc}") from exc
+        if changed:
+            Path(path).unlink(missing_ok=True)
+            raise CommanderSelfUpdateError(
+                "The downloaded update changed on disk - it was removed and nothing was installed."
+            )
         flags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(
             subprocess, "CREATE_NEW_PROCESS_GROUP", 0
         )

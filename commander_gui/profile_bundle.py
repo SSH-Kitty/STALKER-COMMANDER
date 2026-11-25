@@ -68,6 +68,10 @@ def _valid_source_url(value: str) -> bool:
     swapped on the way)."""
     from .network import is_loopback_host
 
+    # urlsplit drops tabs and line breaks silently, so a value that passes
+    # here must not carry any.
+    if len(value) > 2048 or any(ord(char) < 32 or ord(char) == 127 for char in value.strip()):
+        return False
     parts = urllib.parse.urlsplit(value.strip())
     if not parts.netloc:
         return False
@@ -159,6 +163,8 @@ class ImportedProfileBundle:
                     value = int(value)
                 except (TypeError, ValueError, OverflowError):
                     # OverflowError: JSON's Infinity parses to float("inf").
+                    continue
+                if not 1 <= value <= 64:  # the Install page offers 1 to 8; this only stops absurd values
                     continue
             elif not _valid_source_value(name, value):
                 continue

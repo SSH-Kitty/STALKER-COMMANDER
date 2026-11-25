@@ -705,7 +705,10 @@ def count_active_mods(
         lines = read_lines(modlist)
     except (OSError, ValueError):
         return None
-    counts = count_mods(lines, mods_dir=mods_dir)
+    try:
+        counts = count_mods(lines, mods_dir=mods_dir)
+    except ValueError:  # a mod name with a path separator: show no count
+        return None
     _mod_count_cache[str(modlist)] = (key, counts)
     return counts
 

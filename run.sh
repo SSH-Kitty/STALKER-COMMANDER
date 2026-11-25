@@ -11,8 +11,8 @@ PYTHON_BIN="${PYTHON:-python3}"
 exec 9>"$SCRIPT_DIR/.venv-setup.lock"
 flock -x 9
 
-if ! "$PYTHON_BIN" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)'; then
-    echo "Python 3.10 or newer is required (set PYTHON=/path/to/python3.10+ to override)." >&2
+if ! "$PYTHON_BIN" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 12) else 1)'; then
+    echo "Python 3.12 or newer is required (set PYTHON=/path/to/python3.12+ to override)." >&2
     exit 1
 fi
 

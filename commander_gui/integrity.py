@@ -20,7 +20,7 @@ from collections.abc import Callable, Container, Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .atomic import write_text
+from .atomic import split_lines, write_text
 from .i18n import tr
 from .modlist import entries, read_lines
 from .network import read_response_bytes
@@ -202,7 +202,7 @@ def fetch_official_mod_names(url: str, timeout: float = 10) -> set[str] | None:
             text = read_response_bytes(resp, 32 * 1024 * 1024).decode(
                 "utf-8", errors="replace"
             )
-        return {name for _, name in entries(text.splitlines())}
+        return {name for _, name in entries(split_lines(text))}
     except (OSError, ValueError):
         # ValueError: malformed/unsupported URL, or a malformed +/- line in
         # the fetched list (entries() rejects those) - either way, callers
@@ -373,7 +373,11 @@ def _hash_file(path: Path, git_blob: bool) -> tuple[str, int, str] | None:
         fd = os.open(
             path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
         )
-        info = os.fstat(fd)
+        try:
+            info = os.fstat(fd)
+        except OSError:
+            os.close(fd)
+            raise
         if not stat.S_ISREG(info.st_mode):
             os.close(fd)
             return None
@@ -483,7 +487,7 @@ def _read_manifest(path: Path) -> dict[str, str] | None:
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return None
-    for line in text.splitlines():
+    for line in split_lines(text):
         if not line.strip():
             continue
         if len(line) < 34 or line[32:34] != "  ":

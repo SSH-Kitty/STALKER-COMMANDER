@@ -11,11 +11,11 @@
 ;   ISCC /DSourceDir=C:\path\to\COMMANDER /DAppVersion=1.4.1 /DNumericVersion=1.4.1 COMMANDER.iss
 
 #ifndef AppVersion
-  #define AppVersion "1.4.0"
+  #define AppVersion "1.4.1"
 #endif
 #ifndef NumericVersion
   ; VersionInfoVersion must be digits only (AppVersion may be "1.4.0-unstable2").
-  #define NumericVersion "1.4.0"
+  #define NumericVersion "1.4.1"
 #endif
 #ifndef SourceDir
   #define SourceDir "..\..\..\dist\COMMANDER"

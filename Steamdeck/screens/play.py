@@ -291,7 +291,11 @@ class PlayScreen(DeckScreen):
                 lines = read_lines(path)
             except (OSError, ValueError):
                 lines = []
-        if path is not None and lines and not enabled_mod_count(lines):
+        try:
+            nothing_enabled = path is not None and bool(lines) and not enabled_mod_count(lines)
+        except ValueError:
+            nothing_enabled = False
+        if nothing_enabled:
             backup = newest_backup_with_mods(path)
             if backup is not None:
                 self._confirm_restore_modlist(profile, target, path, backup)

@@ -1594,7 +1594,7 @@ class SettingsPage(QWidget):
             ok = enable_autostart()
         else:
             ok = disable_autostart()
-        gui_settings.save_gui_settings(autostart=bool(checked) and ok)
+        gui_settings.save_gui_settings(autostart=bool(checked) == ok)
         if not ok:
             self._autostart_check.blockSignals(True)
             self._autostart_check.setChecked(not checked)

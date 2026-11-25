@@ -201,7 +201,7 @@ def add_autostart_flag() -> None:
     path = autostart_desktop_path()
     try:
         text = path.read_text(encoding="utf-8")
-    except OSError:
+    except (OSError, ValueError):
         return
     lines = text.splitlines()
     for i, line in enumerate(lines):

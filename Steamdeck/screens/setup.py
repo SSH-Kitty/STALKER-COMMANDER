@@ -19,6 +19,7 @@ profile made here is indistinguishable from one made there.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from PySide6.QtWidgets import QLineEdit
@@ -318,10 +319,29 @@ class SetupScreen(DeckScreen):
         if not name:
             self.window.notify(tr("A profile name is required."))
             return
-        if name in existing:
+        if name.casefold() in {n.casefold() for n in existing}:
             self.window.notify(tr("A profile named '{name}' already exists.", name=name))
             return
         profile = profile_for(self._root, name)
+
+        def folder(path: str) -> str:
+            return os.path.normcase(os.path.abspath(os.path.expanduser(path))) if path.strip() else ""
+
+        # As the desktop Profiles page: two profiles on one install would alias it.
+        if any(
+            folder(p.anomaly) == folder(profile.anomaly)
+            and folder(p.gamma) == folder(profile.gamma)
+            and folder(p.cache) == folder(profile.cache)
+            and p.mo2_profile == profile.mo2_profile
+            for p in self.window.settings.profiles
+        ):
+            self.window.notify(
+                tr(
+                    "Another profile already uses the same Anomaly, GAMMA and cache folders with the same MO2 profile. Pick a different MO2 profile, or install this one somewhere else."
+                ),
+                6000,
+            )
+            return
         if self._imported is not None:
             self._imported[1].apply_to(profile)
             # A bundle is a file someone sends you: never its download sources.

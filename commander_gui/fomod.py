@@ -365,7 +365,11 @@ def _files(path: Path) -> list[Path]:
 def parse_config(path: Path) -> FomodConfig:
     """Parse the common ModuleConfig.xml subset used by most FOMODs."""
     try:
+        if path.stat().st_size > 16 * 1024 * 1024:  # real ones are KB; this is a bomb
+            raise ModInstallError("FOMOD configuration is unreasonably large")
         root = safe_xml.parse_file(path)
+    except OSError as exc:
+        raise ModInstallError(f"Could not read FOMOD configuration: {exc}") from exc
     except safe_xml.XML_ERRORS as exc:
         raise ModInstallError(f"Could not read FOMOD configuration: {exc}") from exc
     module = root.find("moduleName")
@@ -696,6 +700,7 @@ def _place_item(item: FomodFile, root: Path, destination: Path) -> None:
     if any(
         not component
         or component in {".", ".."}
+        or ":" in component  # a drive ("C:") or an NTFS stream on Windows
         or any(ord(char) < 32 or ord(char) == 127 for char in component)
         for component in components
     ):

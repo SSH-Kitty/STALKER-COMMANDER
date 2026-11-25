@@ -460,7 +460,15 @@ class BrowserWindow(QMainWindow):
         text = self.search.text().strip()
         self.view.load(QUrl(SEARCH.format(quote(text)) if text else HOME))
 
+    #: What a mod page legitimately offers. Anything else (an ad, a page
+    #: dropping an .exe) is refused instead of landing in the downloads folder.
+    _MOD_ARCHIVES = (".zip", ".7z", ".rar", ".tar", ".gz", ".tgz", ".xz", ".txz", ".bz2", ".tbz2", ".zst")
+
     def _download(self, request: QWebEngineDownloadRequest) -> None:
+        if request.url().scheme() != "https" or not request.downloadFileName().lower().endswith(self._MOD_ARCHIVES):
+            request.cancel()
+            self.status.setText(tr("{name} didn't finish downloading.", name=request.downloadFileName()))
+            return
         # A download link opened in a new tab leaves that tab blank: close it.
         for index in range(self.tabs.count()):
             view = self.tabs.widget(index)

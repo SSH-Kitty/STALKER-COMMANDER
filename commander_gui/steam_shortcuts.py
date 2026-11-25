@@ -1017,6 +1017,8 @@ def write_coop_shortcut(
     if proton_name is not None:
         try:
             old_config = config.read_text(encoding="utf-8")
+        except UnicodeDecodeError as exc:  # not ours to rewrite: callers handle OSError
+            raise OSError(f"{config} is not UTF-8 text") from exc
         except FileNotFoundError:
             old_config = '"InstallConfigStore"\n{\n\t"Software"\n\t{\n\t\t"Valve"\n\t\t{\n\t\t\t"Steam"\n\t\t\t{\n\t\t\t}\n\t\t}\n\t}\n}\n'
         new_config = set_compat_tool(old_config, appid, proton_name)
@@ -1096,6 +1098,8 @@ def setup_coop_shortcut(vdf_path: Path, *, restart: bool, **fields) -> None:
             set_compat_tool(_config_vdf(vdf_path).read_text(encoding="utf-8"), 0, "check")
         except FileNotFoundError:
             pass
+        except UnicodeDecodeError as exc:
+            raise OSError("Steam's config.vdf is not UTF-8 text") from exc
     url = coop_launch_url(fields["exe"])
 
     def write() -> None:

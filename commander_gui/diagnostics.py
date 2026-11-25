@@ -43,7 +43,7 @@ _SENSITIVE_ASSIGNMENT_UNQUOTED_RE = re.compile(
 _AUTH_HEADER_RE = re.compile(
     r"(?i)(\b(?:authorization|proxy-authorization)\s*:\s*(?:bearer|basic)\s+)\S+"
 )
-_URL_CREDENTIALS_RE = re.compile(r"(?i)(://)[^/@\s]+:[^/@\s]+@")
+_URL_CREDENTIALS_RE = re.compile(r"(?i)(://)[^/@\s:]+:[^/@\s]+@")
 
 
 def redact(text: str) -> str:

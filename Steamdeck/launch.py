@@ -43,6 +43,7 @@ from commander_gui.launcher import (
     runner_graphics_error,
     runner_prefix_error,
     runner_unsupported_error,
+    unblock_mo2_python,
 )
 from commander_gui.ui import game_splash
 from commander_gui.ui.common import BackgroundTask, crash_dump_names, exe_pids, mo2_pids
@@ -114,8 +115,9 @@ def _prepare_launch(profile, kind, prefix, target, direct, watch_exe, arguments)
         options = launch_options.for_coop(options)
     if direct is None:
         try:
+            unblock_mo2_python(profile.gamma)  # as the desktop Play page does
             coop.prepare_launch(profile.anomaly, profile.gamma, profile.mo2_profile)
-        except (OSError, coop.CoopError):
+        except (OSError, ValueError, coop.CoopError):
             pass  # MO2 shows its own error then.
     if direct is None and not target and "%command%" in (tokens := launch_options.split(options)):
         # MO2 on its own: no game to hand the words after %command% to,
