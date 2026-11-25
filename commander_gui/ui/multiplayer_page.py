@@ -724,8 +724,8 @@ class MultiplayerPage(QWidget):
         stats.setContentsMargins(0, 0, 0, 0)
         stats.setSpacing(8)
         self.version_stat = _Stat(tr("xrRazom version"))
-        self.players_stat = _Stat(tr("Player slots"))
-        self.players_stat.setToolTip(tr("How many friends can join, up to 4."))
+        self.players_stat = _Stat(tr("Players in total"))
+        self.players_stat.setToolTip(tr("You and up to 4 friends."))
         stats.addWidget(self.version_stat)
         stats.addWidget(self.players_stat)
         body.addWidget(self._stats_box)
@@ -1502,7 +1502,7 @@ class MultiplayerPage(QWidget):
             else tr("Everyone keeps Steam open and owns Call of Pripyat on Steam.")
         )
         _select(self.app_combo, coop.SPACEWAR_APPID if spacewar else coop.COP_APPID)
-        self.players_stat.set(str(self._widgets["xrr_max_players"].value()))
+        self.players_stat.set(str(self._widgets["xrr_max_players"].value() + 1))  # + the host
         # A Steam session as Call of Pripyat still joins by the host's public IP.
         steam_ip = steam and not spacewar
         self.steam_invite.setVisible(steam)

@@ -819,6 +819,69 @@ def _set_ini_value(ini: Path, section: str, key: str, value: str) -> None:
         write_text(ini, new_text)
 
 
+def set_mo2_executable(gamma_dir: str, title: str, exe_name: str, present: bool) -> bool:
+    """Add or remove MO2 executable *title*, running ``bin/<exe_name>``.
+
+    A new entry is a copy of ``Anomaly (DX11-AVX)`` with the exe swapped
+    (same folder, flags and arguments), appended so MO2's dropdown rows
+    don't shift. Removing renumbers the entries after it and keeps MO2's
+    pick by title (falling back to DX11-AVX when it was this one). Returns
+    True when ModOrganizer.ini changed. MO2 must be closed: it rewrites the
+    ini on exit.
+    """
+    ini = Path(gamma_dir) / "ModOrganizer.ini"
+    if not ini.is_file():
+        return False
+    # Bytes, not read_text(): its newline translation would hide MO2's \r\n.
+    text = ini.read_bytes().decode("utf-8", errors="surrogateescape")
+    newline = "\r\n" if "\r\n" in text else "\n"
+    lines = split_lines(text)
+    start = next((i for i, l in enumerate(lines) if l.strip().lower() == "[customexecutables]"), None)
+    if start is None:
+        return False
+    end = next((i for i in range(start + 1, len(lines)) if lines[i].strip().startswith("[")), len(lines))
+    while end > start + 1 and not lines[end - 1].strip():
+        end -= 1  # the blank line before the next section stays
+    entries: dict[int, list[tuple[str, str]]] = {}
+    other: list[str] = []
+    for line in lines[start + 1:end]:
+        key, sep, value = line.partition("=")
+        index, slash, name = key.strip().partition("\\")
+        if sep and slash and index.isdigit():
+            entries.setdefault(int(index), []).append((name, value))
+        elif line.strip() and not line.strip().lower().startswith("size="):
+            other.append(line)
+
+    def field_of(fields, wanted):
+        return next((_qsettings_value(v.strip()) for n, v in fields if n.lower() == wanted), "")
+
+    ordered = [entries[i] for i in sorted(entries)]
+    mine = [f for f in ordered if field_of(f, "title") == title]
+    if present == bool(mine):
+        return False
+    selected = mo2_selected_title(gamma_dir)
+    if present:
+        template = next((f for f in ordered if field_of(f, "title") == "Anomaly (DX11-AVX)"), None)
+        if template is None:
+            return False
+        swap = re.compile(r"AnomalyDX11AVX\.exe", re.IGNORECASE)
+        ordered.append([
+            (n, title if n.lower() == "title" else swap.sub(exe_name, v) if n.lower() == "binary" else v)
+            for n, v in template
+        ])
+    else:
+        ordered = [f for f in ordered if f not in mine]
+        if selected == title:
+            selected = "Anomaly (DX11-AVX)"
+    body = [f"size={len(ordered)}"] + other
+    for number, fields in enumerate(ordered, 1):
+        body += [f"{number}\\{n}={v}" for n, v in fields]
+    write_text(ini, newline.join(lines[:start + 1] + body + lines[end:]) + newline)
+    if selected:
+        set_mo2_selected_title(gamma_dir, selected)
+    return True
+
+
 def _qt_ini_bytes(value: str) -> str:
     """*value* as Qt's QSettings writes a QByteArray to an ini file."""
     out: list[str] = []

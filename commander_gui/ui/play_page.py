@@ -40,6 +40,7 @@ from .. import (
     gui_settings,
     launch_options,
     lossless_win,
+    modded_exes,
     overlays,
     wingpu,
 )
@@ -795,6 +796,7 @@ class PlayPage(QWidget):
                 parse_mo2_executables(profile.gamma) if profile is not None else []
             )
             if not _is_hidden_launch_target(executable.title)
+            and modded_exes.runs_installed_engine(profile.anomaly, executable.binary)
         ]
         if not self.executables and profile is not None:
             launcher = anomaly_launcher_target(profile.anomaly)
@@ -1267,6 +1269,28 @@ class PlayPage(QWidget):
             return False
         return True
 
+    def _confirm_romeo_engine(self) -> bool:
+        """ROMEO on neXt-Ray loads with broken mods: ask first. False
+        cancels the launch."""
+        from .. import romeo
+        from .exes_card import romeo_launch_text
+
+        if not romeo.on_next_ray(self.window.settings.active_profile):
+            return True
+        title, message = romeo_launch_text()
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle(title)
+        box.setText(message)
+        updates = box.addButton(tr("Open Updates"), QMessageBox.ButtonRole.AcceptRole)
+        anyway = box.addButton(tr("Play anyway"), QMessageBox.ButtonRole.DestructiveRole)
+        box.addButton(QMessageBox.StandardButton.Cancel)
+        box.setDefaultButton(updates)
+        box.exec()
+        if box.clickedButton() is updates:
+            self.window.set_page("update")
+        return box.clickedButton() is anyway
+
     def _confirm_restore_modlist(self, path: Path, backup: Path) -> bool:
         """Offer the newest backup when every mod in the list is switched off.
 
@@ -1506,6 +1530,8 @@ class PlayPage(QWidget):
         if not plain and ptrace_blocks_mo2(self):
             return
         if not plain and not self._confirm_load_order():
+            return
+        if not plain and not self._confirm_romeo_engine():
             return
         if want_coop and not confirm_player_name(self, profile.anomaly):
             return

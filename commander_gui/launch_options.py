@@ -35,6 +35,8 @@ GROUPS = (
     )),
     ("Performance", (
         ("NTSync", "PROTON_USE_NTSYNC=1", "Kernel Windows sync (NTSync). Can raise FPS. Needs Linux 6.14+ and GE-Proton 10-9+."),
+        ("DLSS", "PROTON_ENABLE_NVAPI=1", "Lets NVIDIA cards use DLSS, for example in neXt-Ray."),
+        ("HDR", "DXVK_HDR=1", "HDR output in games that support it, such as neXt-Ray. Needs an HDR screen."),
     )),
     ("Overlay and logs", (
         ("Performance overlay", "mangohud", "Show FPS, frame times and temperatures over the game (MangoHud)."),
@@ -204,7 +206,9 @@ def _flow_scale(text: str) -> float:
 
 #: The profile in the frame generation config, and the games it is active
 #: in: matched by executable, so not Wine's own processes in the launch
-#: (explorer.exe stalls with frame generation active in it).
+#: (explorer.exe stalls with frame generation active in it). Not neXt-Ray's
+#: DX12 exe: MAKO active over vkd3d-proton holds every frame back (about
+#: 15 FPS, MangoHud reads 0 FPS), even with frame generation off.
 _PROFILE = "COMMANDER"
 _GAMES = tuple(f"AnomalyDX{dx}{avx}.exe" for dx in ("11", "10", "9", "8") for avx in ("AVX", ""))
 

@@ -20,7 +20,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
-from commander_gui import applog, coop, gui_settings, launch_options
+from commander_gui import applog, coop, gui_settings, launch_options, modded_exes
 from commander_gui.config import logs_dir
 from commander_gui.i18n import tr
 from commander_gui.launcher import (
@@ -424,7 +424,10 @@ class DeckLaunchController(QObject):
 
     def executables(self, profile):
         """MO2's launch targets, or plain Anomaly's launcher without MO2."""
-        found = parse_mo2_executables(profile.gamma)
+        found = [
+            exe for exe in parse_mo2_executables(profile.gamma)
+            if modded_exes.runs_installed_engine(profile.anomaly, exe.binary)
+        ]
         launcher = None if found else anomaly_launcher_target(profile.anomaly)
         return [launcher] if launcher is not None else found
 

@@ -293,6 +293,17 @@ def is_romeo_profile(gamma: Path, profile: str) -> bool:
     return (path / _STATE).is_file() or MCM_MOD in listed
 
 
+def on_next_ray(profile) -> bool:
+    """A COMMANDER profile that runs ROMEO over neXt-Ray: ROMEO needs
+    EXES_NEEDED, and neXt-Ray's older base breaks some of its mods."""
+    from . import modded_exes
+
+    if profile is None or not profile.mo2_profile:
+        return False
+    return modded_exes.installed_engine(profile.anomaly) == modded_exes.NEXT_RAY \
+        and is_romeo_profile(Path(profile.gamma), profile.mo2_profile)
+
+
 def installed(gamma: Path) -> bool:
     return bool(romeo_profiles(gamma) or old_mods(gamma))
 

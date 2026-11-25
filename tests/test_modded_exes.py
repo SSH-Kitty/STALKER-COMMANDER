@@ -184,6 +184,185 @@ class ModdedExesTest(unittest.TestCase):
             _write(anomaly / "commander-exes/state.json", '{"version": "2026.9.1"}')
             self.assertFalse(exes.at_least(anomaly, "2026.9.12"))
 
+    def test_switching_engines_starts_from_the_originals(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            anomaly = tmp / "anomaly"
+            _gamma_anomaly(anomaly)
+            before = _tree(anomaly)
+            exes.install(_release(tmp, "2026.9.12"), anomaly, "2026.9.12")
+
+            exes.install(_next_ray(tmp), anomaly, "neXt-Ray 0.2.2")
+
+            tree = _tree(anomaly)
+            # demonized's non-AVX exe is gone: GAMMA's is back beside neXt-Ray's.
+            self.assertEqual(tree["bin/AnomalyDX11.exe"], "gamma")
+            self.assertEqual(tree["bin/AnomalyDX12AVX.exe"], "nextray")
+            self.assertNotIn("bin/AnomalyDX11.pdb", tree)
+            state = exes.load_state(anomaly)
+            self.assertEqual((state["engine"], state["previous"]), (exes.NEXT_RAY, None))
+            self.assertFalse(exes.at_least(anomaly, "2026.5.15"))
+
+            exes.restore_original(anomaly)
+            self.assertEqual(_tree(anomaly), before)
+
+    def test_gamma_update_without_kept_exes_drops_next_ray_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            anomaly = tmp / "anomaly"
+            _gamma_anomaly(anomaly)
+            exes.install(_next_ray(tmp), anomaly, "neXt-Ray 0.2.2")
+            _write(anomaly / "bin/AnomalyDX11AVX.exe", "gamma")  # the update's own exe
+
+            exes.after_gamma_update(anomaly, kept_exes=False)
+
+            tree = _tree(anomaly)
+            self.assertNotIn("bin/AnomalyDX12AVX.exe", tree)
+            self.assertNotIn("bin/nvngx_dlss.dll", tree)
+            self.assertNotIn(f"db/mods/{exes.GAMEDATA_DB}", tree)
+            self.assertIsNone(exes.load_state(anomaly))
+
+    def test_only_next_ray_targets_launch_while_it_is_installed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            anomaly = tmp / "anomaly"
+            _gamma_anomaly(anomaly)
+            dx12 = str(anomaly / "bin" / exes.DX12_EXE)
+            for binary in ("C:/a/bin/AnomalyDX11.exe", "AnomalyLauncher.exe"):
+                self.assertTrue(exes.runs_installed_engine(anomaly, binary))
+            self.assertFalse(exes.runs_installed_engine(anomaly, dx12))  # entry left without its exe
+            exes.install(_next_ray(tmp), anomaly, "neXt-Ray 0.2.2")
+            self.assertTrue(exes.runs_installed_engine(anomaly, dx12))
+            self.assertFalse(exes.runs_installed_engine(anomaly, "C:/a/bin/AnomalyDX11.exe"))
+            self.assertFalse(exes.runs_installed_engine(anomaly, "C:\\a\\bin\\anomalydx9avx.exe"))
+            for binary in ("/a/bin/AnomalyDX11AVX.exe", "/a/AnomalyLauncher.exe", "/x/Explorer++.exe"):
+                self.assertTrue(exes.runs_installed_engine(anomaly, binary))
+
+    def test_coop_will_not_switch_on_over_next_ray(self):
+        import json
+
+        from commander_gui import coop
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            anomaly = tmp / "anomaly"
+            _gamma_anomaly(anomaly)
+            exes.install(_next_ray(tmp), anomaly, "neXt-Ray 0.2.2")
+            _write(anomaly / "commander-coop/state.json", json.dumps({
+                "active": False, "kind": coop.KIND_ANOMALY, "files": {}, "originals": [],
+            }))
+            with self.assertRaises(coop.CoopError):
+                coop.switch_to_coop(anomaly, "", "")
+            self.assertEqual((anomaly / "bin/AnomalyDX11AVX.exe").read_text(), "nextray")
+
+
+def _next_ray(tmp: Path) -> Path:
+    path = tmp / "neXt-Ray-0.2.2.zip"
+    with zipfile.ZipFile(path, "w") as zf:
+        for name in ("AnomalyDX11AVX.exe", "AnomalyDX12AVX.exe", "nvngx_dlss.dll"):
+            zf.writestr(f"bin/{name}", "nextray")
+        zf.writestr(f"db/mods/{exes.GAMEDATA_DB}", "nextray")
+    return path
+
+
+class Mo2ExecutableTest(unittest.TestCase):
+    def test_dx12_entry_is_added_picked_and_removed(self):
+        from commander_gui import launcher
+
+        ini = (
+            "[customExecutables]\r\nsize=2\r\n"
+            "1\\binary=Z:/a/bin/AnomalyDX11AVX.exe\r\n1\\title=Anomaly (DX11-AVX)\r\n1\\workingDirectory=Z:/a/bin\r\n"
+            "2\\binary=Z:/a/bin/AnomalyDX11.exe\r\n2\\title=Anomaly (DX11)\r\n"
+            "\r\n[Widgets]\r\nMainWindow_executablesListBox_index=1\r\n"
+        )
+        with tempfile.TemporaryDirectory() as gamma:
+            path = Path(gamma) / "ModOrganizer.ini"
+            path.write_bytes(ini.encode())
+            self.assertTrue(launcher.set_mo2_executable(gamma, exes.DX12_TITLE, exes.DX12_EXE, True))
+            self.assertFalse(launcher.set_mo2_executable(gamma, exes.DX12_TITLE, exes.DX12_EXE, True))
+            added = launcher.parse_mo2_executables(gamma)[-1]
+            self.assertEqual((added.title, added.binary), (exes.DX12_TITLE, "/a/bin/AnomalyDX12AVX.exe"))
+            self.assertTrue(launcher.set_mo2_selected_title(gamma, exes.DX12_TITLE))
+
+            self.assertTrue(launcher.set_mo2_executable(gamma, exes.DX12_TITLE, exes.DX12_EXE, False))
+            self.assertEqual(launcher.mo2_selected_title(gamma), "Anomaly (DX11-AVX)")
+            self.assertNotIn(exes.DX12_TITLE, path.read_text())
+
+    def test_gamma_update_puts_back_or_drops_the_dx12_entry(self):
+        from commander_gui import keep_state, launcher
+
+        ini = (
+            "[customExecutables]\nsize=1\n"
+            "1\\binary=Z:/a/bin/AnomalyDX11AVX.exe\n1\\title=Anomaly (DX11-AVX)\n"
+        )
+        for kept in (True, False):
+            with self.subTest(kept=kept), tempfile.TemporaryDirectory() as tmp:
+                tmp = Path(tmp)
+                anomaly, gamma = tmp / "anomaly", tmp / "gamma"
+                _gamma_anomaly(anomaly)
+                exes.install(_next_ray(tmp), anomaly, "neXt-Ray 0.2.2")
+                gamma.mkdir()
+                (gamma / "ModOrganizer.ini").write_text(ini)  # the update rewrote it without DX12
+                if not kept:
+                    launcher.set_mo2_executable(str(gamma), exes.DX12_TITLE, exes.DX12_EXE, True)
+                state = keep_state.KeptState(ini_path=gamma / "ModOrganizer.ini", anomaly=anomaly, keep_exes=kept)
+                keep_state.restore(state)
+                titles = [e.title for e in launcher.parse_mo2_executables(str(gamma))]
+                self.assertEqual(exes.DX12_TITLE in titles, kept)
+                self.assertEqual(exes.installed_engine(anomaly), exes.NEXT_RAY if kept else None)
+
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class InstalledTextTest(unittest.TestCase):
+    def test_names_the_engine_in_use(self) -> None:
+        from commander_gui.ui.exes_card import installed_text
+
+        self.assertEqual(installed_text("/a", {"engine": "nextray", "version": "neXt-Ray 0.2.2"}), "In use: neXt-Ray 0.2.2")
+        self.assertEqual(installed_text("/a", {"version": "2026.10.11"}), "In use: Modded exes (demonized) 2026.10.11")
+        self.assertEqual(installed_text("/a", {"engine": "nextray", "version": "file:nx.zip"}), "In use: neXt-Ray from nx.zip")
+
+
+class FrameGenSkipsDx12Test(unittest.TestCase):
+    def test_mako_not_active_in_next_ray_dx12(self) -> None:
+        # MAKO over vkd3d-proton held neXt-Ray's DX12 exe at about 15 FPS.
+        from commander_gui import launch_options
+
+        self.assertNotIn(exes.DX12_EXE, launch_options._GAMES)
+        self.assertIn("AnomalyDX11AVX.exe", launch_options._GAMES)
+
+
+class RomeoOnNextRayTest(unittest.TestCase):
+    def test_only_romeo_profiles_over_next_ray(self) -> None:
+        from types import SimpleNamespace
+
+        from commander_gui import romeo
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            gamma, anomaly = root / "gamma", root / "anomaly"
+            _write(gamma / "profiles" / "G.A.M.M.A" / "modlist.txt", "+a\n")
+            _write(gamma / "profiles" / "ROMEO" / "modlist.txt", f"+{romeo.MCM_MOD}\n")
+            _gamma_anomaly(anomaly)
+
+            def on(mo2: str) -> bool:
+                return romeo.on_next_ray(SimpleNamespace(gamma=str(gamma), anomaly=str(anomaly), mo2_profile=mo2))
+
+            self.assertFalse(on("ROMEO"))  # GAMMA's engine
+            exes.install(_next_ray(root), anomaly, "neXt-Ray 0.2.2")
+            self.assertTrue(on("ROMEO"))
+            self.assertFalse(on("G.A.M.M.A"))
+            self.assertFalse(romeo.on_next_ray(None))
+
+
+def test_release_text_marks_installed_and_last_used():
+    from commander_gui.ui.exes_card import release_text
+
+    rel = {"tag": "2026.11.22", "published": "2026-11-22"}
+    nr = {"tag": "1.2", "published": "x"}
+    state = {"engine": exes.NEXT_RAY, "version": "neXt-Ray 1.2", "last": {exes.MODDED: "2026.11.22"}}
+    assert release_text(rel, state, exes.MODDED).endswith("last used")
+    assert release_text(nr, state, exes.NEXT_RAY).endswith("installed")
+    assert "installed" not in release_text(rel, None, exes.MODDED)

@@ -13,7 +13,7 @@ import time
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import QGridLayout, QHBoxLayout, QSizePolicy, QVBoxLayout
 
-from commander_gui import coop, gui_settings
+from commander_gui import coop, gui_settings, romeo
 from commander_gui.assistant_launcher import AssistantLaunchError, launch_assistant
 from commander_gui.deck_launch import in_game_mode
 from commander_gui.game_stats import (
@@ -44,6 +44,7 @@ from commander_gui.ui.common import (
     notice,
     play_click_sound,
 )
+from commander_gui.ui.exes_card import romeo_launch_text
 
 from .. import gamepad as pad
 from ..launch import DeckLaunchController, runner_label, runner_options
@@ -368,8 +369,35 @@ class PlayScreen(DeckScreen):
             self.window._ensure_page("multiplayer").start_coop(profile, target)
         elif not _has_mo2(profile):
             self._play_anomaly(sound=False)  # plain Anomaly: no MO2 to start
+        elif romeo.on_next_ray(profile):
+            self._confirm_romeo_engine(profile, target)
         else:
             self.controller.launch(profile, target=target)
+
+    def _confirm_romeo_engine(self, profile, target: str) -> None:
+        """ROMEO on neXt-Ray loads with broken mods: ask first."""
+        title, message = romeo_launch_text()
+
+        def _updates() -> None:
+            self.window.dismiss_overlay()
+            self.window.set_page("update")
+
+        def _anyway() -> None:
+            self.window.dismiss_overlay()
+            self.controller.launch(profile, target=target)
+
+        self.window.show_overlay(
+            DeckOverlay(
+                title,
+                deck_label(message, role="body", wrap=True),
+                [
+                    (tr("Open Updates"), _updates, "primary"),
+                    (tr("Play anyway"), _anyway, "normal"),
+                    (tr("Cancel"), self.window.dismiss_overlay, "normal"),
+                ],
+                panel_width=1000,
+            )
+        )
 
     def _confirm_flipped(self, profile, target: str, path, lines: list[str]) -> None:
         """A reversed load order (the old Flip Priority button) crashes GAMMA

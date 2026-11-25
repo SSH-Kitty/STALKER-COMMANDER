@@ -14,6 +14,12 @@ replaces, move into ``commander-exes/original`` so ``restore_original()`` can
 put the folder back exactly as it was. A GAMMA update copies its loose files
 and exes back; ``after_gamma_update()`` cleans up again when the player kept
 their exes.
+
+Two engines install this way: demonized's modded exes and neXt-Ray
+(Ozicom23's fork of them, AVX exes only, with a DX12 renderer). Their zips
+share the layout and the ``.db0`` name; the engine is told apart by
+``bin/AnomalyDX12AVX.exe``. Switching from one engine to the other first
+restores the originals, so no exe of the old engine is left behind.
 """
 
 from __future__ import annotations
@@ -33,10 +39,27 @@ from . import __version__, atomic, network
 from .mod_install import ModInstallError, extract_archive
 from .network import read_response_bytes
 
-_RELEASES_API = "https://api.github.com/repos/themrdemonized/xray-monolith/releases"
 _USER_AGENT = f"CommanderGUI/{__version__}"
-_ASSET_RE = re.compile(r"^STALKER-Anomaly-modded-exes-MT-TEST_[\d.]+\.zip$")
 _TAG_RE = re.compile(r"^\d{4}\.\d{1,2}\.\d{1,2}$")
+
+MODDED = "modded"
+NEXT_RAY = "nextray"
+#: Engine -> (GitHub releases API, release zip name, release tag).
+_SOURCES = {
+    MODDED: (
+        "https://api.github.com/repos/themrdemonized/xray-monolith/releases",
+        re.compile(r"^STALKER-Anomaly-modded-exes-MT-TEST_[\d.]+\.zip$"),
+        _TAG_RE,
+    ),
+    NEXT_RAY: (
+        "https://api.github.com/repos/Ozicom23/next-ray-engine/releases",
+        re.compile(r"^neXt-Ray-[\d.]+\.zip$"),
+        re.compile(r"^v\d+(\.\d+)*$"),
+    ),
+}
+#: neXt-Ray's DX12 exe and the MO2 executable COMMANDER adds for it.
+DX12_EXE = "AnomalyDX12AVX.exe"
+DX12_TITLE = "Anomaly (DX12-AVX)"
 _MAX_API_BYTES = 4 * 1024 * 1024
 _MAX_ZIP_BYTES = 1024**3
 
@@ -54,14 +77,16 @@ class ExesError(RuntimeError):
 
 
 # -- versions -----------------------------------------------------------------
-def fetch_releases(count: int = 30) -> list[dict]:
-    """Recent releases with an MT-TEST zip, newest first.
+def fetch_releases(count: int = 30, engine: str = MODDED) -> list[dict]:
+    """Recent releases of *engine* with an engine zip, newest first.
 
     Each has ``tag``, ``published`` (ISO date), ``url``, ``size`` and
-    ``sha256`` (GitHub's digest of the zip, "" when it has none).
+    ``sha256`` (GitHub's digest of the zip, "" when it has none). A
+    neXt-Ray tag reads ``neXt-Ray 0.2.2``.
     """
+    api, asset_re, tag_re = _SOURCES[engine]
     req = urllib.request.Request(
-        f"{_RELEASES_API}?per_page={min(100, max(1, count))}",
+        f"{api}?per_page={min(100, max(1, count))}",
         headers={"User-Agent": _USER_AGENT, "Accept": "application/vnd.github+json"},
     )
     with network.urlopen_with_retry(req, timeout=30) as resp:
@@ -69,12 +94,13 @@ def fetch_releases(count: int = 30) -> list[dict]:
     out = []
     for release in data:
         tag = release.get("tag_name", "")
-        asset = next((a for a in release.get("assets", []) if _ASSET_RE.match(a.get("name", ""))), None)
-        if not _TAG_RE.match(tag) or asset is None or release.get("draft"):
+        asset = next((a for a in release.get("assets", []) if asset_re.match(a.get("name", ""))), None)
+        if not tag_re.match(tag) or asset is None or release.get("draft"):
             continue
         digest = asset.get("digest") or ""
         out.append({
-            "tag": tag,
+            "engine": engine,
+            "tag": f"neXt-Ray {tag[1:]}" if engine == NEXT_RAY else tag,
             "published": (release.get("published_at") or "")[:10],
             "url": asset.get("browser_download_url", ""),
             "size": int(asset.get("size") or 0),
@@ -105,14 +131,20 @@ def at_least(anomaly: str | Path, tag: str) -> bool:
     def _key(text: str) -> tuple[int, ...]:
         return tuple(int(part) for part in re.split(r"[.-]", text))
 
-    version = (load_state(anomaly) or {}).get("version")
+    state = load_state(anomaly) or {}
+    if state.get("engine") == NEXT_RAY:
+        return False  # forked from the 2026.5.15 modded exes; not a newer one
+    version = state.get("version")
     if not (isinstance(version, str) and _TAG_RE.match(version)):
         version = build_date(anomaly)
     return version is not None and _key(version) >= _key(tag)
 
 
 def load_state(anomaly: str | Path) -> dict | None:
-    """``{"version", "previous"}`` when COMMANDER installed the exes.
+    """``{"version", "previous", "engine"}`` when COMMANDER installed the exes.
+
+    ``engine`` is ``MODDED`` or ``NEXT_RAY`` (missing in older records:
+    ``MODDED``, the only engine then).
 
     ``version``/``previous`` are a release tag, ``"file:<zip name>"``, or
     None for "what was there before COMMANDER" (``previous`` only).
@@ -196,12 +228,36 @@ def _put_back(original: Path, anomaly: Path) -> None:
     shutil.rmtree(original)
 
 
-def _check_layout(staging: Path) -> None:
-    if not (staging / "bin" / "AnomalyDX11.exe").is_file() or not (staging / "db" / "mods" / GAMEDATA_DB).is_file():
+def installed_engine(anomaly: str | Path) -> str | None:
+    """The engine COMMANDER installed here, or None (GAMMA's own)."""
+    state = load_state(anomaly)
+    return state.get("engine", MODDED) if state else None
+
+
+def runs_installed_engine(anomaly: str | Path, binary: str) -> bool:
+    """False for a launch target that would start another engine than the
+    one installed: with neXt-Ray (AVX exes only), GAMMA's non-AVX and DX8-10
+    exes are still in ``bin`` but its loose gamedata is gone. Also False for
+    a DX12 target whose exe is gone (an Anomaly reinstall or a GAMMA update
+    removed neXt-Ray but left the MO2 entry)."""
+    name = Path(binary.replace("\\", "/")).name.lower()
+    if name == DX12_EXE.lower() and not Path(binary).is_file():
+        return False
+    if not name.startswith("anomalydx") or installed_engine(anomaly) != NEXT_RAY:
+        return True
+    return name in ("anomalydx11avx.exe", DX12_EXE.lower())
+
+
+def _check_layout(staging: Path) -> str:
+    """Check an unpacked zip; return its engine."""
+    exes = staging / "bin"
+    if not ((exes / "AnomalyDX11.exe").is_file() or (exes / "AnomalyDX11AVX.exe").is_file()) \
+            or not (staging / "db" / "mods" / GAMEDATA_DB).is_file():
         raise ExesError("This zip isn't a modded exes release: it needs bin/AnomalyDX11.exe and db/mods/" + GAMEDATA_DB + ".")
     extra = {p.name for p in staging.iterdir()} - {"bin", "db"}
     if extra:
         raise ExesError(f"This zip has more than modded exes in it: {', '.join(sorted(extra))}")
+    return NEXT_RAY if (exes / DX12_EXE).is_file() else MODDED
 
 
 def install(zip_path: Path, anomaly: str | Path, label: str, cancel_event: Event | None = None) -> None:
@@ -216,14 +272,24 @@ def install(zip_path: Path, anomaly: str | Path, label: str, cancel_event: Event
         # files. Switched off is fine: switching on backs up afresh.
         raise ExesError("Co-op is on. Switch to singleplayer on the Multiplayer page first.")
     state = load_state(anomaly)
+    last = dict((state or {}).get("last") or {})  # engine -> version last used
+    if state is not None:
+        last[state.get("engine", MODDED)] = state.get("version")
     root = anomaly / _STATE_DIR
     root.mkdir(exist_ok=True)
-    staging = Path(tempfile.mkdtemp(prefix=".exes-", dir=root))
+    # Beside ``root``, not in it: switching engines deletes ``root``.
+    staging = Path(tempfile.mkdtemp(prefix=".exes-", dir=anomaly))
     try:
         extract_archive(zip_path, staging / "zip", cancel_event)
-        _check_layout(staging / "zip")
+        engine = _check_layout(staging / "zip")
         if cancel_event is not None and cancel_event.is_set():
             raise ModInstallError("Mod installation cancelled")
+        if state is not None and state.get("engine", MODDED) != engine:
+            # Other engine: back to the originals, then a first install.
+            # A failure from here on leaves GAMMA's own engine in place.
+            restore_original(anomaly)
+            root.mkdir(exist_ok=True)
+            state = None
         original = root / "original"
         # No state means no finished install: an ``original`` folder is
         # what an interrupted first install moved out, so it goes back.
@@ -261,6 +327,8 @@ def install(zip_path: Path, anomaly: str | Path, label: str, cancel_event: Event
                 "version": label,
                 "previous": state.get("version") if state else None,
                 "added": sorted(added),
+                "engine": engine,
+                "last": last,
             })
         except BaseException as exc:
             if first:
@@ -309,11 +377,14 @@ def after_gamma_update(anomaly: str | Path, kept_exes: bool) -> None:
 
     Kept exes: redo the clean-up, and keep the ``.db0`` (saved by the caller
     across the update). Not kept: GAMMA's exes are back, so COMMANDER's
-    record and backup no longer describe the folder; drop them and the
-    ``.db0``, whose loose counterparts GAMMA just reinstalled.
+    record and backup no longer describe the folder; drop them, the
+    ``.db0``, whose loose counterparts GAMMA just reinstalled, and the
+    files the engine added that GAMMA has no copy of (neXt-Ray's DX12 exe
+    and DLLs would otherwise run against GAMMA's gamedata).
     """
     anomaly = Path(anomaly)
-    if load_state(anomaly) is None:
+    state = load_state(anomaly)
+    if state is None:
         return
     if kept_exes:
         for path in _clean_targets(anomaly):
@@ -321,4 +392,7 @@ def after_gamma_update(anomaly: str | Path, kept_exes: bool) -> None:
                 _remove(path)
     else:
         (anomaly / "db" / "mods" / GAMEDATA_DB).unlink(missing_ok=True)
+        for name in state.get("added", []):
+            if Path(name).name == name:
+                (anomaly / "bin" / name).unlink(missing_ok=True)
         shutil.rmtree(anomaly / _STATE_DIR, ignore_errors=True)

@@ -662,6 +662,59 @@ TOPICS: list[dict] = [
         ],
     },
     {
+        "title": "Game engine",
+        "summary": "Which engines COMMANDER can install, how switching between them works, and how to go back to GAMMA's own.",
+        "page": "update",
+        "sections": [
+            (
+                'Which engines',
+                [
+                    "The engine is the game's exes in Anomaly's bin folder. GAMMA ships its own build of demonized's modded exes. The Game engine card on the Updates page can replace it with one of two others:",
+                    ("table", [
+                        ("Modded exes (demonized)", 'Newer builds of the engine GAMMA ships. Install one when a mod or modpack needs it. ROMEO needs 2026.9.12 or newer.'),
+                        ("neXt-Ray", 'A fork of the modded exes by Ozicom23, with a DX12 renderer, DLSS, FSR and XeSS upscaling, frame generation and faster loading. AVX exes only, made for GAMMA 0.9.5. Its Steam Deck preset is in Options → Video → Advanced.'),
+                    ]),
+                    "Both come from their GitHub releases, and every download is checked against GitHub's checksum. From a file installs a zip you downloaded yourself.",
+                ],
+            ),
+            (
+                'Installing and switching',
+                [
+                    "Pick an engine and a version, then Install. COMMANDER follows the engine's own install guide:",
+                    ("list", [
+                        "the first time, it saves the current exes and the engine files in Anomaly's gamedata and db/mods folders to <anomaly>/commander-exes/original;",
+                        "it removes those loose engine files, because they would override the new engine's own;",
+                        'it unpacks the engine into the Anomaly folder;',
+                        'for neXt-Ray, it adds Anomaly (DX12-AVX) to Mod Organizer and picks it, so Play starts DX12.',
+                    ]),
+                    'Switching from one engine to the other first puts the original exes back, then installs the new one, so nothing of the old engine is left. Go back to installs the version you had before, within the same engine.',
+                ],
+            ),
+            (
+                "Going back to GAMMA's engine",
+                [
+                    'Restore original exes puts back exactly what was there before COMMANDER first installed an engine. It also removes Anomaly (DX12-AVX) from Mod Organizer and picks Anomaly (DX11-AVX).',
+                    "A GAMMA update puts GAMMA's own engine back. Tick Keep my current engine executables to keep yours: COMMANDER then clears GAMMA's loose engine files again and adds Anomaly (DX12-AVX) back.",
+                ],
+            ),
+            (
+                'neXt-Ray limits',
+                [
+                    ("list", [
+                        'Co-op: xrRazom brings its own engine, so switching co-op on is blocked while neXt-Ray is installed. Restore the original exes first.',
+                        'ROMEO needs modded exes 2026.9.12 or newer, and neXt-Ray is based on an older build.',
+                        "Only Anomaly (DX11-AVX) and Anomaly (DX12-AVX) run neXt-Ray. The other targets still start GAMMA's engine, which doesn't work with neXt-Ray's files.",
+                        'On Linux and the Steam Deck, DX12 runs through vkd3d-proton, which GE-Proton and Proton Experimental include. For DLSS on NVIDIA, add PROTON_ENABLE_NVAPI=1 to the launch options.',
+                        "While neXt-Ray is installed, Play hides the other engine targets, so a non-AVX or DX8 to DX10 target can't start GAMMA's engine against neXt-Ray's files.",
+                        "Launch options has DLSS and HDR switches for neXt-Ray. Use a Proton runner for DX12: plain Wine's DX12 support is limited, and OpenGL can't run DX12 at all.",
+                        "COMMANDER's frame generation (MAKO FG or Lossless Scaling) works on Anomaly (DX11-AVX) only. On DX12 it stays off: over vkd3d-proton it held the game at about 15 FPS. Use neXt-Ray's own frame generation there.",
+                    ]),
+                    ("warn", "neXt-Ray is not part of GAMMA. Report its problems on neXt-Ray's GitHub page, not to GAMMA's support."),
+                ],
+            ),
+        ],
+    },
+    {
         "title": "Mod Manager",
         "summary": "Editing the MO2 mod list safely: how changes are written, backups, conflicts, installing your own mods and FOMOD.",
         "page": "modmanager",
@@ -1253,7 +1306,7 @@ TOPICS: list[dict] = [
                         ("Dashboard", "One banner that answers 'can I play?' with the one button that moves things forward (Play, Install, Resume, Update), then Anomaly, GAMMA and dependency status, updates, mods, storage and your profiles (switch, create, edit name and folders with a built-in folder browser)."),
                         ("Play", "Launch target, runner, session timer and Force Stop Game for a game that hangs (the Deck has no Alt+F4)."),
                         ("Mods", "The mod list in MO2 order with priority numbers; fold categories, filter, search, enable or disable a whole category, reorder, install mods with FOMOD support."),
-                        ("Update", "Every added, modified and removed mod, scrollable patch notes, and the modded exes."),
+                        ("Update", "Every added, modified and removed mod, scrollable patch notes, and the game engine."),
                         ("Install", "Anomaly, GAMMA, dependencies, Proton-GE, install options, and Resume after an interrupted install."),
                         ("Utilities", "Cache, shader cache, ReShade, GOG fix, prefix repair, move install, log dump, and the resets."),
                         ("System", "System Check, with Copy install command on each missing item."),

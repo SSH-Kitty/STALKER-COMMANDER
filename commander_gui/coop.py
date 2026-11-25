@@ -421,6 +421,8 @@ def install(zip_path: str | Path, anomaly, gamma, mo2_profile, progress=None, ki
                  "originals": [], "active": False, "kind": kind, "gamma_files": sorted(overlay),
                  "slots_lifted": bool((previous or {}).get("slots_lifted")),
                  "host_default": bool((previous or {}).get("host_default"))}
+        if (previous or {}).get("settings"):
+            state["settings"] = previous["settings"]  # the player's co-op settings survive an update
         if kind == KIND_ANOMALY:
             # Which co-op files are the mod's, for set_install_kind(). One
             # the engine half ships too stays an engine file.
@@ -892,6 +894,17 @@ def _lift_slot_default(anomaly) -> None:
     _save_state(anomaly, state)
 
 
+def _settings_file(anomaly) -> Path:
+    """Where the co-op settings live now: user.ltx while co-op is on, or
+    while there is no co-op snapshot yet; otherwise the co-op snapshot that
+    switch_to_coop() puts back (singleplayer's user.ltx has no xrr_* lines)."""
+    state = load_state(anomaly)
+    snapshot = state_dir(anomaly) / "modes" / "coop" / "user.ltx"
+    if state is not None and not state.get("active") and snapshot.is_file():
+        return snapshot
+    return user_ltx_path(anomaly)
+
+
 def _read_settings(anomaly) -> tuple[dict, set[str]]:
     values = {key: fallback for key, (_kind, fallback) in SETTINGS.items()}
     for key, raw in ((load_state(anomaly) or {}).get("settings") or {}).items():
@@ -902,7 +915,7 @@ def _read_settings(anomaly) -> tuple[dict, set[str]]:
                 pass
     present: set[str] = set()
     try:
-        lines = user_ltx_path(anomaly).read_text(encoding="utf-8", errors="replace").splitlines()
+        lines = _settings_file(anomaly).read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError:
         return values, present
     for line in lines:
@@ -929,7 +942,7 @@ def _format(key: str, value) -> str:
 
 def write_settings(anomaly, changes: dict) -> None:
     """Replace/append only the ``xrr_*`` lines in ``changes``; keep the rest."""
-    path = user_ltx_path(anomaly)
+    path = _settings_file(anomaly)
     try:
         lines = path.read_text(encoding="utf-8", errors="surrogateescape").splitlines()
     except FileNotFoundError:

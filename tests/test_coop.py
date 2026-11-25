@@ -327,7 +327,9 @@ class CoopTests(unittest.TestCase):
         user_ltx = self.anomaly / "appdata" / "user.ltx"
         user_ltx.write_text("rs_screenmode windowed\n")
         values, present = coop.read_settings(self.anomaly)
-        self.assertEqual((values["xrr_player_name"], values["xrr_friendly_fire"], present), ("Old", True, set()))
+        # Read from the co-op copy, not solo's user.ltx.
+        self.assertEqual((values["xrr_player_name"], values["xrr_friendly_fire"], values["xrr_max_players"]), ("Old", True, 4))
+        self.assertIn("xrr_max_players", present)
         coop.switch_to_coop(self.anomaly, self.gamma, "G.A.M.M.A")
         text = user_ltx.read_text().splitlines()
         # Co-op gets its own copy back, not the solo "windowed" one.
@@ -335,6 +337,26 @@ class CoopTests(unittest.TestCase):
         self.assertEqual(sorted(text[1:]), ["xrr_friendly_fire on", "xrr_host_session on", "xrr_max_players 4", "xrr_player_name Old"])
         coop.switch_to_singleplayer(self.anomaly, self.gamma, "G.A.M.M.A")
         self.assertEqual(user_ltx.read_text(), "rs_screenmode windowed\n")
+
+    def test_solo_edit_and_update_keep_coop_settings(self):
+        # Seen with xrRazom 1.5: in singleplayer the page showed the engine's
+        # default 3 slots, as solo's user.ltx has no xrr_* lines, and a
+        # reinstall dropped the saved settings.
+        self._install()
+        coop.switch_to_coop(self.anomaly, self.gamma, "G.A.M.M.A")
+        coop.switch_to_singleplayer(self.anomaly, self.gamma, "G.A.M.M.A")
+        user_ltx = self.anomaly / "appdata" / "user.ltx"
+        user_ltx.write_text("rs_screenmode windowed\n")
+        state = coop.load_state(self.anomaly)
+        state.pop("settings", None)  # as an update before this fix left it
+        coop._save_state(self.anomaly, state)
+        self.assertEqual(coop.read_settings(self.anomaly)[0]["xrr_max_players"], 4)
+        coop.write_settings(self.anomaly, {"xrr_max_players": 2})  # edited in singleplayer
+        self.assertEqual(user_ltx.read_text(), "rs_screenmode windowed\n")
+        self._install()  # an update keeps the settings
+        self.assertEqual(coop.load_state(self.anomaly)["settings"]["xrr_max_players"], "2")
+        coop.switch_to_coop(self.anomaly, self.gamma, "G.A.M.M.A")
+        self.assertIn("xrr_max_players 2", user_ltx.read_text().splitlines())
 
     def test_slot_default_lifted_once(self):
         # The engine writes 3 friends; xrRazom takes 4. Lift it once, then

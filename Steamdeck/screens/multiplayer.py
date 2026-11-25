@@ -409,7 +409,7 @@ class MultiplayerScreen(DeckScreen):
         grid = QHBoxLayout()
         self.version_value = deck_label("?", role="statValue")
         self.slots_value = deck_label("", role="statValue")
-        for value, caption in ((self.version_value, tr("xrRazom version")), (self.slots_value, tr("Player slots"))):
+        for value, caption in ((self.version_value, tr("xrRazom version")), (self.slots_value, tr("Players in total"))):
             cell = QVBoxLayout()
             cell.setSpacing(0)
             value.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -791,7 +791,7 @@ class MultiplayerScreen(DeckScreen):
         self.name_row.set_value(str(values["xrr_player_name"]))
         self.port_row.set_value(str(int(values["xrr_host_lan_port"])))
         self.join_row.set_value(getattr(self, "_join_ip", "") or tr("Not set"))
-        self.slots_value.setText(str(int(values["xrr_max_players"])))
+        self.slots_value.setText(str(int(values["xrr_max_players"]) + 1))  # + the host
         # Dependent settings, as the desktop page links them.
         for parent, child in (
             ("xrr_rescue", "xrr_rescue_medkit"),

@@ -1,11 +1,18 @@
 # Keeps the pinned GitHub Actions and Python requirements from going stale.
+# Monthly, one grouped PR per ecosystem, so at most two PRs a month.
 version: 2
 updates:
   - package-ecosystem: github-actions
     directory: /
     schedule:
-      interval: weekly
+      interval: monthly
+    groups:
+      actions:
+        patterns: ["*"]
   - package-ecosystem: pip
     directory: /
     schedule:
-      interval: weekly
+      interval: monthly
+    groups:
+      python:
+        patterns: ["*"]

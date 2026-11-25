@@ -254,6 +254,18 @@ def restore(state: KeptState) -> list[str]:
             notes.extend(_restore_ini_settings(state.ini_path, state.ini_settings))
         except OSError as exc:
             notes.append(tr("Could not restore MO2 settings: {exc}", exc=exc))
+    if state.ini_path is not None and state.anomaly is not None:
+        from .launcher import set_mo2_executable
+        from .modded_exes import DX12_EXE, DX12_TITLE, NEXT_RAY, installed_engine
+
+        # neXt-Ray kept: the update may have dropped its DX12 entry, so it
+        # goes back before the pick below, which may be that entry. Not
+        # kept: GAMMA's engine is back and the entry would start nothing.
+        if installed_engine(state.anomaly) == NEXT_RAY:
+            try:
+                set_mo2_executable(str(state.ini_path.parent), DX12_TITLE, DX12_EXE, state.keep_exes)
+            except OSError as exc:
+                notes.append(tr("Could not restore your MO2 executable choice: {exc}", exc=exc))
     if (state.selected_exe or state.exe_arguments) and state.ini_path is not None:
         try:
             notes.extend(
