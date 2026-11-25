@@ -467,7 +467,7 @@ class BrowserWindow(QMainWindow):
     def _download(self, request: QWebEngineDownloadRequest) -> None:
         if request.url().scheme() != "https" or not request.downloadFileName().lower().endswith(self._MOD_ARCHIVES):
             request.cancel()
-            self.status.setText(tr("{name} didn't finish downloading.", name=request.downloadFileName()))
+            self.status.setText(tr("{name} was blocked: it isn't a mod archive.", name=request.downloadFileName()))
             return
         # A download link opened in a new tab leaves that tab blank: close it.
         for index in range(self.tabs.count()):

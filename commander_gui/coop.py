@@ -185,45 +185,79 @@ def _check_unpacked_size(archive: zipfile.ZipFile) -> None:
 
 #: What _swap_dir calls the folder it set aside; unlike ".old" a player never types it.
 _SWAP_SUFFIX = ".commander-old"
+#: A new folder on its way in, and player files a ROMEO profile swap set aside.
+_NEW_SUFFIX = ".commander-new"
+_KEEP_SUFFIX = ".keep"
 
 
 def recover_swaps(gamma) -> None:
-    """Clean up after a _swap_dir that a crash or power cut cut short.
+    """Clean up after a _swap_dir or ROMEO profile swap that a crash or
+    power cut cut short.
 
     The set-aside folder is put back when the new one never arrived, else
-    deleted. Left alone it shows in Mod Organizer as a second mod or profile
-    (ROMEO's is about 75 GB).
+    deleted (the new one only ever lands whole: _swap_dir renames it in
+    last). A half-copied incoming folder is deleted. Left alone these show
+    in Mod Organizer as a second mod or profile (ROMEO's is about 75 GB).
+    Player files ROMEO's profile swap set aside (``.<profile>.keep``: local
+    saves, settings.ini) go back into the profile.
     """
     for parent in (Path(gamma).expanduser() / "mods", Path(gamma).expanduser() / "profiles"):
         try:
-            leftovers = [p for p in parent.iterdir() if p.name.endswith(_SWAP_SUFFIX) and p.is_dir()]
+            leftovers = [p for p in parent.iterdir() if p.is_dir()]
         except OSError:
             continue
-        for old in leftovers:
-            dest = old.with_name(old.name[: -len(_SWAP_SUFFIX)])
+        for path in leftovers:
             try:
-                if dest.exists():
-                    shutil.rmtree(old, ignore_errors=True)
-                else:
-                    os.replace(old, dest)
+                if path.name.endswith(_NEW_SUFFIX):
+                    shutil.rmtree(path, ignore_errors=True)
+                elif path.name.endswith(_SWAP_SUFFIX):
+                    dest = path.with_name(path.name[: -len(_SWAP_SUFFIX)])
+                    if dest.exists():
+                        shutil.rmtree(path, ignore_errors=True)
+                    else:
+                        os.replace(path, dest)
+            except OSError:
+                pass
+        if parent.name != "profiles":
+            continue
+        for keep in [p for p in leftovers if p.name.startswith(".") and p.name.endswith(_KEEP_SUFFIX)]:
+            profile = keep.with_name(keep.name[1 : -len(_KEEP_SUFFIX)])
+            try:
+                profile.mkdir(exist_ok=True)
+                for item in list(keep.iterdir()):
+                    if not (profile / item.name).exists():
+                        os.replace(item, profile / item.name)
+                keep.rmdir()  # only when everything went back
             except OSError:
                 pass
 
 
 def _swap_dir(new: Path, dest: Path) -> None:
-    """Put ``new`` at ``dest``; the old ``dest`` comes back if the move fails."""
+    """Put ``new`` at ``dest``; the old ``dest`` comes back if the move fails.
+
+    ``new`` is first moved beside ``dest`` (a copy when it is on another
+    drive), so ``dest`` only changes by renames: a crash leaves either the
+    old folder or the whole new one there, never half a copy.
+    """
     dest.parent.mkdir(parents=True, exist_ok=True)
     old = dest.with_name(dest.name + _SWAP_SUFFIX)
+    incoming = dest.with_name(dest.name + _NEW_SUFFIX)
     shutil.rmtree(old, ignore_errors=True)
+    shutil.rmtree(incoming, ignore_errors=True)
+    try:
+        shutil.move(str(new), incoming)  # may cross filesystems
+    except BaseException:
+        shutil.rmtree(incoming, ignore_errors=True)
+        raise
     had_old = dest.exists()
     if had_old:
         os.replace(dest, old)
     try:
-        shutil.move(str(new), dest)  # may cross filesystems
+        os.replace(incoming, dest)
     except BaseException:
-        shutil.rmtree(dest, ignore_errors=True)
         if had_old:
             os.replace(old, dest)
+        shutil.rmtree(incoming, ignore_errors=True)
         raise
     shutil.rmtree(old, ignore_errors=True)
 

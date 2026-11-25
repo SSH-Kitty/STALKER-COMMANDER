@@ -146,7 +146,7 @@ class DeckExesCard(QObject):
         self.version_row.set_value(tr("Loading releases"))
         self._list_task = BackgroundTask(modded_exes.fetch_releases, engine=engine, parent=self)
         self._list_task.result.connect(lambda releases: self._on_releases(releases, engine))
-        self._list_task.error.connect(self._on_releases_error)
+        self._list_task.error.connect(lambda message: self._on_releases_error(message, engine))
         self._list_task.start()
 
     def _on_releases(self, releases: list[dict], engine: str) -> None:
@@ -156,10 +156,11 @@ class DeckExesCard(QObject):
             self._set_engine(engine)
         self.refresh()
 
-    def _on_releases_error(self, _message: str) -> None:
+    def _on_releases_error(self, _message: str, engine: str) -> None:
         self._list_task = None
-        self._failed.add(self._engine)
-        self.version_row.set_value(tr("Couldn't load releases. Check your connection."))
+        self._failed.add(engine)  # the engine that was loading, not the one picked since
+        if engine == self._engine:
+            self.version_row.set_value(tr("Couldn't load releases. Check your connection."))
         self.refresh()
 
     def _pick_version(self) -> None:

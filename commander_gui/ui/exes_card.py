@@ -43,7 +43,8 @@ def installed_text(anomaly: str, state: dict | None) -> str:
     if not anomaly:
         return tr("Pick an Anomaly folder for this profile first.")
     if state:
-        name = {e: n for n, e in engines()}[state.get("engine") or modded_exes.MODDED]
+        engine = state.get("engine") or modded_exes.MODDED
+        name = {e: n for n, e in engines()}.get(engine, str(engine))  # one a newer COMMANDER wrote
         version = state.get("version") or ""
         if version.startswith("file:"):
             return tr("In use: {engine} from {file}", engine=name, file=version[5:])

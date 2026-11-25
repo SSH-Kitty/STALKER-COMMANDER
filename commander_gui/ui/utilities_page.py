@@ -301,10 +301,12 @@ def _remove_tree(path: Path) -> None:
     Python removes ~100k files one call at a time, which takes minutes under
     Defender or in a VM. Falls back to ``rmtree``, clearing read-only flags.
     """
-    if os.name == "nt":
+    # cmd parses its command line itself: a folder named "S&G" would run
+    # "rd D:\S" and then "G". Names with cmd's special characters take rmtree.
+    if os.name == "nt" and not set(str(path)) & set('%^&|<>"!'):
         try:
             subprocess.run(
-                ["cmd", "/c", "rd", "/s", "/q", str(path)],
+                f'cmd /c rd /s /q "{path}"',
                 check=False,
                 capture_output=True,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
@@ -331,10 +333,11 @@ def _forget_stored_size(label: str) -> None:
     """Zero a deleted folder in the Storage usage numbers the Dashboard shows
     while the task is still running (it does not re-measure until it ends)."""
     try:
-        stored = gui_settings.load_gui_settings().get("storage_sizes") or {}
+        # Copies: load_gui_settings() may hand out the cache the GUI thread reads.
+        stored = dict(gui_settings.load_gui_settings().get("storage_sizes") or {})
         sizes = stored.get("sizes")
         if isinstance(sizes, dict) and label in sizes:
-            sizes[label] = 0
+            stored["sizes"] = {**sizes, label: 0}
             gui_settings.save_gui_settings(storage_sizes=stored)
     except (OSError, ValueError, TypeError):
         pass  # only a display number; the next measure fixes it

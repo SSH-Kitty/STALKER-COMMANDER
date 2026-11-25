@@ -3378,6 +3378,7 @@ TRANSLATIONS: dict[str, str] = {
     'Downloading {name}': '{name} indiriliyor',
     '{name} downloaded. Switch to COMMANDER to install it.': "{name} indirildi. Kurmak için COMMANDER'a geçin.",
     "{name} didn't finish downloading.": '{name} indirilmesi tamamlanmadı.',
+    "{name} was blocked: it isn't a mod archive.": '{name} engellendi: bir mod arşivi değil.',
     'Open this from COMMANDER': "Bunu COMMANDER'dan açın",
     'Open the ModDB browser from COMMANDER: Settings > Plugins.': "ModDB tarayıcısını COMMANDER'dan açın: Ayarlar > Eklentiler.",
     'Delete downloads': 'İndirilenleri sil',

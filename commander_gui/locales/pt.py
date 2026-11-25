@@ -3378,6 +3378,7 @@ TRANSLATIONS: dict[str, str] = {
     'Downloading {name}': 'Baixando {name}',
     '{name} downloaded. Switch to COMMANDER to install it.': '{name} baixado. Mude para o COMMANDER para instalá-lo.',
     "{name} didn't finish downloading.": '{name} não terminou de baixar.',
+    "{name} was blocked: it isn't a mod archive.": '{name} foi bloqueado: não é um arquivo de mod.',
     'Open this from COMMANDER': 'Abra pelo COMMANDER',
     'Open the ModDB browser from COMMANDER: Settings > Plugins.': 'Abra o navegador do ModDB pelo COMMANDER: Configurações > Plugins.',
     'Delete downloads': 'Apagar downloads',

@@ -176,7 +176,10 @@ def _swap_profile(new: Path, old: Path) -> None:
     """Replace the profile folder ``old`` with ``new``, keeping what ROMEO
     does not ship: local saves, settings.ini and anything else of the player's."""
     keep = old.with_name(f".{old.name}.keep")
-    shutil.rmtree(keep, ignore_errors=True)
+    if keep.exists():
+        # recover_swaps() (run first) puts a crashed swap's files back; one
+        # still here holds player files that could not go back: never delete it.
+        raise ModInstallError(f"Move your files out of {keep} into {old}, then install again.")
     moved: list[str] = []
     if old.is_dir():
         keep.mkdir()
@@ -370,8 +373,11 @@ def uninstall(gamma: Path, anomaly: Path, cache: Path) -> tuple[list[str], bool]
             has_saves = False
         if has_saves:  # MO2 local saves live in the profile: keep them
             keep = gamma / f"saves from removed profile {name}"
-            if not keep.exists():
-                shutil.copytree(saves, keep)
+            number = 2
+            while keep.exists():  # an earlier removal's saves stay too
+                keep = gamma / f"saves from removed profile {name} ({number})"
+                number += 1
+            shutil.copytree(saves, keep)
         shutil.rmtree(gamma / "profiles" / name)
     from .launcher import set_mo2_selected_profile
 

@@ -544,29 +544,39 @@ def relaunch_commander(
     if release_lock is not None:
         release_lock()
     if os.name == "nt" and Path(path).suffix.lower() == ".exe":
-        verify_setup_file(path)
-        expected = _SETUP_DIGESTS.get(str(path))
+        from .winruntimes import _hold, _release
+
+        # Held from the hash check until Setup has started: nothing can swap
+        # the file in between (reading and running stay allowed).
+        held = _hold(str(path))
         try:
-            changed = expected is not None and _file_sha512(Path(path)) != expected
-        except OSError as exc:
-            raise CommanderSelfUpdateError(f"Could not read the update: {exc}") from exc
-        if changed:
-            Path(path).unlink(missing_ok=True)
-            raise CommanderSelfUpdateError(
-                "The downloaded update changed on disk - it was removed and nothing was installed."
+            verify_setup_file(path)
+            expected = _SETUP_DIGESTS.get(str(path))
+            try:
+                changed = expected is not None and _file_sha512(Path(path)) != expected
+            except OSError as exc:
+                raise CommanderSelfUpdateError(f"Could not read the update: {exc}") from exc
+            if changed:
+                _release(held)
+                held = None
+                Path(path).unlink(missing_ok=True)
+                raise CommanderSelfUpdateError(
+                    "The downloaded update changed on disk - it was removed and nothing was installed."
+                )
+            flags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(
+                subprocess, "CREATE_NEW_PROCESS_GROUP", 0
             )
-        flags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(
-            subprocess, "CREATE_NEW_PROCESS_GROUP", 0
-        )
-        subprocess.Popen(
-            setup_command(path),
-            env=_setup_environment(),
-            creationflags=flags,
-            close_fds=True,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+            subprocess.Popen(
+                setup_command(path),
+                env=_setup_environment(),
+                creationflags=flags,
+                close_fds=True,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        finally:
+            _release(held)
         return
     subprocess.Popen(
         [str(path)],
