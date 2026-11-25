@@ -10,7 +10,7 @@ from commander_gui import modded_exes as exes
 
 def _write(path: Path, text: str = "x") -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text)
+    path.write_text(text, encoding="utf-8")  # ROMEO's "CLIKRΔD" isn't in Windows' cp1252
 
 
 def _tree(root: Path) -> dict[str, str]:
@@ -281,7 +281,9 @@ class Mo2ExecutableTest(unittest.TestCase):
             self.assertTrue(launcher.set_mo2_executable(gamma, exes.DX12_TITLE, exes.DX12_EXE, True))
             self.assertFalse(launcher.set_mo2_executable(gamma, exes.DX12_TITLE, exes.DX12_EXE, True))
             added = launcher.parse_mo2_executables(gamma)[-1]
-            self.assertEqual((added.title, added.binary), (exes.DX12_TITLE, "/a/bin/AnomalyDX12AVX.exe"))
+            self.assertEqual(added.title, exes.DX12_TITLE)
+            # Z: stays a drive on Windows; elsewhere it maps to /.
+            self.assertTrue(added.binary.endswith("/a/bin/AnomalyDX12AVX.exe"), added.binary)
             self.assertTrue(launcher.set_mo2_selected_title(gamma, exes.DX12_TITLE))
 
             self.assertTrue(launcher.set_mo2_executable(gamma, exes.DX12_TITLE, exes.DX12_EXE, False))
