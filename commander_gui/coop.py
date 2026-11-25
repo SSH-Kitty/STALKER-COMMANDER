@@ -64,6 +64,11 @@ RELEASE_FILE = "xrRazom-release.txt"
 _MAX_UNPACKED = 16 << 30  # a zip claiming more than this is a bomb, not a mod
 _ENGINE_ROOT = "Anomaly/"
 _MOD_ROOTS = ("gamedata/", "fomod/")
+#: xrRazom 1.5 ships GAMMA-only gamedata here (the FOMOD installs it over
+#: ``gamedata`` when the install is GAMMA). Kept apart so a switch between
+#: GAMMA and Anomaly can add or drop it without the zip.
+_GAMMA_ROOT = "gamma/gamedata/"
+_OVERLAY = "gamma_overlay"
 
 #: Steam app a Steam session runs as. Everyone in a session must use the same
 #: one: Call of Pripyat (what xrRazom ships) needs the game on each account;
@@ -359,6 +364,7 @@ def install(zip_path: str | Path, anomaly, gamma, mo2_profile, progress=None, ki
         files: dict[str, str] = {}
         engine_rels: set[str] = set()
         mod_rels: set[str] = set()
+        overlay: list[str] = []
         with zipfile.ZipFile(zip_path) as archive:
             members = [m for m in archive.infolist() if not m.is_dir()]
             wrap = _wrapper([m.filename for m in members])
@@ -367,7 +373,11 @@ def install(zip_path: str | Path, anomaly, gamma, mo2_profile, progress=None, ki
                 if _safe_member(name) is None:
                     raise CoopError(f"Unsafe path in archive: {name}")
                 name = name[len(wrap):]
-                if name.startswith(_ENGINE_ROOT):
+                if name.startswith(_GAMMA_ROOT):
+                    rel = None
+                    overlay.append(name[len("gamma/"):])
+                    target = staging / _OVERLAY / overlay[-1]
+                elif name.startswith(_ENGINE_ROOT):
                     rel = name[len(_ENGINE_ROOT):]
                     target = staging / "files" / rel
                     engine_rels.add(rel)
@@ -389,6 +399,9 @@ def install(zip_path: str | Path, anomaly, gamma, mo2_profile, progress=None, ki
                     files[rel] = _sha256(target)
                 if progress:
                     progress(count, len(members))
+        if kind == KIND_GAMMA:
+            for rel in overlay:  # over the mod's own copy, as the FOMOD does
+                _copy_atomic(staging / _OVERLAY / rel, staging / "mod" / rel)
         previous = load_state(anomaly)
         if previous and previous.get("active"):
             # Put the originals back first: the new version may ship a
@@ -401,8 +414,11 @@ def install(zip_path: str | Path, anomaly, gamma, mo2_profile, progress=None, ki
             _remove_mod(gamma, mo2_profile)  # reinstalled for plain Anomaly
         shutil.rmtree(root / "files", ignore_errors=True)
         os.replace(staging / "files", root / "files")
+        shutil.rmtree(root / _OVERLAY, ignore_errors=True)
+        if overlay:
+            os.replace(staging / _OVERLAY, root / _OVERLAY)
         state = {"version": info.get("version", ""), "release": info, "files": files, "zip": Path(zip_path).name,
-                 "originals": [], "active": False, "kind": kind,
+                 "originals": [], "active": False, "kind": kind, "gamma_files": sorted(overlay),
                  "slots_lifted": bool((previous or {}).get("slots_lifted")),
                  "host_default": bool((previous or {}).get("host_default"))}
         if kind == KIND_ANOMALY:
@@ -494,9 +510,15 @@ def set_steam_appid(anomaly, appid: int) -> None:
 
 def switch_to_coop(anomaly, gamma, mo2_profile) -> None:
     """Back up whatever is in the Anomaly folder now, then copy co-op in."""
+    from . import modded_exes
+
     state = load_state(anomaly)
     if state is None:
         raise CoopError("xrRazom Co-op is not installed.")
+    if modded_exes.installed_engine(anomaly) == modded_exes.NEXT_RAY:
+        # Co-op would back up neXt-Ray's exes but leave its .db0 loaded
+        # under xrRazom's engine.
+        raise CoopError("Co-op needs GAMMA's engine. Restore the original exes on the Updates page first.")
     anomaly = Path(anomaly).expanduser()
     root = state_dir(anomaly)
     if not state.get("active"):
@@ -680,6 +702,7 @@ def set_install_kind(anomaly, gamma, mo2_profile, kind: str) -> None:
         if not str(gamma).strip() or not source.is_dir():
             raise CoopError("The xrRazom Co-op mod is missing from GAMMA's mods folder. Install the zip again.")
         moved = ["gamedata/" + f.relative_to(source).as_posix() for f in sorted(source.rglob("*")) if f.is_file()]
+        moved = [rel for rel in moved if rel not in state.get("gamma_files", [])]  # GAMMA-only
         if any(rel in state["files"] for rel in moved):
             # Switching back would take the engine half's copy with it.
             raise CoopError("This xrRazom edition can't be switched. Install the zip again for Anomaly.")
@@ -697,6 +720,9 @@ def set_install_kind(anomaly, gamma, mo2_profile, kind: str) -> None:
         try:
             for rel in moved:
                 _copy_atomic(root / "files" / rel, staging / rel)
+            for rel in state.get("gamma_files", []):
+                if (root / _OVERLAY / rel).is_file():
+                    _copy_atomic(root / _OVERLAY / rel, staging / rel)
             write_basic_meta_ini(staging, state.get("zip") or (state.get("release") or {}).get("title") or MOD_NAME)
             _swap_dir(staging, mod_dir)
         finally:

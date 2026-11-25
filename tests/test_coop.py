@@ -52,6 +52,23 @@ class CoopTests(unittest.TestCase):
             state.write_text(text)
             self.assertEqual(coop.steam_appid(self.anomaly), coop.COP_APPID)
 
+    def test_gamma_only_files_go_to_the_gamma_mod_only(self):
+        # xrRazom 1.5 ships gamma/gamedata, which its FOMOD adds for GAMMA.
+        rel = "gamedata/configs/mod_system_gfy.ltx"
+        with zipfile.ZipFile(self.zip, "a") as archive:
+            archive.writestr("gamma/" + rel, "![wpn]")
+        mod = self.gamma / "mods" / coop.MOD_NAME
+        coop.install(self.zip, self.anomaly, self.gamma, "G.A.M.M.A")
+        self.assertTrue((mod / rel).is_file())
+        coop.set_install_kind(self.anomaly, self.gamma, "G.A.M.M.A", coop.KIND_ANOMALY)
+        files = coop.load_state(self.anomaly)["files"]
+        self.assertIn("gamedata/scripts/xrr_core.script", files)
+        self.assertNotIn(rel, files)
+        coop.set_install_kind(self.anomaly, self.gamma, "G.A.M.M.A", coop.KIND_GAMMA)
+        self.assertTrue((mod / rel).is_file())
+        coop.install(self.zip, self.anomaly, self.gamma, "G.A.M.M.A", kind=coop.KIND_ANOMALY)
+        self.assertNotIn(rel, coop.load_state(self.anomaly)["files"])
+
     def test_first_install_stays_singleplayer(self):
         coop.install(self.zip, self.anomaly, self.gamma, "G.A.M.M.A")
         self.assertEqual(coop.status(self.anomaly), coop.SINGLEPLAYER)
