@@ -337,7 +337,9 @@ def _forget_stored_size(label: str) -> None:
         stored = dict(gui_settings.load_gui_settings().get("storage_sizes") or {})
         sizes = stored.get("sizes")
         if isinstance(sizes, dict) and label in sizes:
-            stored["sizes"] = {**sizes, label: 0}
+            # ROMEO's mods live inside GAMMA, so they go with it.
+            gone = (label, "ROMEO") if label == "GAMMA" else (label,)
+            stored["sizes"] = {**sizes, **{k: 0 for k in gone if k in sizes}}
             gui_settings.save_gui_settings(storage_sizes=stored)
     except (OSError, ValueError, TypeError):
         pass  # only a display number; the next measure fixes it

@@ -363,8 +363,53 @@ def test_release_text_marks_installed_and_last_used():
     from commander_gui.ui.exes_card import release_text
 
     rel = {"tag": "2026.11.22", "published": "2026-11-22"}
-    nr = {"tag": "1.2", "published": "x"}
+    nr = {"tag": "neXt-Ray 1.2", "published": "x"}  # as fetch_releases names it
     state = {"engine": exes.NEXT_RAY, "version": "neXt-Ray 1.2", "last": {exes.MODDED: "2026.11.22"}}
     assert release_text(rel, state, exes.MODDED).endswith("last used")
     assert release_text(nr, state, exes.NEXT_RAY).endswith("installed")
     assert "installed" not in release_text(rel, None, exes.MODDED)
+
+
+def test_releases_for_another_engine_do_not_break_the_picked_one():
+    from unittest import mock
+
+    from PySide6.QtCore import QObject, Signal
+    from PySide6.QtWidgets import QApplication
+
+    from commander_gui.ui import exes_card
+
+    QApplication.instance() or QApplication([])
+    started = []
+
+    class FakeTask(QObject):
+        result = Signal(object)
+        error = Signal(str)
+
+        def __init__(self, *_a, **_k):
+            super().__init__()
+            started.append(self)
+
+        def start(self):
+            pass
+
+    class Window:
+        install_busy = False
+        settings = type("S", (), {"active_profile": None})()
+
+        def set_install_busy(self, *_a):
+            pass
+
+    with mock.patch.object(exes_card, "BackgroundTask", FakeTask):
+        card = exes_card.ModdedExesCard(Window(), lambda: None)
+        card._anomaly = card._gamma = lambda: ""
+        card.refresh()
+        card.engine.setCurrentIndex(1)  # neXt-Ray, while the modded list loads
+        started[0].error.emit("offline")  # the modded fetch fails
+        assert not card._releases_failed  # neXt-Ray still gets its turn
+        assert len(started) == 2
+        # A cached engine picked while another loads must not forget that fetch.
+        card._cache[exes.MODDED] = [{"tag": "1", "published": "x"}]
+        card.engine.setCurrentIndex(0)
+        assert card._list_task is started[1]
+        card.engine.setCurrentIndex(1)
+        assert len(started) == 2

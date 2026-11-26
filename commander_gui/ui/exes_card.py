@@ -61,9 +61,10 @@ def release_text(release: dict, state: dict | None, engine: str) -> str:
         text += " · " + tr("recommended")
     state = state or {}
     clean = lambda v: (v or "").removeprefix("neXt-Ray ")
-    if state.get("engine", modded_exes.MODDED) == engine and clean(state.get("version")) == release["tag"]:
+    tag = clean(release["tag"])
+    if state.get("engine", modded_exes.MODDED) == engine and clean(state.get("version")) == tag:
         text += " · " + tr("installed")
-    elif clean((state.get("last") or {}).get(engine)) == release["tag"]:
+    elif clean((state.get("last") or {}).get(engine)) == tag:
         text += " · " + tr("last used")
     return text
 
@@ -193,7 +194,7 @@ class ModdedExesCard:
         self.hint.setText(engine_hint(engine))
         self._releases_failed = False
         if engine in self._cache:
-            self._on_releases(self._cache[engine], engine)
+            self._show_releases(self._cache[engine], engine)
         else:
             self._releases = []
             self.refresh()
@@ -251,7 +252,7 @@ class ModdedExesCard:
         self.versions.addItem(tr("Loading releases"), None)
         self._list_task = BackgroundTask(lambda: modded_exes.fetch_releases(engine=engine))
         self._list_task.result.connect(lambda releases: self._on_releases(releases, engine))
-        self._list_task.error.connect(self._on_releases_error)
+        self._list_task.error.connect(lambda message: self._on_releases_error(message, engine))
         self._list_task.start()
 
     def _on_releases(self, releases: list[dict], engine: str) -> None:
@@ -260,19 +261,24 @@ class ModdedExesCard:
         if engine != self.engine.currentData():
             self.refresh()  # picked another engine meanwhile: load that one
             return
+        self._show_releases(releases, engine)
+
+    def _show_releases(self, releases: list[dict], engine: str) -> None:
         self._releases = releases
         anomaly = self._anomaly()
         state = modded_exes.load_state(anomaly) if anomaly else None
         self.versions.clear()
         for release in releases:
             self.versions.addItem(release_text(release, state, engine), release)
-        self._list_task = None
         self.refresh()
 
-    def _on_releases_error(self, message: str) -> None:
+    def _on_releases_error(self, message: str, engine: str) -> None:
+        self._list_task = None
+        if engine != self.engine.currentData():
+            self.refresh()  # the one picked since is still to load
+            return
         self.versions.clear()
         self.versions.addItem(tr("Couldn't load releases. Check your connection."), None)
-        self._list_task = None
         self._releases = []
         self._releases_failed = True
         self.refresh()
@@ -353,8 +359,10 @@ class ModdedExesCard:
                         cancel_event,
                     )
                 report(tr("Installing {version}", version=_version_text(label)))
-                modded_exes.install(path, anomaly, label, cancel_event)
-                sync_mo2(gamma, str(anomaly))
+                try:
+                    modded_exes.install(path, anomaly, label, cancel_event)
+                finally:
+                    sync_mo2(gamma, str(anomaly))  # a failed engine switch has already put the old exes back
             finally:
                 if download_dir is not None:
                     shutil.rmtree(download_dir, ignore_errors=True)

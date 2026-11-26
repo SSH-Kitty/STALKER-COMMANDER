@@ -549,6 +549,8 @@ def relaunch_commander(
         # Held from the hash check until Setup has started: nothing can swap
         # the file in between (reading and running stay allowed).
         held = _hold(str(path))
+        if held is None:
+            raise CommanderSelfUpdateError("Could not lock the update file, so nothing was installed.")
         try:
             verify_setup_file(path)
             expected = _SETUP_DIGESTS.get(str(path))

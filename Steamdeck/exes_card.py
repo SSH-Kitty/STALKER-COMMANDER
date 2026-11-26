@@ -241,8 +241,10 @@ class DeckExesCard(QObject):
                         cancel_event,
                     )
                 report(tr("Installing {version}", version=_version_text(label)))
-                modded_exes.install(path, anomaly, label, cancel_event)
-                sync_mo2(gamma, str(anomaly))
+                try:
+                    modded_exes.install(path, anomaly, label, cancel_event)
+                finally:
+                    sync_mo2(gamma, str(anomaly))  # a failed engine switch has already put the old exes back
             finally:
                 if download_dir is not None:
                     shutil.rmtree(download_dir, ignore_errors=True)

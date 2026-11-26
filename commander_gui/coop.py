@@ -69,6 +69,8 @@ _MOD_ROOTS = ("gamedata/", "fomod/")
 #: GAMMA and Anomaly can add or drop it without the zip.
 _GAMMA_ROOT = "gamma/gamedata/"
 _OVERLAY = "gamma_overlay"
+#: The mod's own copy of each file the overlay replaces, kept so a switch to Anomaly gets it back.
+_OVERLAY_BASE = "gamma_overlay_base"
 
 #: Steam app a Steam session runs as. Everyone in a session must use the same
 #: one: Call of Pripyat (what xrRazom ships) needs the game on each account;
@@ -201,6 +203,8 @@ def recover_swaps(gamma) -> None:
     Player files ROMEO's profile swap set aside (``.<profile>.keep``: local
     saves, settings.ini) go back into the profile.
     """
+    if not str(gamma).strip():
+        return  # plain Anomaly profile: Path("") is the cwd
     for parent in (Path(gamma).expanduser() / "mods", Path(gamma).expanduser() / "profiles"):
         try:
             leftovers = [p for p in parent.iterdir() if p.is_dir()]
@@ -388,8 +392,7 @@ def install(zip_path: str | Path, anomaly, gamma, mo2_profile, progress=None, ki
     info = inspect_zip(zip_path)
     if kind == KIND_GAMMA and not str(gamma).strip():
         raise CoopError("Pick a GAMMA folder first.")
-    if str(gamma).strip():
-        recover_swaps(gamma)
+    recover_swaps(gamma)
     root = state_dir(anomaly)
     root.mkdir(parents=True, exist_ok=True)
     atomic.remove_stale(root, ".coop-*")
@@ -435,6 +438,8 @@ def install(zip_path: str | Path, anomaly, gamma, mo2_profile, progress=None, ki
                     progress(count, len(members))
         if kind == KIND_GAMMA:
             for rel in overlay:  # over the mod's own copy, as the FOMOD does
+                if (staging / "mod" / rel).is_file():
+                    _copy_atomic(staging / "mod" / rel, staging / _OVERLAY_BASE / rel)
                 _copy_atomic(staging / _OVERLAY / rel, staging / "mod" / rel)
         previous = load_state(anomaly)
         if previous and previous.get("active"):
@@ -451,6 +456,9 @@ def install(zip_path: str | Path, anomaly, gamma, mo2_profile, progress=None, ki
         shutil.rmtree(root / _OVERLAY, ignore_errors=True)
         if overlay:
             os.replace(staging / _OVERLAY, root / _OVERLAY)
+        shutil.rmtree(root / _OVERLAY_BASE, ignore_errors=True)
+        if (staging / _OVERLAY_BASE).is_dir():
+            os.replace(staging / _OVERLAY_BASE, root / _OVERLAY_BASE)
         state = {"version": info.get("version", ""), "release": info, "files": files, "zip": Path(zip_path).name,
                  "originals": [], "active": False, "kind": kind, "gamma_files": sorted(overlay),
                  "slots_lifted": bool((previous or {}).get("slots_lifted")),
@@ -739,11 +747,17 @@ def set_install_kind(anomaly, gamma, mo2_profile, kind: str) -> None:
             raise CoopError("The xrRazom Co-op mod is missing from GAMMA's mods folder. Install the zip again.")
         moved = ["gamedata/" + f.relative_to(source).as_posix() for f in sorted(source.rglob("*")) if f.is_file()]
         moved = [rel for rel in moved if rel not in state.get("gamma_files", [])]  # GAMMA-only
+        sources = {rel: source / rel[len("gamedata/"):] for rel in moved}
+        for rel in state.get("gamma_files", []):
+            # The overlay replaced the mod's own copy of this file: that copy is the Anomaly one.
+            if (root / _OVERLAY_BASE / rel).is_file():
+                sources[rel] = root / _OVERLAY_BASE / rel
+                moved.append(rel)
         if any(rel in state["files"] for rel in moved):
             # Switching back would take the engine half's copy with it.
             raise CoopError("This xrRazom edition can't be switched. Install the zip again for Anomaly.")
         for rel in moved:
-            _copy_atomic(source / rel[len("gamedata/"):], root / "files" / rel)
+            _copy_atomic(sources[rel], root / "files" / rel)
             state["files"][rel] = _sha256(root / "files" / rel)
         state.update(kind=KIND_ANOMALY, mod_files=moved)
         _save_state(anomaly, state)

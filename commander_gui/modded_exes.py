@@ -277,6 +277,7 @@ def install(zip_path: Path, anomaly: str | Path, label: str, cancel_event: Event
         last[state.get("engine", MODDED)] = state.get("version")
     root = anomaly / _STATE_DIR
     root.mkdir(exist_ok=True)
+    atomic.remove_stale(anomaly, ".exes-*")  # left by a killed install or download
     # Beside ``root``, not in it: switching engines deletes ``root``.
     staging = Path(tempfile.mkdtemp(prefix=".exes-", dir=anomaly))
     try:

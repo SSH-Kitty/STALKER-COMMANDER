@@ -451,6 +451,29 @@ class CoopTests(unittest.TestCase):
         with self.assertRaises(coop.CoopError):
             coop.read_export(self.zip)
 
+    def test_overlay_over_a_base_file_keeps_the_base_one_for_anomaly(self):
+        rel = "gamedata/scripts/xrr_core.script"
+        with zipfile.ZipFile(self.zip, "a") as archive:
+            archive.writestr("gamma/" + rel, "-- overlay")
+        mod = self.gamma / "mods" / coop.MOD_NAME
+        coop.install(self.zip, self.anomaly, self.gamma, "G.A.M.M.A")
+        self.assertEqual((mod / rel).read_text(), "-- overlay")
+        coop.set_install_kind(self.anomaly, self.gamma, "G.A.M.M.A", coop.KIND_ANOMALY)
+        self.assertEqual((coop.state_dir(self.anomaly) / "files" / rel).read_text(), "-- core")
+        coop.set_install_kind(self.anomaly, self.gamma, "G.A.M.M.A", coop.KIND_GAMMA)
+        self.assertEqual((mod / rel).read_text(), "-- overlay")
+
+    def test_recover_swaps_without_a_gamma_folder_leaves_the_cwd_alone(self):
+        leftover = Path(self._tmp.name) / "cwd" / "mods" / "x.commander-new"
+        leftover.mkdir(parents=True)
+        old = os.getcwd()
+        os.chdir(leftover.parents[1])
+        try:
+            coop.recover_swaps("")
+        finally:
+            os.chdir(old)
+        self.assertTrue(leftover.is_dir())
+
 
 class PlainAnomalyCoopTests(unittest.TestCase):
     """Co-op on Anomaly alone: no MO2, so the gamedata half goes loose."""
@@ -976,3 +999,4 @@ class ModListMatchTests(unittest.TestCase):
             page.mods_paste.setPlainText("nonsense")
             self.assertEqual(page.mods_result.property("level"), "failed")
         page.deleteLater()
+
